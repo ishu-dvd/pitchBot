@@ -76,3 +76,26 @@
 - Alembic path configuration was updated to remove its legacy separator warning.
 - Self-review added idempotent privacy operations, non-empty suppression validation, timezone-required retention CLI input, and tests that closed aggregates cannot be recreated.
 - CI self-review removed duplicate feature-branch push runs; feature branches run through pull requests, while `main` pushes and manual dispatch remain available.
+
+## Provider contracts and deterministic mocks
+
+- **Date:** 2026-08-31
+- **Environment:** Windows, Python 3.12.10
+- **Branch:** `feat/provider-mocks`
+
+### Validation
+
+- `pytest`: passed (39 tests in 1.29 seconds, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (32 source files checked).
+
+### Self-review corrections
+
+- Corrected async streaming protocol shapes to return asynchronous iterators rather than coroutine-wrapped iterators.
+- Added strict idempotency fingerprints; identical retries are stable and different input with the same key is rejected.
+- Separated scheduler/artifact/object resource identifiers from operation idempotency keys.
+- Added one-probe half-open circuit behavior.
+- Bounded mock histories and minimized retained contact, message, prompt, URL, and audio content.
+- Kept disabled external adapters unconditionally fail-closed rather than accepting an enabled policy without an implementation.
+- Added boundary validation for timezone-aware audio, sequence/sample ranges, transcript confidence, media types, and action-result identifiers.
+- Final adversarial review capped the initial retry delay and ensured canceled/unexpected half-open probes release their slot and reopen safely.
