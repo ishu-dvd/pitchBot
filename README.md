@@ -9,9 +9,11 @@ The implemented application currently provides only:
 - Python packaging and development tooling.
 - A FastAPI application with a health endpoint.
 - Configuration whose external side effects are disabled by default.
+- Immutable typed domain contracts.
+- Alembic-managed SQLite event, aggregate-version, suppression, and privacy-operation storage.
 - CI, contribution, security, and branch-gate documentation.
 
-Conversation logic, storage, provider adapters, browser simulation, speech models, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+The storage repositories are not yet connected to the API. Conversation logic, provider adapters, browser simulation, speech models, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 
@@ -46,6 +48,7 @@ See:
 - [Compliance and privacy gates](docs/COMPLIANCE_AND_PRIVACY.md)
 - [Threat model](docs/THREAT_MODEL.md)
 - [Operations, cleanup, and rollback](docs/OPERATIONS.md)
+- [Domain and storage model](docs/DATA_MODEL.md)
 - [Source register](docs/SOURCES.md)
 - [Architecture decisions](docs/adrs/)
 

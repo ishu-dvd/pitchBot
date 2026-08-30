@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation is limited to the audited FastAPI foundation and default-off configuration. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, and Alembic-managed local persistence. Storage is not yet connected to API or conversation flows. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
