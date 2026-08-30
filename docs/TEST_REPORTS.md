@@ -25,3 +25,9 @@
 - `git diff --cached --check`: passed.
 - Post-commit `pytest`: passed (2 tests in 0.87 seconds).
 - Post-commit Ruff lint/format, mypy, and pre-commit hooks: passed.
+
+### PR CI correction
+
+- The initial application test job passed.
+- The initial Gitleaks job failed before scanning because its current PR integration requires the automatic GitHub Actions token explicitly.
+- Added least-privilege read permissions and passed `${{ secrets.GITHUB_TOKEN }}` only to the Gitleaks action.
