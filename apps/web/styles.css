@@ -1,0 +1,18 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  background: #f3f5f8;
+  color: #172033;
+}
+
+body { margin: 0; }
+main { max-width: 900px; margin: 0 auto; padding: 1rem; }
+section { background: white; border: 1px solid #d9deea; border-radius: 0.5rem; margin: 1rem 0; padding: 1rem; }
+label { display: block; margin: 0.6rem 0; }
+input, select, textarea, button { font: inherit; }
+textarea { box-sizing: border-box; width: 100%; }
+button { margin: 0.25rem; padding: 0.45rem 0.8rem; }
+.notice { background: #fff5cc; border-left: 4px solid #bc8500; padding: 0.75rem; }
+#timeline { max-height: 25rem; overflow: auto; }
+#timeline li { border-bottom: 1px solid #e5e8ef; padding: 0.5rem; white-space: pre-wrap; }
+.error { color: #a10000; }

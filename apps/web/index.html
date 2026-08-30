@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>PitchBot Simulator</title>
+  <link rel="stylesheet" href="/simulator/styles.css">
+</head>
+<body>
+  <main>
+    <h1>PitchBot Browser Simulator</h1>
+    <p class="notice">Simulation only. No call, message, callback, or artifact is sent.</p>
+
+    <section aria-labelledby="session-heading">
+      <h2 id="session-heading">Session</h2>
+      <label>Lead reference <input id="lead-ref" value="synthetic-buyer" pattern="[A-Za-z0-9_-]+" maxlength="100"></label>
+      <label>Language
+        <select id="language">
+          <option value="mixed">Hindi + English</option>
+          <option value="en">English</option>
+          <option value="hi">Hindi</option>
+        </select>
+      </label>
+      <button id="create-session">Create session</button>
+      <button id="close-session" disabled>Close session</button>
+      <span id="connection-status" role="status">Not connected</span>
+    </section>
+
+    <section aria-labelledby="turn-heading">
+      <h2 id="turn-heading">Simulated turn</h2>
+      <label for="turn-text">Buyer text</label>
+      <textarea id="turn-text" maxlength="4000" rows="4"></textarea>
+      <label>Action preview
+        <select id="preview-action">
+          <option value="none">None</option>
+          <option value="whatsapp-preview">WhatsApp preview</option>
+          <option value="callback-preview">Callback preview</option>
+          <option value="artifact-preview">Artifact preview</option>
+        </select>
+      </label>
+      <label>Latency (ms) <input id="latency" type="number" min="0" max="3000" value="0"></label>
+      <label><input id="inject-failure" type="checkbox"> Inject deterministic failure</label>
+      <div>
+        <button id="send-turn" disabled>Send turn</button>
+        <button id="interrupt" disabled>Interrupt playback</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="audio-heading">
+      <h2 id="audio-heading">Microphone transport</h2>
+      <p>Audio bytes are discarded by the server; only size/type metadata is retained.</p>
+      <button id="start-audio" disabled>Start microphone</button>
+      <button id="stop-audio" disabled>Stop microphone</button>
+      <output id="audio-diagnostics">Queue: 0, dropped: 0</output>
+    </section>
+
+    <section aria-labelledby="replay-heading">
+      <h2 id="replay-heading">Deterministic replay</h2>
+      <select id="scenario">
+        <option value="english-discovery">English discovery</option>
+        <option value="hindi-callback">Hindi callback</option>
+        <option value="hinglish-preview">Hinglish preview</option>
+      </select>
+      <button id="load-replay">Load replay</button>
+    </section>
+
+    <section aria-labelledby="preview-heading">
+      <h2 id="preview-heading">Action preview</h2>
+      <pre id="action-preview">None</pre>
+    </section>
+
+    <section aria-labelledby="timeline-heading">
+      <h2 id="timeline-heading">Timeline</h2>
+      <ol id="timeline"></ol>
+    </section>
+  </main>
+  <script type="module" src="/simulator/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect, status
+
+from pitchbot.simulator.models import (
+    AudioMetadata,
+    CreateSessionRequest,
+    LeadHistoryResponse,
+    SessionResponse,
+    TurnRequest,
+    TurnResponse,
+)
+from pitchbot.simulator.service import (
+    InjectedSimulatorError,
+    SessionNotFoundError,
+    SimulatorService,
+)
+
+router = APIRouter(prefix="/api/simulator", tags=["simulator"])
+simulator_service = SimulatorService()
+
+
+def is_allowed_websocket_origin(origin: str | None, host: str | None) -> bool:
+    if origin is None or host is None:
+        return False
+    return origin in {f"http://{host}", f"https://{host}"}
+
+
+@router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
+def create_session(request: CreateSessionRequest) -> SessionResponse:
+    try:
+        return simulator_service.create_session(request)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
+        ) from error
+
+
+@router.get("/sessions/{session_id}", response_model=SessionResponse)
+def get_session(session_id: UUID) -> SessionResponse:
+    try:
+        return simulator_service.get_session(session_id)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def close_session(session_id: UUID) -> Response:
+    try:
+        await simulator_service.close_session(session_id)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/sessions/{session_id}/turns", response_model=TurnResponse)
+async def process_turn(session_id: UUID, request: TurnRequest) -> TurnResponse:
+    try:
+        return await simulator_service.process_turn(session_id, request)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except InjectedSimulatorError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+
+
+@router.post("/sessions/{session_id}/interrupt", response_model=SessionResponse)
+async def interrupt(session_id: UUID) -> SessionResponse:
+    try:
+        return await simulator_service.interrupt(session_id)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.get("/sessions/{session_id}/history", response_model=LeadHistoryResponse)
+def get_lead_history(session_id: UUID) -> LeadHistoryResponse:
+    try:
+        return simulator_service.get_lead_history(session_id)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.get("/replay/{scenario_id}")
+def replay(scenario_id: str) -> dict[str, object]:
+    try:
+        return {"scenario_id": scenario_id, "turns": simulator_service.replay(scenario_id)}
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.websocket("/sessions/{session_id}/audio")
+async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
+    if not is_allowed_websocket_origin(
+        websocket.headers.get("origin"),
+        websocket.headers.get("host"),
+    ):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    try:
+        simulator_service.get_session(session_id)
+    except SessionNotFoundError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+    media_type = websocket.query_params.get("media_type", "application/octet-stream")
+    if len(media_type) > 100:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    try:
+        while True:
+            audio = await websocket.receive_bytes()
+            if len(audio) > 262_144:
+                await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+                return
+            try:
+                event = await simulator_service.record_audio_metadata(
+                    session_id,
+                    AudioMetadata(
+                        byte_count=len(audio),
+                        media_type=media_type,
+                        captured_at=datetime.now(UTC),
+                    ),
+                )
+            except SessionNotFoundError:
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                return
+            except RuntimeError:
+                await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
+                return
+            await websocket.send_json(
+                {
+                    "acknowledged_sequence": event.sequence,
+                    "byte_count": len(audio),
+                    "audio_retained": False,
+                }
+            )
+    except WebSocketDisconnect:
+        return
