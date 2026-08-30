@@ -12,9 +12,10 @@ The implemented application currently provides only:
 - Immutable typed domain contracts.
 - Alembic-managed SQLite event, aggregate-version, suppression, and privacy-operation storage.
 - Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
+- A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
 - CI, contribution, security, and branch-gate documentation.
 
-Storage and provider contracts are not yet connected to the API. Concrete speech/model providers, conversation logic, browser simulation, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+The simulator is process-local and is not yet connected to durable storage, provider mocks, or conversation intelligence. Concrete speech/model providers, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 
@@ -51,6 +52,7 @@ See:
 - [Operations, cleanup, and rollback](docs/OPERATIONS.md)
 - [Domain and storage model](docs/DATA_MODEL.md)
 - [Provider contracts and deterministic mocks](docs/PROVIDER_CONTRACTS.md)
+- [Browser simulator](docs/SIMULATOR.md)
 - [Source register](docs/SOURCES.md)
 - [Architecture decisions](docs/adrs/)
 
@@ -71,6 +73,7 @@ python -m uvicorn pitchbot.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000/health` to confirm the API is running.
+Open `http://127.0.0.1:8000/simulator/` for the synthetic browser simulator.
 
 ## Validation
 
