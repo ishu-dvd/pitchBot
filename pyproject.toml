@@ -11,8 +11,11 @@ requires-python = ">=3.12"
 authors = [{ name = "PitchBot Team" }]
 dependencies = [
   "fastapi>=0.115.0",
+  "pydantic>=2.9.2,<3",
   "uvicorn[standard]>=0.30.6",
   "pydantic-settings>=2.5.2",
+  "sqlalchemy>=2.0.35,<3",
+  "alembic>=1.13.3,<2",
 ]
 
 [project.optional-dependencies]
