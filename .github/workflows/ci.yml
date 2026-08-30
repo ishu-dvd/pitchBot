@@ -30,6 +30,10 @@ jobs:
         run: mypy src tests
       - name: Tests
         run: pytest
+      - name: Migration check
+        env:
+          PITCHBOT_DATABASE_URL: sqlite:///./migration-check.db
+        run: alembic upgrade head
       - name: Dependency audit
         run: pip-audit
 
