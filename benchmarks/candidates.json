@@ -1,0 +1,78 @@
+{
+  "registry_version": "1",
+  "reviewed_at": "2026-08-31T00:00:00Z",
+  "candidates": [
+    {
+      "candidate_id": "faster-whisper",
+      "kinds": ["stt"],
+      "repository_url": "https://github.com/SYSTRAN/faster-whisper",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Python/CTranslate2 candidate; benchmark streaming integration and model-specific licenses."
+    },
+    {
+      "candidate_id": "whisper.cpp",
+      "kinds": ["stt"],
+      "repository_url": "https://github.com/ggml-org/whisper.cpp",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Portable quantized CPU candidate."
+    },
+    {
+      "candidate_id": "silero-vad",
+      "kinds": ["vad"],
+      "repository_url": "https://github.com/snakers4/silero-vad",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Benchmark speech boundaries, noise, crosstalk, and CPU usage."
+    },
+    {
+      "candidate_id": "py-webrtcvad",
+      "kinds": ["vad"],
+      "repository_url": "https://github.com/wiseman/py-webrtcvad",
+      "repository_license": "NOASSERTION",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": false,
+      "notes": "GitHub API exposed no SPDX license; manual license review required before selection."
+    },
+    {
+      "candidate_id": "llama.cpp",
+      "kinds": ["model"],
+      "repository_url": "https://github.com/ggml-org/llama.cpp",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Local structured-output runtime candidate; each model license remains separate."
+    },
+    {
+      "candidate_id": "ollama",
+      "kinds": ["model"],
+      "repository_url": "https://github.com/ollama/ollama",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Developer-convenience adapter candidate, not the domain contract."
+    },
+    {
+      "candidate_id": "piper1-gpl",
+      "kinds": ["tts"],
+      "repository_url": "https://github.com/OHF-Voice/piper1-gpl",
+      "repository_license": "GPL-3.0",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Current maintained repository is GPL-3.0; distribution implications and each voice license require review."
+    },
+    {
+      "candidate_id": "indic-tts",
+      "kinds": ["tts"],
+      "repository_url": "https://github.com/AI4Bharat/Indic-TTS",
+      "repository_license": "MIT",
+      "repository_license_verified_at": "2026-08-31T00:00:00Z",
+      "model_or_voice_license_required": true,
+      "notes": "Hindi candidate; repository activity and each model/voice artifact require review."
+    }
+  ]
+}
