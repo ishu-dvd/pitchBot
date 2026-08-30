@@ -75,3 +75,4 @@
 - Retention now normalizes UTC cutoffs, preserves aggregate version heads, and cannot reset version continuity.
 - Alembic path configuration was updated to remove its legacy separator warning.
 - Self-review added idempotent privacy operations, non-empty suppression validation, timezone-required retention CLI input, and tests that closed aggregates cannot be recreated.
+- CI self-review removed duplicate feature-branch push runs; feature branches run through pull requests, while `main` pushes and manual dispatch remain available.
