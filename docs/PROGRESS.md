@@ -46,3 +46,13 @@
 - **Safety decisions:** No SDK or socket client is included; external adapters fail closed; mock histories minimize sensitive content and enforce capacity; conflicting idempotency-key reuse fails; one half-open circuit probe is allowed.
 - **Deferred:** Concrete providers, dependency injection/API wiring, persistent scheduler, browser audio transport, and provider benchmarks.
 - **Rollback:** Revert the PR. It changes no schema, runtime data, provider credential, or external action.
+
+## PR 5: Browser simulator
+
+- **Branch:** `feat/browser-simulator`
+- **Status:** Implementation, mandatory self-review, and local validation complete; commits, push, CI, and PR pending.
+- **Base:** Merged PR 4 commit `8034f74`.
+- **Scope:** Same-origin static simulator and FastAPI routes, disclosure-first synthetic sessions, language selection, text turns, explicit previews, bounded history, deterministic replay/failure/latency, interruption, microphone transport, backpressure, reconnect, and cleanup.
+- **Safety decisions:** No CORS middleware; no real action; synthetic data only; audio bytes discarded after metadata capture; session-scoped history; bounded sessions/events/audio/queues; restrictive browser headers.
+- **Deferred:** Conversation state machine, extraction/classification, speech providers, durable simulator persistence, authenticated public deployment, and lossless/WebRTC transport.
+- **Rollback:** Revert the PR. The simulator uses process-local memory and creates no database or external provider state.

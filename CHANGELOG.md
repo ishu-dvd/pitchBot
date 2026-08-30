@@ -17,6 +17,8 @@ All notable changes to PitchBot are documented here.
 - Durable aggregate versions, suppression history, privacy-operation audit, redacted export, confirmed anonymization/deletion, and retention controls.
 - Provider-neutral speech, model, channel, scheduler, research, artifact, object-storage, and clock contracts.
 - Deterministic bounded mocks with strict idempotency, fault injection, network denial, retries, timeouts, and circuit breaking.
+- Same-origin browser simulator with AI disclosure, text turns, explicit action previews, deterministic replay/failures/latency, bounded history, interruption, and session cleanup.
+- Bounded metadata-only `MediaRecorder`/WebSocket transport with Opus preference, backpressure, chunk limits, and capped reconnects.
 
 ### Security
 

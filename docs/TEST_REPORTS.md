@@ -99,3 +99,24 @@
 - Kept disabled external adapters unconditionally fail-closed rather than accepting an enabled policy without an implementation.
 - Added boundary validation for timezone-aware audio, sequence/sample ranges, transcript confidence, media types, and action-result identifiers.
 - Final adversarial review capped the initial retry delay and ensured canceled/unexpected half-open probes release their slot and reopen safely.
+
+## Browser simulator
+
+- **Date:** 2026-08-31
+- **Environment:** Windows, Python 3.12.10
+- **Branch:** `feat/browser-simulator`
+
+### Final validation
+
+- `pytest`: passed (54 tests in 3.07 seconds, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (40 source files checked).
+- Browser JavaScript module syntax: passed with Node 24.12.0.
+
+### Mandatory pre-commit self-review
+
+- Removed cross-session history keyed by reusable lead references; history is now bounded within the session capability.
+- Added generation-based microphone startup cancellation and reconnect-timer cleanup so closing a session cannot resurrect audio.
+- Tightened Content Security Policy connections to same-origin only.
+- Added server-side WebSocket Origin/Host validation to prevent cross-site socket use.
+- Added explicit session closure/capacity recovery and clean WebSocket handling when sessions close.
