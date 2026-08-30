@@ -23,3 +23,5 @@
 - `pre-commit run --all-files`: passed (Ruff lint and format hooks).
 - Staged common-secret and Indian phone-number pattern scan: passed.
 - `git diff --cached --check`: passed.
+- Post-commit `pytest`: passed (2 tests in 0.87 seconds).
+- Post-commit Ruff lint/format, mypy, and pre-commit hooks: passed.
