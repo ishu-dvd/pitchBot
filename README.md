@@ -2,7 +2,9 @@
 
 PitchBot is a zero-cost-first, bilingual sales-assistant project for English and Hindi e-commerce discovery conversations.
 
-This foundation milestone provides only:
+## Current status
+
+The implemented application currently provides only:
 
 - Python packaging and development tooling.
 - A FastAPI application with a health endpoint.
@@ -10,6 +12,42 @@ This foundation milestone provides only:
 - CI, contribution, security, and branch-gate documentation.
 
 Conversation logic, storage, provider adapters, browser simulation, speech models, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+
+## Target architecture
+
+```mermaid
+flowchart LR
+    UI[Browser simulator / data call] <--> API[FastAPI control plane]
+    API --> Conversation[Conversation state machine]
+    Conversation <--> Speech[STT / TTS / VAD adapters]
+    Conversation <--> Model[Local model adapter]
+    Conversation --> Policy[Deterministic policy engine]
+    Conversation --> Store[(Append-only lead journey)]
+    Policy --> Actions[Guarded action dispatcher]
+    Actions --> Mock[Mock channels]
+    Actions -. separately activated .-> Official[Official live providers]
+    Evals[Replay and evaluations] --> API
+```
+
+The target design uses three profiles:
+
+- **`local-full`** — authoritative zero-cost development and evaluation on existing hardware.
+- **`hosted-demo`** — optional synthetic-data-only demonstration with no SLA or live side effects.
+- **`live-disabled`** — future official provider adapters requiring compliance and operator activation.
+
+See [Architecture](docs/ARCHITECTURE.md) for component, sequence, deployment, data-flow, provider-boundary, and latency details.
+
+## Safety and compliance
+
+When live capabilities are implemented, PitchBot must identify itself as an AI sales assistant. The target policy design blocks live outreach until consent/legal-basis, DND, calling-hour, suppression, recording, privacy, official-provider, usage-cap, and operator-approval gates pass. Unknown policy state must fail closed.
+
+See:
+
+- [Compliance and privacy gates](docs/COMPLIANCE_AND_PRIVACY.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Operations, cleanup, and rollback](docs/OPERATIONS.md)
+- [Source register](docs/SOURCES.md)
+- [Architecture decisions](docs/adrs/)
 
 ## Requirements
 
@@ -39,8 +77,8 @@ python -m pytest
 python -m pip_audit
 ```
 
-## Safety defaults
+## Foundation safety defaults
 
 Telephony, WhatsApp, external network access, real-time audio, and hosted-demo behavior are disabled in `.env.example`. Never commit `.env`, credentials, phone numbers, personal audio, or live transcripts.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [docs/BRANCHING_AND_GATES.md](docs/BRANCHING_AND_GATES.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [branching and merge gates](docs/BRANCHING_AND_GATES.md).

@@ -31,3 +31,24 @@
 - The initial application test job passed.
 - The initial Gitleaks job failed before scanning because its current PR integration requires the automatic GitHub Actions token explicitly.
 - Added least-privilege read permissions and passed `${{ secrets.GITHUB_TOKEN }}` only to the Gitleaks action.
+
+## Architecture and compliance documentation
+
+- **Date:** 2026-08-30
+- **Environment:** Windows, Python 3.12.10
+- **Branch:** `docs/architecture-compliance`
+
+### Documentation validation
+
+- Local Markdown links: passed.
+- Markdown code-fence and trailing-whitespace checks: passed for 18 files.
+- Official external source reachability: 16 returned HTTP 200; the MeitY portal returned access-restricted HTTP 403 and is documented as such.
+- Documentation review: corrected current-vs-target enforcement wording and characterized government portal links as non-legal citations.
+
+### Regression validation
+
+- `pytest`: passed (2 tests in 0.99 seconds).
+- Ruff lint and format checks: passed.
+- `mypy src tests`: passed (5 source files checked).
+- `pre-commit run --all-files`: passed.
+- `git diff --check`: passed.
