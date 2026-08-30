@@ -19,6 +19,8 @@ All notable changes to PitchBot are documented here.
 - Deterministic bounded mocks with strict idempotency, fault injection, network denial, retries, timeouts, and circuit breaking.
 - Same-origin browser simulator with AI disclosure, text turns, explicit action previews, deterministic replay/failures/latency, bounded history, interruption, and session cleanup.
 - Bounded metadata-only `MediaRecorder`/WebSocket transport with Opus preference, backpressure, chunk limits, and capped reconnects.
+- Versioned VAD/STT/TTS/model candidate and synthetic corpus registries with license/provenance gates.
+- Unicode-aware WER/CER, VAD overlap, real-time factor, structured-output, duration-regression, timing, environment, and manifest validation utilities.
 
 ### Security
 

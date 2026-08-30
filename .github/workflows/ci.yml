@@ -35,6 +35,10 @@ jobs:
         env:
           PITCHBOT_DATABASE_URL: sqlite:///./migration-check.db
         run: alembic upgrade head
+      - name: Benchmark manifest check
+        run: |
+          pitchbot-bench validate-candidates benchmarks/candidates.json
+          pitchbot-bench validate-corpus evals/corpora/speech-cases.json
       - name: Dependency audit
         run: pip-audit
 

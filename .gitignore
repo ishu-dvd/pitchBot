@@ -22,6 +22,8 @@ secrets/
 data/
 logs/
 artifacts/
+benchmark-results/
+model-cache/
 
 # IDE
 .vs/

@@ -56,3 +56,15 @@
 - **Safety decisions:** No CORS middleware; no real action; synthetic data only; audio bytes discarded after metadata capture; session-scoped history; bounded sessions/events/audio/queues; restrictive browser headers.
 - **Deferred:** Conversation state machine, extraction/classification, speech providers, durable simulator persistence, authenticated public deployment, and lossless/WebRTC transport.
 - **Rollback:** Revert the PR. The simulator uses process-local memory and creates no database or external provider state.
+
+## PR 6: Speech and local runtime benchmark harness
+
+- **Branch:** `bench/speech-runtime`
+- **Status:** Implementation, mandatory self-review, and final local validation complete; commits, push, CI, and PR pending.
+- **Base:** Merged PR 5 commit `6e64ddf`.
+- **Scope:** Candidate/license registry, planned synthetic speech corpus, manifest/hash/provenance validation, VAD/STT/TTS/model metrics, timing/environment helpers, CLI, CI manifest gates, and model-selection ADR.
+- **Expanded coverage:** English/Hindi/Hinglish; noise, crosstalk, silence, interruption, repetition, accents, names/numbers; apparel, toys, books, food, import/export, and plastics vocabulary; audio intelligibility/consistency methodology.
+- **Safety decisions:** No model/voice selection, model download, private/copyrighted audio, or placeholder benchmark result; code and model/voice licenses are separate gates; voice similarity cannot target an identifiable person.
+- **Current environment:** Windows 11, Python 3.12.10, 8 logical CPUs, no accelerator declared.
+- **Deferred:** Actual model measurements require reviewed audio, exact model revisions/licenses, and labeled target hardware.
+- **Rollback:** Revert the PR. It introduces no runtime model, external provider, database migration, or measured baseline.

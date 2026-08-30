@@ -18,6 +18,9 @@ dependencies = [
   "alembic>=1.13.3,<2",
 ]
 
+[project.scripts]
+pitchbot-bench = "pitchbot.benchmarks.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3.3",

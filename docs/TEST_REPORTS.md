@@ -120,3 +120,29 @@
 - Tightened Content Security Policy connections to same-origin only.
 - Added server-side WebSocket Origin/Host validation to prevent cross-site socket use.
 - Added explicit session closure/capacity recovery and clean WebSocket handling when sessions close.
+
+## Speech and local runtime benchmark harness
+
+- **Date:** 2026-08-31
+- **Environment:** Windows 11, Python 3.12.10, Intel64 CPU, 8 logical CPUs, no accelerator declared
+- **Branch:** `bench/speech-runtime`
+
+### Final validation
+
+- `pytest`: passed (73 tests in 4.55 seconds, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (51 source files checked).
+- Candidate registry: validated 8 entries.
+- Planned corpus: validated 12 entries; canonical SHA-256 `5b7927b81b856d60aedc11d1d95960e39e8f21c568b6b54455a72cc8e8ea1526`.
+- Benchmark CLI environment capture: passed.
+
+No VAD, STT, TTS, STS, or model result is claimed by this report.
+
+### Mandatory pre-commit self-review
+
+- Rejected NaN/Infinity in intervals, durations, timers, and measured metrics.
+- Penalized extra structured-output fields rather than ignoring hallucinated keys.
+- Required generated/available audio files, in-manifest paths, bounded size, SHA-256, and provenance; planned items cannot carry unverified audio evidence.
+- Bounded manifest, audio, and transcript inputs and rejected non-standard JSON constants.
+- Required non-empty finite metrics plus exact non-placeholder candidate revision and verified model/voice license for measured results.
+- Prevented overlapping process-global `tracemalloc` measurements.

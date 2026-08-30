@@ -13,6 +13,7 @@ The implemented application currently provides only:
 - Alembic-managed SQLite event, aggregate-version, suppression, and privacy-operation storage.
 - Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
 - A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
+- Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
 - CI, contribution, security, and branch-gate documentation.
 
 The simulator is process-local and is not yet connected to durable storage, provider mocks, or conversation intelligence. Concrete speech/model providers, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
@@ -53,6 +54,7 @@ See:
 - [Domain and storage model](docs/DATA_MODEL.md)
 - [Provider contracts and deterministic mocks](docs/PROVIDER_CONTRACTS.md)
 - [Browser simulator](docs/SIMULATOR.md)
+- [Speech and local runtime benchmarks](docs/BENCHMARKS.md)
 - [Source register](docs/SOURCES.md)
 - [Architecture decisions](docs/adrs/)
 

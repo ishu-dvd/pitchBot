@@ -1,4 +1,4 @@
-.PHONY: install format lint type test migrations audit check run
+.PHONY: install format lint type test migrations benchmarks audit check run
 
 install:
     python -m pip install -r requirements-dev.lock
@@ -21,10 +21,14 @@ migrations:
     python -c "from pathlib import Path; Path('data').mkdir(exist_ok=True)"
     python -m alembic upgrade head
 
+benchmarks:
+    python -m pitchbot.benchmarks.cli validate-candidates benchmarks/candidates.json
+    python -m pitchbot.benchmarks.cli validate-corpus evals/corpora/speech-cases.json
+
 audit:
     python -m pip_audit
 
-check: lint type test migrations audit
+check: lint type test migrations benchmarks audit
 
 run:
     python -m uvicorn pitchbot.main:app --reload --app-dir src

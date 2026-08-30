@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, and a process-local browser simulator. Storage/adapters are not yet connected to simulator conversation flows. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, and speech/runtime benchmark manifests and metrics. Storage/adapters are not yet connected to simulator conversation flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
