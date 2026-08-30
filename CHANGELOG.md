@@ -13,6 +13,8 @@ All notable changes to PitchBot are documented here.
 - Contribution, security, branching, progress, and test-report documentation.
 - Target component, sequence, deployment, and data-flow architecture.
 - Compliance/privacy gates, threat model, operational rollback guidance, source register, and architecture decision records.
+- Immutable domain contracts and Alembic-managed append-only journey storage.
+- Durable aggregate versions, suppression history, privacy-operation audit, redacted export, confirmed anonymization/deletion, and retention controls.
 
 ### Security
 

@@ -26,3 +26,13 @@
 - **Scope:** Target architecture, deployment profiles, trust boundaries, threat model, compliance/privacy gates, operational cleanup/rollback, source register, and architecture decisions.
 - **Implementation impact:** Documentation only; no runtime capability or external side effect is added.
 - **Rollback:** Revert the documentation PR. No application state or external provider is changed.
+
+## PR 3: Domain and storage
+
+- **Branch:** `feat/domain-storage`
+- **Status:** Implementation and local validation complete; commits, push, CI, and PR pending.
+- **Base:** Merged PR 2 commit `0da0349`.
+- **Scope:** Immutable domain contracts, Alembic-managed SQLite schema, append-only events and suppression, durable aggregate versions, optimistic concurrency, redacted export, privacy operations, retention, and operator CLI.
+- **Safety decisions:** Contact policy defaults deny outreach; suppression survives hard deletion; anonymized/deleted aggregates retain closed tombstones and reject future writes; privacy operations are idempotent; retention is timezone-explicit, dry-run by default, and protects opt-out/revocation events.
+- **Deferred:** API integration, encryption/key management, PostgreSQL runtime testing, providers, scheduler, and conversation workflows.
+- **Rollback:** Revert the PR before applying its migration. After applying it, run the reviewed Alembic downgrade only when no retained data is required; never delete a live database merely to roll back code.

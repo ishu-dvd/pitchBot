@@ -52,3 +52,26 @@
 - `mypy src tests`: passed (5 source files checked).
 - `pre-commit run --all-files`: passed.
 - `git diff --check`: passed.
+
+## Domain and storage
+
+- **Date:** 2026-08-30
+- **Environment:** Windows, Python 3.12.10, SQLite
+- **Branch:** `feat/domain-storage`
+
+### Validation
+
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (21 source files checked).
+- `pytest`: passed (19 tests in 2.09 seconds, no warnings).
+- Fresh `alembic upgrade head`: passed.
+- `alembic check`: passed; no schema drift detected.
+- `pip-audit --skip-editable`: passed; no known vulnerabilities found.
+
+### Failures found and corrected
+
+- Test migrations initially followed a lingering `PITCHBOT_DATABASE_URL`; fixtures now scope the environment to each temporary database.
+- Hard deletion initially removed suppression and aggregate heads; it now preserves suppression, closes a durable aggregate tombstone, records the privacy operation, and rejects future writes.
+- Retention now normalizes UTC cutoffs, preserves aggregate version heads, and cannot reset version continuity.
+- Alembic path configuration was updated to remove its legacy separator warning.
+- Self-review added idempotent privacy operations, non-empty suppression validation, timezone-required retention CLI input, and tests that closed aggregates cannot be recreated.

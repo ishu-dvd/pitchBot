@@ -9,7 +9,17 @@ Copy-Item .env.example .env
 python -m uvicorn pitchbot.main:app --reload
 ```
 
-Stop with `Ctrl+C`. The foundation creates no database, queue, generated artifact, provider account, or external message.
+Stop with `Ctrl+C`. The API does not initialize storage automatically and creates no queue, generated artifact, provider account, or external message.
+
+To create or upgrade the local SQLite schema:
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+python -m alembic upgrade head
+python -m alembic check
+```
+
+See [Domain and storage model](DATA_MODEL.md) for redacted export, confirmed anonymization/deletion, and dry-run retention commands.
 
 ## Planned profile controls
 
