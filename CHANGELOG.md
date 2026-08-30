@@ -11,6 +11,8 @@ All notable changes to PitchBot are documented here.
 - Default-off configuration for all external side effects.
 - Ruff, mypy, pytest, pre-commit, dependency audit, and CI configuration.
 - Contribution, security, branching, progress, and test-report documentation.
+- Target component, sequence, deployment, and data-flow architecture.
+- Compliance/privacy gates, threat model, operational rollback guidance, source register, and architecture decision records.
 
 ### Security
 

@@ -17,3 +17,12 @@
 - Removed permissive wildcard CORS and simulator endpoints from the foundation API.
 - Removed placeholder VAD benchmark numbers so they cannot be mistaken for measurements.
 - Removed the destructive storage utility and duplicate unmanaged schema approach pending the reviewed storage milestone.
+
+## PR 2: Architecture and compliance documentation
+
+- **Branch:** `docs/architecture-compliance`
+- **Status:** Documentation and local validation complete; commits, push, CI, and PR pending.
+- **Base:** Merged PR 1 commit `ee9b2c1`
+- **Scope:** Target architecture, deployment profiles, trust boundaries, threat model, compliance/privacy gates, operational cleanup/rollback, source register, and architecture decisions.
+- **Implementation impact:** Documentation only; no runtime capability or external side effect is added.
+- **Rollback:** Revert the documentation PR. No application state or external provider is changed.
