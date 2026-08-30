@@ -11,9 +11,10 @@ The implemented application currently provides only:
 - Configuration whose external side effects are disabled by default.
 - Immutable typed domain contracts.
 - Alembic-managed SQLite event, aggregate-version, suppression, and privacy-operation storage.
+- Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
 - CI, contribution, security, and branch-gate documentation.
 
-The storage repositories are not yet connected to the API. Conversation logic, provider adapters, browser simulation, speech models, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+Storage and provider contracts are not yet connected to the API. Concrete speech/model providers, conversation logic, browser simulation, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 
@@ -49,6 +50,7 @@ See:
 - [Threat model](docs/THREAT_MODEL.md)
 - [Operations, cleanup, and rollback](docs/OPERATIONS.md)
 - [Domain and storage model](docs/DATA_MODEL.md)
+- [Provider contracts and deterministic mocks](docs/PROVIDER_CONTRACTS.md)
 - [Source register](docs/SOURCES.md)
 - [Architecture decisions](docs/adrs/)
 

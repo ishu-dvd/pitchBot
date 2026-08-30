@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, and Alembic-managed local persistence. Storage is not yet connected to API or conversation flows. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, and resilience primitives. Storage and adapters are not yet connected to API or conversation flows. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -169,6 +169,8 @@ Planned interfaces:
 - Safe web research and artifact generation.
 
 Contract tests must ensure swapping a provider does not change domain or policy behavior.
+
+The interfaces, disabled external adapters, deterministic mocks, retry/timeout helper, circuit breaker, and clocks are implemented. Concrete provider integrations remain planned. See [Provider contracts and deterministic mocks](PROVIDER_CONTRACTS.md).
 
 ## Availability and latency
 
