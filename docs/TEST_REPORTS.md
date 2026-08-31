@@ -138,6 +138,34 @@
 
 No VAD, STT, TTS, STS, or model result is claimed by this report.
 
+## Evaluation and latency contracts
+
+- **Date:** 2026-09-01
+- **Environment:** Windows 11, Python 3.12.10, SQLite
+- **Branch:** `feat/evaluation-contracts`
+
+### Final validation
+
+- `pytest`: passed (132 tests).
+- Ruff lint and format: passed (91 files checked).
+- `mypy src tests`: passed (64 source files checked).
+- `pre-commit run --all-files`: passed.
+- Candidate registry and synthetic speech corpus validation: passed.
+- Generated evaluation JSON Schema drift test: passed.
+- Browser JavaScript syntax: passed.
+- Fresh Alembic upgrade and schema-drift check: passed.
+- Local Markdown links and code fences: passed.
+- `pip-audit`: no known vulnerabilities; the local project is not published on PyPI and was skipped.
+
+### Adversarial self-review corrections
+
+- Made `evaluation_schema_version` mandatory.
+- Added state-dependent JSON Schema conditions while retaining CLI validation as the authority for semantic and cross-item invariants.
+- Replaced unrestricted evaluation hardware notes with bounded identifiers and numeric capacity fields.
+- Prevented report generation from overwriting its source artifact through direct paths, symlinks, or hard-link aliases.
+
+No speech, retrieval, model, or production-latency result is claimed. Passing artifact thresholds remain evidence for review, not automatic promotion.
+
 ### Mandatory pre-commit self-review
 
 - Rejected NaN/Infinity in intervals, durations, timers, and measured metrics.

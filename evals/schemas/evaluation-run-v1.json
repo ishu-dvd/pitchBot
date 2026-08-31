@@ -1,0 +1,498 @@
+{
+  "$defs": {
+    "EvaluationCaseResult": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "failure_codes": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "failure_codes"
+            ]
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "failure_codes": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "case_id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$",
+          "title": "Case Id",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "number"
+        },
+        "failure_codes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvaluationLabel"
+          },
+          "maxItems": 32,
+          "title": "Failure Codes",
+          "type": "array"
+        },
+        "industry": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$",
+          "title": "Industry",
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/$defs/LanguageCode"
+        },
+        "metrics": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvaluationMetric"
+          },
+          "maxItems": 128,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "persona": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$",
+          "title": "Persona",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/EvaluationCaseStatus"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvaluationLabel"
+          },
+          "maxItems": 32,
+          "title": "Tags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "case_id",
+        "status",
+        "language",
+        "industry",
+        "persona",
+        "duration_ms"
+      ],
+      "title": "EvaluationCaseResult",
+      "type": "object"
+    },
+    "EvaluationCaseStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "error"
+      ],
+      "title": "EvaluationCaseStatus",
+      "type": "string"
+    },
+    "EvaluationHardwareProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "accelerator": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+@()/-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Accelerator"
+        },
+        "architecture": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+@()/-]{0,63}$",
+          "title": "Architecture",
+          "type": "string"
+        },
+        "logical_cpu_count": {
+          "anyOf": [
+            {
+              "maximum": 4096,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Logical Cpu Count"
+        },
+        "operating_system": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+@()/-]{0,127}$",
+          "title": "Operating System",
+          "type": "string"
+        },
+        "physical_memory_bytes": {
+          "anyOf": [
+            {
+              "maximum": 9223372036854775807,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Physical Memory Bytes"
+        },
+        "processor": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._+@()/-]{0,127}$",
+          "title": "Processor",
+          "type": "string"
+        },
+        "python_version": {
+          "pattern": "^[0-9][0-9a-z.+-]{0,31}$",
+          "title": "Python Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operating_system",
+        "architecture",
+        "python_version",
+        "processor"
+      ],
+      "title": "EvaluationHardwareProfile",
+      "type": "object"
+    },
+    "EvaluationLabel": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "type": "string"
+    },
+    "EvaluationMetric": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "threshold": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "threshold"
+            ]
+          },
+          "if": {
+            "properties": {
+              "direction": {
+                "const": "informational"
+              }
+            },
+            "required": [
+              "direction"
+            ]
+          },
+          "then": {
+            "properties": {
+              "threshold": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "direction": {
+          "$ref": "#/$defs/MetricDirection"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_.-]{1,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold"
+        },
+        "unit": {
+          "pattern": "^[a-z][a-z0-9_/%.-]{0,31}$",
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "unit",
+        "direction"
+      ],
+      "title": "EvaluationMetric",
+      "type": "object"
+    },
+    "EvaluationRunStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed"
+      ],
+      "title": "EvaluationRunStatus",
+      "type": "string"
+    },
+    "LanguageCode": {
+      "enum": [
+        "en",
+        "hi",
+        "mixed",
+        "unknown"
+      ],
+      "title": "LanguageCode",
+      "type": "string"
+    },
+    "MetricDirection": {
+      "enum": [
+        "at-most",
+        "at-least",
+        "informational"
+      ],
+      "title": "MetricDirection",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "running"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "type": "null"
+          },
+          "run_failure_code": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "completed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "cases": {
+            "minItems": 1
+          },
+          "completed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "run_failure_code": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "cases",
+          "completed_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "run_failure_code": {
+            "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "completed_at",
+          "run_failure_code"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "cases": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EvaluationCaseResult"
+      },
+      "maxItems": 2000,
+      "title": "Cases",
+      "type": "array"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    },
+    "configuration_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Configuration Sha256",
+      "type": "string"
+    },
+    "corpus_id": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$",
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "corpus_manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Corpus Manifest Sha256",
+      "type": "string"
+    },
+    "corpus_version": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "title": "Corpus Version",
+      "type": "string"
+    },
+    "evaluation_schema_version": {
+      "const": "1",
+      "title": "Evaluation Schema Version",
+      "type": "string"
+    },
+    "git_revision": {
+      "pattern": "^[a-f0-9]{7,64}$",
+      "title": "Git Revision",
+      "type": "string"
+    },
+    "hardware": {
+      "$ref": "#/$defs/EvaluationHardwareProfile"
+    },
+    "metrics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EvaluationMetric"
+      },
+      "maxItems": 256,
+      "title": "Metrics",
+      "type": "array"
+    },
+    "run_failure_code": {
+      "anyOf": [
+        {
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Run Failure Code"
+    },
+    "run_id": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/EvaluationRunStatus"
+    },
+    "suite_id": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$",
+      "title": "Suite Id",
+      "type": "string"
+    },
+    "suite_manifest_sha256": {
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Suite Manifest Sha256",
+      "type": "string"
+    },
+    "suite_version": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+      "title": "Suite Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evaluation_schema_version",
+    "run_id",
+    "status",
+    "git_revision",
+    "suite_id",
+    "suite_version",
+    "suite_manifest_sha256",
+    "corpus_id",
+    "corpus_version",
+    "corpus_manifest_sha256",
+    "configuration_sha256",
+    "hardware",
+    "started_at"
+  ],
+  "title": "EvaluationRun",
+  "type": "object"
+}

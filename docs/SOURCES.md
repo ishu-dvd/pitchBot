@@ -1,6 +1,6 @@
 # Source Register
 
-Last reviewed: 2026-08-30.
+Last reviewed: 2026-09-01.
 
 Provider capabilities, policies, pricing, free tiers, and regulations change. Revalidate every applicable source and record the review date before implementing or enabling a live adapter. Links are references, not legal approval.
 
@@ -37,5 +37,17 @@ These portal links are not legal citations. The project must identify the applic
 - [`whisper.cpp`](https://github.com/ggml-org/whisper.cpp)
 - [`silero-vad`](https://github.com/snakers4/silero-vad)
 - [`llama.cpp`](https://github.com/ggml-org/llama.cpp)
+- [`sqlite-vec`](https://github.com/asg017/sqlite-vec)
+- [`hnswlib`](https://github.com/nmslib/hnswlib)
+- [FAISS](https://github.com/facebookresearch/faiss)
+- [BGE-M3](https://huggingface.co/BAAI/bge-m3)
 
 Inclusion here is not selection. The benchmark PR must record repository revision, model license, model-card restrictions, resource use, accuracy, and latency on labeled hardware.
+
+## Evaluation and local observability
+
+- [OpenTelemetry documentation](https://opentelemetry.io/docs/what-is-opentelemetry/) — vendor-neutral future trace and metric contracts.
+- [Arize Phoenix documentation](https://arize.com/docs/phoenix) — optional local trace/evaluation viewer candidate.
+- [MLflow GenAI documentation](https://mlflow.org/docs/latest/genai/) — optional local run/evaluation tracking candidate.
+
+These services are not dependencies and no exporter is enabled. The portable JSON snapshot and static local report remain the baseline.

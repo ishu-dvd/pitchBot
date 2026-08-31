@@ -28,6 +28,23 @@ def test_cli_scores_transcript_and_reports_environment(
     assert environment["operating_system"]
 
 
+def test_cli_emits_evaluation_schema(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["evaluation-schema"]) == 0
+    schema = json.loads(capsys.readouterr().out)
+    assert schema["title"] == "EvaluationRun"
+    assert schema["properties"]["evaluation_schema_version"]["const"] == "1"
+
+    output = tmp_path / "nested" / "schema.json"
+    assert main(["evaluation-schema", "--output", str(output)]) == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == schema
+    with pytest.raises(FileExistsError):
+        main(["evaluation-schema", "--output", str(output)])
+    assert main(["evaluation-schema", "--output", str(output), "--force"]) == 0
+
+
 def test_manifest_files_do_not_contain_phone_numbers() -> None:
     content = Path("evals/corpora/speech-cases.json").read_text(encoding="utf-8")
     assert "+91" not in content

@@ -23,6 +23,7 @@ All notable changes to PitchBot are documented here.
 - Unicode-aware WER/CER, VAD overlap, real-time factor, structured-output, duration-regression, timing, environment, and manifest validation utilities.
 - Deterministic multilingual conversation safety, bounded fact/revision extraction, evidence-grounded intent classification, and synthetic adversarial/persona cases.
 - Deny-by-default mock action authorization, minimized follow-ups, fake-time callback lifecycle, and six-industry structured sample-deck previews.
+- Strict evaluation-run contracts, generated JSON Schema, and dependency-free local HTML reports.
 
 ### Security
 
