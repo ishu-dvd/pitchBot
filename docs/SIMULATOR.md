@@ -9,7 +9,7 @@ It currently supports:
 - Disclosure-first synthetic sessions.
 - English, Hindi, and mixed-language selection.
 - Text turns with bounded length.
-- Explicit mock WhatsApp, callback, and artifact previews.
+- Policy-reviewed mock WhatsApp, callback, and structured artifact previews with explicit synthetic consent/contact eligibility.
 - Deterministic latency and failure injection.
 - Bounded session timelines and session-scoped history with no cross-session `lead_ref` lookup.
 - Playback interruption using browser speech synthesis cancellation.
@@ -19,12 +19,14 @@ It currently supports:
 - Explicit session closure and capacity recovery.
 - Session-scoped deterministic discovery, requirement revisions, repetition handling, and evidence-grounded Hot/Warm/Cold/Review outcomes.
 - Immediate opt-out stop, one neutral abuse redirection, and safe refusal of internal-information, jailbreak, and prompt-injection requests.
+- Bounded in-memory callback delay and six-industry sample-deck selection; default policy state blocks previews.
 
 ## Not implemented
 
-- No PSTN, WhatsApp call, WhatsApp message, callback, or artifact action.
+- No PSTN, WhatsApp call, live WhatsApp message, durable callback, or binary artifact action.
 - No speech-to-text or local TTS provider integration.
 - No model-backed/free-form extraction; the current conversation rules are deterministic and intentionally bounded.
+- No PPTX renderer; sample decks are dependency-free structured previews from fixed templates.
 - No durable simulator history; state is process-local and disappears on restart.
 - No authenticated public multi-user deployment. Session UUIDs are local simulator capabilities, not production authentication.
 - No measured browser-audio delivery, transcription accuracy, or latency guarantee.

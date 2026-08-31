@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-PR 4 defines provider-neutral contracts and in-memory test adapters. It does not add a provider SDK, socket client, external request, live call, message, model, speech engine, scheduler worker, or hosted service.
+PR 4 defines provider-neutral contracts and in-memory test adapters. PR 8 invokes only these mocks behind deterministic action policy for synthetic previews and fake-time callback tests. It does not add a provider SDK, socket client, external request, live call, live message, model, speech engine, durable scheduler worker, or hosted service.
 
 ## Contracts
 
@@ -82,4 +82,4 @@ The recommended order for a future provider operation is:
 
 ## Clocks
 
-`SystemClock` returns UTC. `FakeClock` requires timezone-aware input and cannot move backward. Scheduling behavior itself is implemented in a later milestone.
+`SystemClock` returns UTC. `FakeClock` requires timezone-aware input and cannot move backward. PR 8 implements bounded in-memory callback scheduling for deterministic tests: future times are validated, cancel/reschedule uses distinct operation keys, due jobs are ordered deterministically, and policy is rechecked before mock telephony dispatch. Schedules disappear on restart and are not production callbacks.

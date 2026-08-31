@@ -5,9 +5,24 @@ from collections import deque
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
-from pitchbot.adapters.clock import Clock, SystemClock
+from pitchbot.actions import (
+    ActionAuthorizationContext,
+    ActionPolicy,
+    ActionPreviewResult,
+    ActionWorkflowService,
+    CallbackService,
+    DeckService,
+    build_follow_up,
+)
+from pitchbot.adapters import Clock, SystemClock
+from pitchbot.adapters.mocks import (
+    MockArtifactAdapter,
+    MockSchedulerAdapter,
+    MockTelephonyAdapter,
+    MockWhatsAppAdapter,
+)
 from pitchbot.conversation import ConversationDisposition, ConversationEngine
-from pitchbot.domain import LanguageCode
+from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
@@ -43,8 +58,12 @@ class _Session:
     lead_ref: str
     language: LanguageCode
     events: deque[SimulatorEvent]
+    preview_consent_granted: bool
+    contact_policy: ContactPolicy
     next_sequence: int = 1
     audio_chunks_received: int = 0
+    approved_preview_count: int = 0
+    preview_attempt_count: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -58,6 +77,7 @@ class SimulatorService:
         max_history_events_per_lead: int = 500,
         max_audio_chunks_per_session: int = 2_000,
         conversation_engine: ConversationEngine | None = None,
+        action_workflows: ActionWorkflowService | None = None,
     ) -> None:
         if (
             min(
@@ -74,6 +94,24 @@ class SimulatorService:
         self._max_events_per_session = max_events_per_session
         self._max_audio_chunks_per_session = max_audio_chunks_per_session
         self._conversation = conversation_engine or ConversationEngine()
+        if action_workflows is None:
+            action_policy = ActionPolicy(clock=self._clock)
+            action_workflows = ActionWorkflowService(
+                policy=action_policy,
+                callbacks=CallbackService(
+                    scheduler=MockSchedulerAdapter(),
+                    telephony=MockTelephonyAdapter(),
+                    policy=action_policy,
+                    clock=self._clock,
+                ),
+                decks=DeckService(
+                    artifact_adapter=MockArtifactAdapter(),
+                    clock=self._clock,
+                ),
+                whatsapp=MockWhatsAppAdapter(),
+                clock=self._clock,
+            )
+        self._actions = action_workflows
         self._sessions: dict[UUID, _Session] = {}
 
     def create_session(self, request: CreateSessionRequest) -> SessionResponse:
@@ -84,6 +122,8 @@ class SimulatorService:
             lead_ref=request.lead_ref,
             language=request.language,
             events=deque(maxlen=self._max_events_per_session),
+            preview_consent_granted=request.preview_consent_granted,
+            contact_policy=request.contact_policy,
         )
         self._conversation.create_session(session.session_id)
         self._sessions[session.session_id] = session
@@ -139,16 +179,69 @@ class SimulatorService:
                     "repeated_turn": outcome.repeated_turn,
                 },
             )
-            preview = self._preview(request.preview_action)
+            preview: ActionPreviewResult | None = None
             if outcome.disposition is not ConversationDisposition.CONTINUE:
                 preview = None
-            elif preview is not None:
+            elif request.preview_action is not PreviewAction.NONE:
+                session.preview_attempt_count += 1
+                snapshot = self._conversation.snapshot(session.session_id)
+                context = ActionAuthorizationContext(
+                    disclosure_delivered=True,
+                    consent_granted=session.preview_consent_granted,
+                    contact_policy=session.contact_policy,
+                    temperature=outcome.classification.temperature,
+                    conversation_disposition=outcome.disposition.value,
+                    used_actions=session.approved_preview_count,
+                )
+                facts = {fact.key: fact.value for fact in snapshot.facts}
+                if request.preview_action is PreviewAction.WHATSAPP:
+                    preview = await self._actions.preview_whatsapp(
+                        session_id=session.session_id,
+                        follow_up=build_follow_up(
+                            lead_id=snapshot.lead_id,
+                            language=request.language,
+                            facts=facts,
+                            next_steps=("Review the synthetic preview",),
+                        ),
+                        context=context,
+                        operation_number=session.preview_attempt_count,
+                    )
+                elif request.preview_action is PreviewAction.CALLBACK:
+                    preview = await self._actions.preview_callback(
+                        session_id=session.session_id,
+                        lead_id=snapshot.lead_id,
+                        delay_minutes=request.callback_delay_minutes,
+                        context=context,
+                        operation_number=session.preview_attempt_count,
+                    )
+                else:
+                    features = tuple(
+                        item.strip()
+                        for item in str(facts.get("requested_features", "")).split(",")
+                        if item.strip()
+                    )
+                    preview = await self._actions.preview_deck(
+                        session_id=session.session_id,
+                        lead_id=snapshot.lead_id,
+                        industry=request.deck_industry,
+                        language=request.language,
+                        features=features,
+                        context=context,
+                        operation_number=session.preview_attempt_count,
+                    )
+                if preview.decision.status.value == "approved":
+                    session.approved_preview_count += 1
                 self._append_event(
                     session,
                     SimulatorEventType.ACTION_PREVIEW,
-                    text=preview["label"],
+                    text=preview.label,
                     language=request.language,
-                    metadata={"action": request.preview_action.value, "executed": False},
+                    metadata={
+                        "action": request.preview_action.value,
+                        "authorization": preview.decision.status.value,
+                        "block_reason_count": len(preview.decision.reasons),
+                        "executed": preview.executed,
+                    },
                 )
             return TurnResponse(
                 session_id=session.session_id,
@@ -256,16 +349,6 @@ class SimulatorService:
         session.next_sequence += 1
         session.events.append(event)
         return event
-
-    @staticmethod
-    def _preview(action: PreviewAction) -> dict[str, str] | None:
-        labels = {
-            PreviewAction.WHATSAPP: "Mock WhatsApp preview prepared; nothing was sent.",
-            PreviewAction.CALLBACK: "Mock callback preview prepared; nothing was scheduled.",
-            PreviewAction.ARTIFACT: "Mock artifact preview prepared; nothing was generated.",
-        }
-        label = labels.get(action)
-        return None if label is None else {"action": action.value, "label": label}
 
     @staticmethod
     def _session_response(session: _Session) -> SessionResponse:
