@@ -56,7 +56,7 @@ async def test_session_turn_history_and_interrupt_flow(client: AsyncClient) -> N
 
     history = await client.get(f"/api/simulator/sessions/{session_id}/history")
     assert history.status_code == 200
-    assert len(history.json()["events"]) == 5
+    assert len(history.json()["events"]) == 6
 
     closed = await client.delete(f"/api/simulator/sessions/{session_id}")
     assert closed.status_code == 204

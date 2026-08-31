@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from pitchbot.conversation import ConversationDisposition, ConversationPhase, SafetySignal
 from pitchbot.domain import LanguageCode
 
 
@@ -27,6 +28,7 @@ class SimulatorEventType(StrEnum):
     INTERRUPTION = "interruption"
     AUDIO_METADATA = "audio-metadata"
     FAILURE = "failure"
+    CONVERSATION_OUTCOME = "conversation-outcome"
 
 
 class CreateSessionRequest(SimulatorModel):
@@ -62,6 +64,11 @@ class TurnResponse(SimulatorModel):
     session_id: UUID
     reply: str
     preview: dict[str, str] | None
+    disposition: ConversationDisposition
+    phase: ConversationPhase
+    temperature: str
+    safety_signals: list[SafetySignal] = Field(default_factory=list)
+    repeated_turn: bool = False
     events: list[SimulatorEvent]
 
 

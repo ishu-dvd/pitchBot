@@ -68,3 +68,13 @@
 - **Current environment:** Windows 11, Python 3.12.10, 8 logical CPUs, no accelerator declared.
 - **Deferred:** Actual model measurements require reviewed audio, exact model revisions/licenses, and labeled target hardware.
 - **Rollback:** Revert the PR. It introduces no runtime model, external provider, database migration, or measured baseline.
+
+## PR 7: Deterministic conversation intelligence
+
+- **Branch:** `feat/conversation-intelligence`
+- **Status:** Implementation, mandatory adversarial self-review, and final local validation complete; commit, push, CI, and PR pending.
+- **Base:** Merged PR 6 commit `8cbe85f`.
+- **Scope:** Bounded session state, multilingual control-signal handling, deterministic business-fact/revision extraction, explicit commercial intent evidence, Hot/Warm/Cold/Review classification, safe response policy, simulator integration, and synthetic persona/adversarial corpus.
+- **Safety decisions:** Opt-out has stop precedence; abuse receives at most one neutral redirection; internal-information and prompt-injection requests are refused before extraction; stopped sessions reject turns and previews; language, accent, frustration, persona, and protected/sensitive traits are never intent evidence.
+- **Deferred:** Model-backed extraction, durable conversation persistence, action authorization/execution, follow-up scheduling, artifacts, provider integration, and live channels.
+- **Rollback:** Revert the PR. Conversation state is process-local and creates no database migration, network request, provider action, or durable record.

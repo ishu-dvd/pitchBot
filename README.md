@@ -14,9 +14,10 @@ The implemented application currently provides only:
 - Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
 - A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
+- Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - CI, contribution, security, and branch-gate documentation.
 
-The simulator is process-local and is not yet connected to durable storage, provider mocks, or conversation intelligence. Concrete speech/model providers, evaluations, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+The simulator conversation state is process-local and is not yet connected to durable storage or provider mocks. Model-backed extraction, concrete speech/model providers, action workflows, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 

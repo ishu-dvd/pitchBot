@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, and speech/runtime benchmark manifests and metrics. Storage/adapters are not yet connected to simulator conversation flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, and a deterministic conversation/classification engine. Storage/adapters are not yet connected to simulator conversation flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -156,6 +156,8 @@ flowchart LR
 ```
 
 Data entering from transcripts, websites, prior notes, models, and providers is untrusted. It cannot alter system instructions, credentials, policies, or tool authorization.
+
+The implemented conversation engine treats buyer text only as untrusted conversation data. Explicit opt-outs stop immediately; abuse receives at most one neutral redirection; requests for internal information or instruction bypass are refused without extraction or action authority. Classification uses explicit budget, timeline, decision, next-step, rejection, and need evidence. Language, accent, frustration, synthetic persona, and protected or sensitive traits are excluded.
 
 ## Provider boundaries
 
