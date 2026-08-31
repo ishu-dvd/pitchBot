@@ -166,6 +166,45 @@ No VAD, STT, TTS, STS, or model result is claimed by this report.
 
 No speech, retrieval, model, or production-latency result is claimed. Passing artifact thresholds remain evidence for review, not automatic promotion.
 
+## Durable conversation journal
+
+- **Date:** 2026-09-01
+- **Environment:** Windows 11, Python 3.12.10, SQLite
+- **Branch:** `feat/durable-conversation-journal`
+
+### Final validation
+
+- `pytest`: passed (146 tests).
+- Ruff lint and format: passed (93 files checked).
+- `mypy src tests`: passed (66 source files checked).
+- `pre-commit run --all-files`: passed.
+- Candidate registry, synthetic speech corpus, and browser JavaScript syntax: passed.
+- Fresh Alembic upgrade and schema-drift check: passed; no migration was added.
+- `pip-audit`: no known vulnerabilities; the local project is not published on PyPI and was skipped.
+
+### Failures found and corrected
+
+- Full replay initially restored the engine's default goal-change threshold; that safety threshold now belongs to checkpointed session state.
+- Replay initially parsed an already-validated journal event twice; it now returns the validated latest checkpoint directly.
+- Write-time checks reject stale lead versions, oversized payloads, unpersisted live turns, and restoration over a live session.
+
+### Adversarial self-review corrections
+
+- Replaced cumulative checkpoints with per-turn transitions so expiring an older event cannot leave its facts copied in newer events.
+- Moved all sessions under the lead aggregate so existing lead-level privacy operations cover every journal.
+- Added aggregate privacy-state checks around event loading to detect concurrent anonymization/deletion.
+- Bound fingerprints to typed input inside rollback-safe processing; persistence failures restore the prior live state.
+- Replaced unkeyed turn hashes with session-bound HMAC-SHA-256 and fail-closed digest-key identity checks on replay.
+- Added durable/live state comparison and explicit synchronization so competing writers cannot create two first turns.
+- Serialized append against privacy closure with an active-state/version compare-and-swap, and made anonymization/deletion close the aggregate before mutating events.
+- Removed an invalid goal-change-count/turn-count relationship because one turn can validly revise multiple facts.
+- Made operation fingerprints session-bound HMAC-SHA-256 values under the same managed digest key.
+- Capped journal capacity at 9,999 so the bounded 10,000-row overflow probe remains valid.
+- Counted every shared lead-stream event toward journal capacity so unrelated lead events cannot make a newly appended turn immediately unreplayable.
+- Required exact 1-based aggregate-version continuity, not only matching event count and aggregate head.
+
+No simulator/API path writes durable events yet, and no raw buyer transcript is claimed as retained.
+
 ### Mandatory pre-commit self-review
 
 - Rejected NaN/Infinity in intervals, durations, timers, and measured metrics.

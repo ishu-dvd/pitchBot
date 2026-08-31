@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import secrets
 from copy import deepcopy
+from hashlib import sha256
+from hmac import new as new_hmac
 from uuid import UUID, uuid4
 
 from pitchbot.conversation.models import (
@@ -8,6 +11,7 @@ from pitchbot.conversation.models import (
     ConversationPhase,
     ConversationResult,
     ConversationSnapshot,
+    ConversationStateCheckpoint,
     SafetySignal,
 )
 from pitchbot.conversation.rules import (
@@ -16,6 +20,7 @@ from pitchbot.conversation.rules import (
     extract_business_signals,
     is_repeated_turn,
     normalize_text,
+    normalized_turn_digest,
     rule_version,
 )
 from pitchbot.conversation.state import ConversationState
@@ -38,13 +43,18 @@ class ConversationEngine:
         max_evidence: int = 50,
         max_classifications: int = 20,
         max_goal_changes: int = 3,
+        turn_digest_key: bytes | None = None,
     ) -> None:
         if max_goal_changes < 1:
             raise ValueError("Maximum goal changes must be positive")
         self._capacities = (max_turns, max_facts, max_evidence, max_classifications)
         if min(self._capacities) < 1:
             raise ValueError("Conversation capacities must be positive")
+        if turn_digest_key is not None and len(turn_digest_key) < 32:
+            raise ValueError("Turn digest key must contain at least 32 bytes")
         self._max_goal_changes = max_goal_changes
+        self._turn_digest_key = turn_digest_key or secrets.token_bytes(32)
+        self._digest_key_id = sha256(self._turn_digest_key).hexdigest()
         self._states: dict[UUID, ConversationState] = {}
 
     def create_session(self, session_id: UUID, *, lead_id: UUID | None = None) -> None:
@@ -56,7 +66,18 @@ class ConversationEngine:
             max_facts=self._capacities[1],
             max_evidence=self._capacities[2],
             max_classifications=self._capacities[3],
+            max_goal_changes=self._max_goal_changes,
+            digest_key_id=self._digest_key_id,
         )
+
+    def operation_fingerprint(self, session_id: UUID, canonical_request: bytes) -> str:
+        if not canonical_request:
+            raise ValueError("Canonical operation request must not be empty")
+        return new_hmac(
+            self._turn_digest_key,
+            b"pitchbot.operation.v1\0" + session_id.bytes + canonical_request,
+            sha256,
+        ).hexdigest()
 
     def process_turn(
         self,
@@ -72,9 +93,20 @@ class ConversationEngine:
             raise RuntimeError("Conversation is closed")
 
         normalized = normalize_text(text)
-        repeated = is_repeated_turn(state, normalized)
+        repeated = is_repeated_turn(
+            state,
+            normalized,
+            digest_key=self._turn_digest_key,
+            session_id=session_id,
+        )
         state.turn_count += 1
-        state.recent_normalized_turns.append(normalized)
+        state.recent_turn_digests.append(
+            normalized_turn_digest(
+                normalized,
+                digest_key=self._turn_digest_key,
+                session_id=session_id,
+            )
+        )
         signals = list(detect_safety_signals(text))
 
         if SafetySignal.OPT_OUT in signals:
@@ -160,7 +192,7 @@ class ConversationEngine:
         )
         state.evidence.extend(accepted_evidence)
 
-        if state.goal_change_count >= self._max_goal_changes:
+        if state.goal_change_count >= state.max_goal_changes:
             signals.append(SafetySignal.EXCESSIVE_GOAL_CHANGES)
             disposition = ConversationDisposition.REVIEW
             reply_key = "clarify_goals"
@@ -204,6 +236,72 @@ class ConversationEngine:
 
     def restore(self, session_id: UUID, checkpoint: ConversationState) -> None:
         self._states[session_id] = checkpoint
+
+    def export_checkpoint(self, session_id: UUID) -> ConversationStateCheckpoint:
+        state = self._get_state(session_id)
+        return ConversationStateCheckpoint(
+            checkpoint_schema_version="1",
+            lead_id=state.lead_id,
+            max_turns=state.max_turns,
+            max_facts=state.max_facts,
+            max_evidence=state.max_evidence,
+            max_classifications=state.max_classifications,
+            max_goal_changes=state.max_goal_changes,
+            digest_key_id=state.digest_key_id,
+            phase=state.phase,
+            turn_count=state.turn_count,
+            abuse_redirected=state.abuse_redirected,
+            stopped=state.stopped,
+            recent_turn_digests=tuple(state.recent_turn_digests),
+            facts=tuple(state.facts_by_key.values()),
+            evidence=tuple(state.evidence),
+            classifications=tuple(state.classifications),
+            goal_change_count=state.goal_change_count,
+        )
+
+    def restore_checkpoint(
+        self,
+        session_id: UUID,
+        checkpoint: ConversationStateCheckpoint,
+    ) -> None:
+        if session_id in self._states:
+            raise ValueError("Conversation session already exists")
+        self._states[session_id] = self._state_from_checkpoint(checkpoint)
+
+    def replace_checkpoint(
+        self,
+        session_id: UUID,
+        checkpoint: ConversationStateCheckpoint,
+    ) -> None:
+        if session_id not in self._states:
+            raise LookupError("Conversation session not found")
+        self._states[session_id] = self._state_from_checkpoint(checkpoint)
+
+    def _state_from_checkpoint(
+        self,
+        checkpoint: ConversationStateCheckpoint,
+    ) -> ConversationState:
+        if checkpoint.digest_key_id != self._digest_key_id:
+            raise ValueError("Conversation checkpoint uses a different digest key")
+        state = ConversationState(
+            lead_id=checkpoint.lead_id,
+            max_turns=checkpoint.max_turns,
+            max_facts=checkpoint.max_facts,
+            max_evidence=checkpoint.max_evidence,
+            max_classifications=checkpoint.max_classifications,
+            max_goal_changes=checkpoint.max_goal_changes,
+            digest_key_id=checkpoint.digest_key_id,
+            phase=checkpoint.phase,
+            turn_count=checkpoint.turn_count,
+            abuse_redirected=checkpoint.abuse_redirected,
+            stopped=checkpoint.stopped,
+            facts_by_key={fact.key: fact for fact in checkpoint.facts},
+            goal_change_count=checkpoint.goal_change_count,
+        )
+        state.recent_turn_digests.extend(checkpoint.recent_turn_digests)
+        state.evidence.extend(checkpoint.evidence)
+        state.classifications.extend(checkpoint.classifications)
+        return state
 
     def close_session(self, session_id: UUID) -> None:
         self._states.pop(session_id, None)

@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, and guarded in-memory follow-up, callback, and deck previews. Durable storage is not yet connected to simulator flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, a restart-safe append-only conversation journal, and guarded in-memory follow-up, callback, and deck previews. The journal is not yet connected to simulator flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -217,7 +217,7 @@ sequenceDiagram
 
 Retrieval is optional on the speech path. Its initial design target is 50 ms with a 200 ms hard deadline; timeout falls back to current conversation state and must not delay first audio. These are design budgets, not measured claims. Safety policy and durable acceptance cannot be bypassed to meet latency.
 
-### Planned conversation memory and retrieval
+### Conversation memory and planned retrieval
 
 ```mermaid
 flowchart LR
@@ -235,6 +235,10 @@ flowchart LR
     Filter --> Context[Cited bounded context]
     Context --> Conversation[Conversation / deck workflow]
 ```
+
+The implemented journal writes one versioned `conversation.turn-accepted.v1` event per accepted turn to the lead's existing aggregate/event stream. Each event contains a journal-computed, session-bound HMAC-SHA-256 request fingerprint, the response, bounded session policy/scalar state, and only the facts/evidence/classification produced by that turn. Exact retries recover the persisted response, conflicting reuse is rejected, stale live state cannot fork a session, and optimistic lead-version checks prevent lost updates. Replay folds validated transitions without rerunning conversation rules or actions.
+
+Raw buyer turns are not copied into events. Only session-bound HMAC-SHA-256 digests of normalized turns are retained for repetition detection; restart requires the same operator-managed digest key. Structured allowlisted facts and evidence remain available under the lead aggregate's privacy lifecycle and are not copied into later events. Missing, partially purged, anonymized, oversized, malformed, out-of-sequence, or unsupported history fails replay closed. Simulator wiring and minimized transcript/source-span retention remain later reviewed work.
 
 The append-only event repository remains authoritative. Derived BM25, vector, and graph views are rebuildable and never become the source of consent, suppression, action, or requirement truth. BM25 is the first deterministic baseline. `sqlite-vec` and HNSW remain adapter candidates; FAISS and BGE-M3 require measured scale, latency, quality, and license evidence before selection.
 

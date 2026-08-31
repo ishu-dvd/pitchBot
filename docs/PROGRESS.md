@@ -112,9 +112,19 @@
 ## PR 11: Evaluation and latency contracts
 
 - **Branch:** `feat/evaluation-contracts`
-- **Status:** Implementation, mandatory adversarial self-review, and final validation complete; commit, push, CI, and PR pending.
+- **Status:** Merged as PR 11.
 - **Base:** Merged PR 10 commit `1e2dfe9`.
 - **Scope:** Add strict privacy-minimized evaluation snapshots, a generated JSON Schema, dependency-free static reporting, and architecture contracts for real-time speech, durable memory, hybrid retrieval, knowledge graphs, and local observability.
 - **Safety decisions:** Evaluation artifacts exclude raw conversation/audio content; threshold success is not deployment authority; retrieval has a hard deadline and cannot bypass policy; append-only events remain authoritative over all derived indexes.
 - **Deferred:** Durable simulator journal wiring, BM25 implementation, temporal graph storage, vector/model selection, streaming speech providers, optional MLflow/Phoenix services, binary decks, and live channels remain separate reviewed milestones.
 - **Rollback:** Revert PR 11. It adds no migration, model, network service, external telemetry export, live action, or retained buyer content.
+
+## PR 12: Durable conversation journal
+
+- **Branch:** `feat/durable-conversation-journal`
+- **Status:** Implementation, adversarial corrections, and final validation complete; definitive review, commit, push, CI, and PR pending.
+- **Base:** Merged PR 11 commit `85259a3`.
+- **Scope:** Reuse each lead's existing aggregate/event stream for idempotent accepted-turn transitions, rollback-safe processing, optimistic concurrency, ambiguous-commit recovery, and deterministic restart replay.
+- **Safety decisions:** No duplicate tables or migration; request fingerprints are journal-computed; raw buyer text and cumulative state are excluded; repetition digests require a managed key; partial/anonymized/malformed history fails closed; replay cannot rerun actions or silently fork live state.
+- **Deferred:** Simulator/API wiring, minimized transcript/source-span persistence, BM25, temporal graph storage, vector/model selection, streaming speech, binary decks, and live channels remain separate reviewed milestones.
+- **Rollback:** Revert PR 12. Existing schema remains unchanged and the journal is not yet connected to simulator flows.

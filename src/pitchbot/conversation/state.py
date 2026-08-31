@@ -15,11 +15,13 @@ class ConversationState:
     max_facts: int
     max_evidence: int
     max_classifications: int
+    max_goal_changes: int
+    digest_key_id: str
     phase: ConversationPhase = ConversationPhase.DISCOVERY
     turn_count: int = 0
     abuse_redirected: bool = False
     stopped: bool = False
-    recent_normalized_turns: deque[str] = field(default_factory=deque)
+    recent_turn_digests: deque[str] = field(default_factory=deque)
     facts_by_key: dict[str, RequirementFact] = field(default_factory=dict)
     evidence: deque[IntentEvidence] = field(default_factory=deque)
     classifications: deque[Classification] = field(default_factory=deque)
@@ -31,10 +33,15 @@ class ConversationState:
             self.max_facts,
             self.max_evidence,
             self.max_classifications,
+            self.max_goal_changes,
         )
         if min(capacities) < 1:
             raise ValueError("Conversation capacities must be positive")
-        self.recent_normalized_turns = deque(maxlen=min(self.max_turns, 20))
+        if len(self.digest_key_id) != 64 or any(
+            character not in "0123456789abcdef" for character in self.digest_key_id
+        ):
+            raise ValueError("Conversation digest key ID must be a SHA-256 digest")
+        self.recent_turn_digests = deque(maxlen=min(self.max_turns, 20))
         self.evidence = deque(maxlen=self.max_evidence)
         self.classifications = deque(maxlen=self.max_classifications)
 
