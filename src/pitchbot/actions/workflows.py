@@ -11,6 +11,7 @@ from pitchbot.actions.models import (
     AuthorizationStatus,
     CallbackAgenda,
     CallbackRequest,
+    CallbackStatus,
     DeckIndustry,
     DeckRequest,
     FollowUpSummary,
@@ -85,6 +86,17 @@ class ActionWorkflowService:
             idempotency_key=f"simulator:{session_id}:callback:{operation_id}",
         )
         callback = await self._callbacks.schedule(request, context)
+        if callback.status is CallbackStatus.BLOCKED:
+            return ActionPreviewResult(
+                decision=decision.model_copy(
+                    update={
+                        "status": AuthorizationStatus.BLOCKED,
+                        "reasons": callback.block_reasons,
+                    }
+                ),
+                label="Callback preview blocked.",
+                callback=callback,
+            )
         return ActionPreviewResult(
             decision=decision,
             label="Mock callback scheduled in memory; no real callback was created.",

@@ -10,6 +10,7 @@ import pytest
 from pitchbot.actions import (
     ActionAuthorizationContext,
     ActionPolicy,
+    ActionWorkflowService,
     AuthorizationStatus,
     BlockReason,
     CallbackAgenda,
@@ -22,11 +23,12 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
-from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock
+from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock, PermanentAdapterError
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
     MockSchedulerAdapter,
     MockTelephonyAdapter,
+    MockWhatsAppAdapter,
 )
 from pitchbot.domain import ActionType, ContactPolicy, JsonValue, LanguageCode, LeadTemperature
 
@@ -49,6 +51,28 @@ class BlockingScheduleAdapter(MockSchedulerAdapter):
         self.started.set()
         await self.release.wait()
         return await super().schedule(job_key, run_at, payload, idempotency_key)
+
+
+class AcceptedThenBlockingScheduleAdapter(MockSchedulerAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.accepted = asyncio.Event()
+        self.release = asyncio.Event()
+        self.schedule_calls = 0
+
+    async def schedule(
+        self,
+        job_key: str,
+        run_at: datetime,
+        payload: Mapping[str, JsonValue],
+        idempotency_key: str,
+    ) -> ActionResult:
+        self.schedule_calls += 1
+        result = await super().schedule(job_key, run_at, payload, idempotency_key)
+        if self.schedule_calls == 1:
+            self.accepted.set()
+            await self.release.wait()
+        return result
 
 
 class BlockingCancelAdapter(MockSchedulerAdapter):
@@ -216,6 +240,74 @@ async def test_fake_time_callback_dispatches_only_when_due() -> None:
 
 
 @pytest.mark.asyncio
+async def test_canceled_schedule_retry_reconciles_original_request_after_due_time() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, 10, tzinfo=UTC))
+    scheduler = AcceptedThenBlockingScheduleAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="callback-canceled-schedule",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        agenda=CallbackAgenda.WEBSITE_DISCOVERY,
+        idempotency_key="schedule-canceled-operation",
+    )
+
+    pending = asyncio.create_task(service.schedule(request, eligible_context()))
+    await scheduler.accepted.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    clock.advance(timedelta(minutes=2))
+    scheduler.release.set()
+    reconciled = await service.schedule(request, eligible_context())
+
+    assert reconciled.status is CallbackStatus.SCHEDULED
+    assert reconciled.request == request
+    assert scheduler.schedule_calls == 2
+    assert len(scheduler.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_callback_time_produces_blocked_preview_decision() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, 10, tzinfo=UTC))
+    policy = ActionPolicy(clock=clock)
+    workflows = ActionWorkflowService(
+        policy=policy,
+        callbacks=CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=policy,
+            clock=clock,
+        ),
+        decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+        whatsapp=MockWhatsAppAdapter(),
+        clock=clock,
+    )
+
+    preview = await workflows.preview_callback(
+        session_id=uuid4(),
+        lead_id=uuid4(),
+        delay_minutes=1,
+        context=eligible_context(),
+        operation_id=uuid4(),
+        requested_at=clock.now() - timedelta(minutes=2),
+    )
+
+    assert preview.decision.status is AuthorizationStatus.BLOCKED
+    assert preview.decision.reasons == (BlockReason.CALLBACK_TIME_INVALID,)
+    assert preview.label == "Callback preview blocked."
+    assert preview.callback is not None
+    assert preview.callback.status is CallbackStatus.BLOCKED
+
+
+@pytest.mark.asyncio
 async def test_callback_rechecks_opt_out_before_dispatch() -> None:
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
     telephony = MockTelephonyAdapter()
@@ -358,6 +450,80 @@ async def test_blocked_callbacks_do_not_consume_active_capacity() -> None:
     assert (
         await service.schedule(allowed_request, eligible_context())
     ).status is CallbackStatus.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_inactive_callback_cannot_be_rescheduled_when_capacity_is_full() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    service = CallbackService(
+        scheduler=MockSchedulerAdapter(),
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    first = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="inactive-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="inactive-schedule-1",
+    )
+    second = first.model_copy(
+        update={
+            "callback_id": "active-callback",
+            "idempotency_key": "active-schedule",
+        }
+    )
+    await service.schedule(first, eligible_context())
+    await service.cancel(first.callback_id, idempotency_key="inactive-cancel")
+    await service.schedule(second, eligible_context())
+
+    with pytest.raises(RuntimeError, match="capacity"):
+        await service.schedule(
+            first.model_copy(
+                update={
+                    "run_at": clock.now() + timedelta(minutes=2),
+                    "idempotency_key": "inactive-schedule-2",
+                }
+            ),
+            eligible_context(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_definitive_schedule_failure_releases_pending_capacity() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[PermanentAdapterError("definitive schedule failure")]
+    )
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    failed = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="definitive-failure",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="definitive-failure-operation",
+    )
+    replacement = failed.model_copy(
+        update={
+            "callback_id": "replacement-after-failure",
+            "idempotency_key": "replacement-after-failure-operation",
+        }
+    )
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.schedule(failed, eligible_context())
+
+    assert (await service.schedule(replacement, eligible_context())).status is (
+        CallbackStatus.SCHEDULED
+    )
 
 
 @pytest.mark.asyncio

@@ -237,3 +237,27 @@ No VAD, STT, TTS, STS, or model result is claimed by this report.
 - Marked cleanup callbacks non-dispatchable before provider cancellation so ambiguous cleanup failures remain fail closed.
 - Reclaimed session-owned callback, deck, WhatsApp, scheduler, telephony, artifact, and idempotency state from process-local mocks.
 - Expanded English/Hinglish unsafe-instruction variants and added a benign configuration control to limit false positives.
+
+## Callback preview retry reconciliation
+
+- **Date:** 2026-08-31
+- **Environment:** Windows 11, Python 3.12.10
+- **Branch:** `fix/callback-preview-retry`
+
+### Final validation
+
+- `pytest`: passed (124 tests, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests`: passed.
+- Browser JavaScript syntax: passed.
+- Pre-commit hooks: passed.
+- Dependency audit: passed with no known vulnerabilities; the editable local project was skipped.
+
+### Safety coverage
+
+- A schedule accepted before task cancellation remains a pending local operation.
+- Retrying after the original due time reconciles the exact request and does not duplicate the scheduler action.
+- Pending schedules count against capacity and reject conflicting callback identifiers.
+- Inactive callback records cannot bypass a full active-callback capacity.
+- Definitive scheduler failures release pending capacity; ambiguous cancellation remains retryable.
+- Invalid callback times produce blocked preview decisions and cannot consume approved quota.
