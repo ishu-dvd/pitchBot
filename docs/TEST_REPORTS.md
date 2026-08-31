@@ -211,3 +211,29 @@ No VAD, STT, TTS, STS, or model result is claimed by this report.
 - Prevented blocked callback attempts from consuming active capacity and rejected cancellation outside scheduled state.
 - Removed lead identity from scheduler payloads and replaced arbitrary callback agenda/next-step content with fixed values.
 - Removed arbitrary deck business names and allowlisted every follow-up/deck field that reaches mock adapters or previews.
+
+## Adversarial action-safety hardening
+
+- **Date:** 2026-08-31
+- **Environment:** Windows 11, Python 3.12.10
+- **Branch:** `fix/pr8-adversarial-hardening`
+
+### Final validation
+
+- `pytest`: passed (120 tests, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests`: passed (62 source files checked).
+- Browser JavaScript syntax: passed.
+- Pre-commit hooks: passed.
+- Dependency audit: passed with no known vulnerabilities; the editable local project was skipped.
+
+### Mandatory adversarial self-review corrections
+
+- Replaced counter-based preview identity with client operation IDs and whole-turn replay.
+- Rolled back conversation, event, language, sequence, and quota state after known action failures or task cancellation while retaining retry-stable callback timing.
+- Bounded retained successful and failed turn operations and failed closed when unique operation capacity is exhausted.
+- Serialized callback/deck admission and callback cancellation/dispatch; ambiguous cancellation now remains non-dispatchable until reconciled.
+- Marked sessions closing before awaited cleanup so queued turns, interruption, and audio work fail closed while failed cleanup remains retryable.
+- Marked cleanup callbacks non-dispatchable before provider cancellation so ambiguous cleanup failures remain fail closed.
+- Reclaimed session-owned callback, deck, WhatsApp, scheduler, telephony, artifact, and idempotency state from process-local mocks.
+- Expanded English/Hinglish unsafe-instruction variants and added a benign configuration control to limit false positives.

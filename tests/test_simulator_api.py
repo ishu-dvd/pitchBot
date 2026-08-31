@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -48,19 +49,31 @@ async def test_session_turn_history_and_interrupt_flow(client: AsyncClient) -> N
     session_id = created.json()["session_id"]
     assert created.json()["events"][0]["event_type"] == "disclosure"
 
+    turn_body = {
+        "operation_id": str(uuid4()),
+        "text": "Please schedule a callback preview",
+        "language": "mixed",
+        "preview_action": "callback-preview",
+        "simulated_latency_ms": 0,
+        "inject_failure": False,
+    }
     turn = await client.post(
         f"/api/simulator/sessions/{session_id}/turns",
-        json={
-            "text": "Please schedule a callback preview",
-            "language": "mixed",
-            "preview_action": "callback-preview",
-            "simulated_latency_ms": 0,
-            "inject_failure": False,
-        },
+        json=turn_body,
+    )
+    retry = await client.post(
+        f"/api/simulator/sessions/{session_id}/turns",
+        json=turn_body,
     )
     assert turn.status_code == 200
+    assert retry.json() == turn.json()
     assert turn.json()["preview"]["decision"]["status"] == "approved"
     assert turn.json()["preview"]["callback"]["status"] == "scheduled"
+    conflict = await client.post(
+        f"/api/simulator/sessions/{session_id}/turns",
+        json={**turn_body, "text": "Different input with the same operation ID"},
+    )
+    assert conflict.status_code == 409
 
     interrupted = await client.post(f"/api/simulator/sessions/{session_id}/interrupt")
     assert interrupted.status_code == 200
@@ -88,9 +101,15 @@ async def test_api_validation_and_injected_failure_are_explicit(client: AsyncCli
         json={"lead_ref": "failure-case", "language": "en"},
     )
     session_id = created.json()["session_id"]
+    missing_operation = await client.post(
+        f"/api/simulator/sessions/{session_id}/turns",
+        json={"text": "missing operation", "language": "en"},
+    )
+    assert missing_operation.status_code == 422
     failed = await client.post(
         f"/api/simulator/sessions/{session_id}/turns",
         json={
+            "operation_id": str(uuid4()),
             "text": "inject",
             "language": "en",
             "inject_failure": True,

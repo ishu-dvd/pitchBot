@@ -83,6 +83,7 @@ sendButton.addEventListener("click", async () => {
     const body = await api(`/api/simulator/sessions/${sessionId}/turns`, {
       method: "POST",
       body: JSON.stringify({
+        operation_id: crypto.randomUUID(),
         text: document.getElementById("turn-text").value,
         language: document.getElementById("language").value,
         preview_action: document.getElementById("preview-action").value,

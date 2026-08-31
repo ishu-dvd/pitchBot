@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 
-from pitchbot.actions import DeckIndustry
-from pitchbot.adapters import FakeClock
+from pitchbot.actions import (
+    ActionPolicy,
+    ActionWorkflowService,
+    CallbackService,
+    DeckIndustry,
+    DeckService,
+)
+from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock
+from pitchbot.adapters.mocks import (
+    MockArtifactAdapter,
+    MockSchedulerAdapter,
+    MockTelephonyAdapter,
+    MockWhatsAppAdapter,
+)
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
@@ -15,6 +29,80 @@ from pitchbot.simulator.models import (
     TurnRequest,
 )
 from pitchbot.simulator.service import InjectedSimulatorError, SimulatorService
+
+
+def action_workflows(
+    clock: FakeClock,
+    *,
+    whatsapp: MockWhatsAppAdapter | None = None,
+) -> ActionWorkflowService:
+    policy = ActionPolicy(clock=clock)
+    return ActionWorkflowService(
+        policy=policy,
+        callbacks=CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=policy,
+            clock=clock,
+        ),
+        decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+        whatsapp=whatsapp or MockWhatsAppAdapter(),
+        clock=clock,
+    )
+
+
+class BlockingWhatsAppAdapter(MockWhatsAppAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_message(
+        self,
+        contact_ref: str,
+        message: str,
+        idempotency_key: str,
+    ) -> ActionResult:
+        self.started.set()
+        await self.release.wait()
+        return await super().send_message(contact_ref, message, idempotency_key)
+
+
+class BlockingCleanupWorkflows(ActionWorkflowService):
+    def __init__(self, clock: FakeClock) -> None:
+        policy = ActionPolicy(clock=clock)
+        super().__init__(
+            policy=policy,
+            callbacks=CallbackService(
+                scheduler=MockSchedulerAdapter(),
+                telephony=MockTelephonyAdapter(),
+                policy=policy,
+                clock=clock,
+            ),
+            decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+            whatsapp=MockWhatsAppAdapter(),
+            clock=clock,
+        )
+        self.cleanup_started = asyncio.Event()
+        self.release_cleanup = asyncio.Event()
+
+    async def cleanup_session(self, session_id: UUID) -> None:
+        self.cleanup_started.set()
+        await self.release_cleanup.wait()
+        await super().cleanup_session(session_id)
+
+
+class FailOnceCleanupWorkflows(BlockingCleanupWorkflows):
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.release_cleanup.set()
+        self.failed = False
+
+    async def cleanup_session(self, session_id: UUID) -> None:
+        if not self.failed:
+            self.failed = True
+            raise AdapterTimeoutError("cleanup timeout")
+        await super().cleanup_session(session_id)
 
 
 @pytest.fixture
@@ -336,6 +424,174 @@ async def test_approved_callback_and_deck_are_in_memory_previews(
     assert deck.preview is not None
     assert deck.preview.deck is not None
     assert deck.preview.deck.industry.value == "books"
+
+
+@pytest.mark.asyncio
+async def test_turn_operation_retries_replay_without_duplicate_state_or_actions(
+    service: SimulatorService,
+) -> None:
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref="operation-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+
+    first = await service.process_turn(session.session_id, request)
+    replay = await service.process_turn(session.session_id, request)
+
+    assert replay == first
+    assert service.get_session(session.session_id).events == first.events
+    with pytest.raises(RuntimeError, match="operation identifier"):
+        await service.process_turn(
+            session.session_id,
+            request.model_copy(update={"text": "Use this identifier for different input."}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_action_rolls_back_turn_and_retries_without_duplicate_state() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    whatsapp = MockWhatsAppAdapter(failures=[AdapterTimeoutError("temporary timeout"), None])
+    simulator = SimulatorService(
+        clock=clock,
+        action_workflows=action_workflows(clock, whatsapp=whatsapp),
+    )
+    session = simulator.create_session(
+        CreateSessionRequest(
+            lead_ref="failed-operation-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+
+    with pytest.raises(AdapterTimeoutError, match="temporary"):
+        await simulator.process_turn(session.session_id, request)
+    assert simulator.get_session(session.session_id).events == session.events
+
+    retried = await simulator.process_turn(session.session_id, request)
+    assert retried.preview is not None
+    assert len(retried.events) == 5
+    assert len(whatsapp.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_canceled_action_turn_rolls_back_before_retry() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    whatsapp = BlockingWhatsAppAdapter()
+    simulator = SimulatorService(
+        clock=clock,
+        action_workflows=action_workflows(clock, whatsapp=whatsapp),
+    )
+    session = simulator.create_session(
+        CreateSessionRequest(
+            lead_ref="canceled-operation-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+
+    pending = asyncio.create_task(simulator.process_turn(session.session_id, request))
+    await whatsapp.started.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert simulator.get_session(session.session_id).events == session.events
+
+    whatsapp.release.set()
+    retried = await simulator.process_turn(session.session_id, request)
+    assert retried.preview is not None
+    assert len(retried.events) == 5
+    assert len(whatsapp.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_operation_retention_is_bounded() -> None:
+    simulator = SimulatorService(max_turn_operations_per_session=2)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="operation-capacity"))
+
+    for _ in range(2):
+        with pytest.raises(InjectedSimulatorError):
+            await simulator.process_turn(
+                session.session_id,
+                TurnRequest(
+                    text="fail",
+                    language=LanguageCode.ENGLISH,
+                    inject_failure=True,
+                ),
+            )
+
+    with pytest.raises(RuntimeError, match="turn operation capacity"):
+        await simulator.process_turn(
+            session.session_id,
+            TurnRequest(text="new operation", language=LanguageCode.ENGLISH),
+        )
+
+
+@pytest.mark.asyncio
+async def test_turn_queued_during_session_cleanup_fails_closed() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    workflows = BlockingCleanupWorkflows(clock)
+    simulator = SimulatorService(clock=clock, action_workflows=workflows)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="closing-race"))
+
+    closing = asyncio.create_task(simulator.close_session(session.session_id))
+    await workflows.cleanup_started.wait()
+    with pytest.raises(LookupError, match="Unknown session"):
+        await simulator.process_turn(
+            session.session_id,
+            TurnRequest(text="hello", language=LanguageCode.ENGLISH),
+        )
+    workflows.release_cleanup.set()
+    await closing
+
+
+@pytest.mark.asyncio
+async def test_failed_session_cleanup_can_be_retried_while_remaining_closed() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    workflows = FailOnceCleanupWorkflows(clock)
+    simulator = SimulatorService(clock=clock, action_workflows=workflows)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="cleanup-retry"))
+
+    with pytest.raises(AdapterTimeoutError, match="cleanup timeout"):
+        await simulator.close_session(session.session_id)
+    with pytest.raises(LookupError, match="Unknown session"):
+        simulator.get_session(session.session_id)
+
+    await simulator.close_session(session.session_id)
+    with pytest.raises(LookupError, match="Unknown session"):
+        simulator.get_session(session.session_id)
 
 
 def test_replay_is_deterministic_and_does_not_classify(service: SimulatorService) -> None:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -40,6 +40,7 @@ class CreateSessionRequest(SimulatorModel):
 
 
 class TurnRequest(SimulatorModel):
+    operation_id: UUID = Field(default_factory=uuid4)
     text: str = Field(min_length=1, max_length=4_000)
     language: LanguageCode
     preview_action: PreviewAction = PreviewAction.NONE

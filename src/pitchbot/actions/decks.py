@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 from pitchbot.actions.models import DeckIndustry, DeckPreview, DeckRequest, DeckSlide
-from pitchbot.adapters import ArtifactAdapter, Clock, SystemClock
+from pitchbot.adapters import ArtifactAdapter, Clock, EphemeralOperationStore, SystemClock
 
 _INDUSTRY_CONTENT: dict[DeckIndustry, tuple[str, tuple[str, ...]]] = {
     DeckIndustry.APPAREL: (
@@ -53,8 +55,13 @@ class DeckService:
         self._max_decks = max_decks
         self._previews: dict[str, DeckPreview] = {}
         self._idempotency: dict[str, tuple[str, DeckPreview]] = {}
+        self._lock = asyncio.Lock()
 
     async def create(self, request: DeckRequest) -> DeckPreview:
+        async with self._lock:
+            return await self._create(request)
+
+    async def _create(self, request: DeckRequest) -> DeckPreview:
         fingerprint = request.model_dump_json()
         previous = self._idempotency.get(request.idempotency_key)
         if previous is not None:
@@ -116,6 +123,23 @@ class DeckService:
             return self._previews[deck_id]
         except KeyError as error:
             raise LookupError("Deck preview not found") from error
+
+    async def remove_by_prefix(self, deck_id_prefix: str, operation_key_prefix: str) -> None:
+        async with self._lock:
+            deck_ids = tuple(
+                deck_id for deck_id in self._previews if deck_id.startswith(deck_id_prefix)
+            )
+            for deck_id in deck_ids:
+                operation_keys = tuple(
+                    key
+                    for key, (_, preview) in self._idempotency.items()
+                    if preview.deck_id == deck_id
+                )
+                for key in operation_keys:
+                    self._idempotency.pop(key, None)
+                self._previews.pop(deck_id, None)
+            if isinstance(self._artifact_adapter, EphemeralOperationStore):
+                self._artifact_adapter.clear_operations(operation_key_prefix)
 
 
 def _feature_label(feature: str) -> str:

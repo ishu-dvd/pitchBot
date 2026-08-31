@@ -58,6 +58,11 @@ async def close_session(session_id: UUID) -> Response:
 
 @router.post("/sessions/{session_id}/turns", response_model=TurnResponse)
 async def process_turn(session_id: UUID, request: TurnRequest) -> TurnResponse:
+    if "operation_id" not in request.model_fields_set:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="operation_id is required for retry-safe turn requests",
+        )
     try:
         return await simulator_service.process_turn(session_id, request)
     except SessionNotFoundError as error:

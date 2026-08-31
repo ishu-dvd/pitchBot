@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from pitchbot.actions.callbacks import CallbackService
@@ -16,7 +16,7 @@ from pitchbot.actions.models import (
     FollowUpSummary,
 )
 from pitchbot.actions.policy import ActionPolicy
-from pitchbot.adapters import Clock, WhatsAppAdapter
+from pitchbot.adapters import Clock, EphemeralOperationStore, WhatsAppAdapter
 from pitchbot.domain import ActionType, LanguageCode
 
 
@@ -42,7 +42,7 @@ class ActionWorkflowService:
         session_id: UUID,
         follow_up: FollowUpSummary,
         context: ActionAuthorizationContext,
-        operation_number: int,
+        operation_id: UUID,
     ) -> ActionPreviewResult:
         decision = self._policy.authorize(ActionType.WHATSAPP_PREVIEW, context)
         if decision.status is AuthorizationStatus.BLOCKED:
@@ -53,7 +53,7 @@ class ActionWorkflowService:
         result = await self._whatsapp.send_message(
             f"synthetic:{follow_up.lead_id}",
             message,
-            f"simulator:{session_id}:whatsapp:{operation_number}",
+            f"simulator:{session_id}:whatsapp:{operation_id}",
         )
         return ActionPreviewResult(
             decision=decision,
@@ -68,7 +68,8 @@ class ActionWorkflowService:
         lead_id: UUID,
         delay_minutes: int,
         context: ActionAuthorizationContext,
-        operation_number: int,
+        operation_id: UUID,
+        requested_at: datetime,
     ) -> ActionPreviewResult:
         decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
         if decision.status is AuthorizationStatus.BLOCKED:
@@ -77,11 +78,11 @@ class ActionWorkflowService:
             )
         request = CallbackRequest(
             lead_id=lead_id,
-            callback_id=f"sim-{session_id.hex[:12]}-{operation_number}",
-            run_at=self._clock.now() + timedelta(minutes=delay_minutes),
+            callback_id=f"sim-{session_id.hex}-{operation_id.hex}",
+            run_at=requested_at + timedelta(minutes=delay_minutes),
             timezone="UTC",
             agenda=CallbackAgenda.WEBSITE_DISCOVERY,
-            idempotency_key=f"simulator:{session_id}:callback:{operation_number}",
+            idempotency_key=f"simulator:{session_id}:callback:{operation_id}",
         )
         callback = await self._callbacks.schedule(request, context)
         return ActionPreviewResult(
@@ -100,7 +101,7 @@ class ActionWorkflowService:
         language: LanguageCode,
         features: tuple[str, ...],
         context: ActionAuthorizationContext,
-        operation_number: int,
+        operation_id: UUID,
     ) -> ActionPreviewResult:
         decision = self._policy.authorize(ActionType.ARTIFACT_PREVIEW, context)
         if decision.status is AuthorizationStatus.BLOCKED:
@@ -110,11 +111,11 @@ class ActionWorkflowService:
         deck = await self._decks.create(
             DeckRequest(
                 lead_id=lead_id,
-                deck_id=f"sim-{session_id.hex[:12]}-{operation_number}",
+                deck_id=f"sim-{session_id.hex}-{operation_id.hex}",
                 industry=industry,
                 language=language,
                 requested_features=features,
-                idempotency_key=f"simulator:{session_id}:deck:{operation_number}",
+                idempotency_key=f"simulator:{session_id}:deck:{operation_id}",
             )
         )
         return ActionPreviewResult(
@@ -122,6 +123,14 @@ class ActionWorkflowService:
             label="Structured sample-deck preview generated in memory.",
             deck=deck,
         )
+
+    async def cleanup_session(self, session_id: UUID) -> None:
+        resource_prefix = f"sim-{session_id.hex}-"
+        operation_prefix = f"simulator:{session_id}:"
+        await self._callbacks.remove_by_prefix(resource_prefix, f"{operation_prefix}callback:")
+        await self._decks.remove_by_prefix(resource_prefix, f"{operation_prefix}deck:")
+        if isinstance(self._whatsapp, EphemeralOperationStore):
+            self._whatsapp.clear_operations(f"{operation_prefix}whatsapp:")
 
     @staticmethod
     def _render_follow_up(follow_up: FollowUpSummary) -> str:

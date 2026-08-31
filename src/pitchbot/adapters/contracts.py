@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pitchbot.domain import JsonValue, LanguageCode
 
@@ -105,6 +105,11 @@ class ModelAdapter(Protocol):
         instruction: str,
         schema_name: str,
     ) -> StructuredCompletion: ...
+
+
+@runtime_checkable
+class EphemeralOperationStore(Protocol):
+    def clear_operations(self, idempotency_key_prefix: str) -> None: ...
 
 
 class TelephonyAdapter(Protocol):
