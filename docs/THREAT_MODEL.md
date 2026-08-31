@@ -50,6 +50,8 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 - Humor and micro-challenges stop on confusion, irritation, refusal, or serious concerns.
 - Buyer text has no authority to change system instructions, disclose internals, or execute tools; detected injection/internal-information requests are refused before fact or intent extraction.
 - Intent classification excludes language, accent, frustration, synthetic persona labels, and protected or sensitive traits.
+- Action previews require deterministic disclosure, consent, contact-policy, opt-out, disposition, classification, and quota checks; unknown state blocks.
+- Callback policy is rechecked at dispatch, and deck generation accepts fixed industry/feature values rather than arbitrary buyer content.
 
 ## Security verification gates
 

@@ -5,8 +5,9 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from pitchbot.actions import ActionPreviewResult, DeckIndustry
 from pitchbot.conversation import ConversationDisposition, ConversationPhase, SafetySignal
-from pitchbot.domain import LanguageCode
+from pitchbot.domain import ContactPolicy, LanguageCode
 
 
 class SimulatorModel(BaseModel):
@@ -34,12 +35,16 @@ class SimulatorEventType(StrEnum):
 class CreateSessionRequest(SimulatorModel):
     lead_ref: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     language: LanguageCode = LanguageCode.MIXED
+    preview_consent_granted: bool = False
+    contact_policy: ContactPolicy = Field(default_factory=ContactPolicy)
 
 
 class TurnRequest(SimulatorModel):
     text: str = Field(min_length=1, max_length=4_000)
     language: LanguageCode
     preview_action: PreviewAction = PreviewAction.NONE
+    callback_delay_minutes: int = Field(default=5, ge=1, le=10_080)
+    deck_industry: DeckIndustry = DeckIndustry.APPAREL
     simulated_latency_ms: int = Field(default=0, ge=0, le=3_000)
     inject_failure: bool = False
 
@@ -63,7 +68,7 @@ class SessionResponse(SimulatorModel):
 class TurnResponse(SimulatorModel):
     session_id: UUID
     reply: str
-    preview: dict[str, str] | None
+    preview: ActionPreviewResult | None
     disposition: ConversationDisposition
     phase: ConversationPhase
     temperature: str

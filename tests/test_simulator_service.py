@@ -4,8 +4,9 @@ from datetime import UTC, datetime
 
 import pytest
 
+from pitchbot.actions import DeckIndustry
 from pitchbot.adapters import FakeClock
-from pitchbot.domain import LanguageCode
+from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
@@ -42,7 +43,17 @@ async def test_turn_language_preview_and_history_are_explicit(
     service: SimulatorService,
 ) -> None:
     session = service.create_session(
-        CreateSessionRequest(lead_ref="synthetic-2", language=LanguageCode.ENGLISH)
+        CreateSessionRequest(
+            lead_ref="synthetic-2",
+            language=LanguageCode.ENGLISH,
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
     )
 
     result = await service.process_turn(
@@ -54,10 +65,9 @@ async def test_turn_language_preview_and_history_are_explicit(
         ),
     )
 
-    assert result.preview == {
-        "action": "whatsapp-preview",
-        "label": "Mock WhatsApp preview prepared; nothing was sent.",
-    }
+    assert result.preview is not None
+    assert result.preview.label == "Mock WhatsApp preview prepared; nothing was sent."
+    assert result.preview.decision.status.value == "approved"
     assert result.events[-1].metadata["executed"] is False
     assert result.temperature == "warm"
     assert result.disposition.value == "continue"
@@ -242,6 +252,90 @@ async def test_safety_redirect_suppresses_requested_preview(
     assert result.disposition.value == "redirect"
     assert result.preview is None
     assert all(event.event_type is not SimulatorEventType.ACTION_PREVIEW for event in result.events)
+
+
+@pytest.mark.asyncio
+async def test_preview_is_blocked_by_default_and_records_reasons(
+    service: SimulatorService,
+) -> None:
+    session = service.create_session(CreateSessionRequest(lead_ref="blocked-preview"))
+
+    result = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            text="Please show a demo this week.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.ARTIFACT,
+        ),
+    )
+
+    assert result.preview is not None
+    assert result.preview.decision.status.value == "blocked"
+    assert result.preview.deck is None
+    assert result.events[-1].metadata["authorization"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_blocked_attempts_do_not_consume_approved_preview_quota(
+    service: SimulatorService,
+) -> None:
+    session = service.create_session(CreateSessionRequest(lead_ref="quota-preview"))
+    for _ in range(4):
+        result = await service.process_turn(
+            session.session_id,
+            TurnRequest(
+                text="Please show another demo.",
+                language=LanguageCode.ENGLISH,
+                preview_action=PreviewAction.WHATSAPP,
+            ),
+        )
+
+    assert result.preview is not None
+    assert result.preview.decision.status.value == "blocked"
+    assert all(reason.value != "quota-exceeded" for reason in result.preview.decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_approved_callback_and_deck_are_in_memory_previews(
+    service: SimulatorService,
+) -> None:
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref="approved-previews",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    callback = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            text="Please call back this week.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.CALLBACK,
+            callback_delay_minutes=2,
+        ),
+    )
+    deck = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            text="We sell books and need a catalog demo.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.ARTIFACT,
+            deck_industry=DeckIndustry.BOOKS,
+        ),
+    )
+
+    assert callback.preview is not None
+    assert callback.preview.callback is not None
+    assert callback.preview.callback.status.value == "scheduled"
+    assert deck.preview is not None
+    assert deck.preview.deck is not None
+    assert deck.preview.deck.industry.value == "books"
 
 
 def test_replay_is_deterministic_and_does_not_classify(service: SimulatorService) -> None:

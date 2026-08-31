@@ -22,6 +22,8 @@
           <option value="hi">Hindi</option>
         </select>
       </label>
+      <label><input id="preview-consent" type="checkbox"> Grant synthetic preview consent</label>
+      <label><input id="preview-eligible" type="checkbox"> Mark synthetic contact policy eligible</label>
       <button id="create-session">Create session</button>
       <button id="close-session" disabled>Close session</button>
       <span id="connection-status" role="status">Not connected</span>
@@ -40,6 +42,17 @@
         </select>
       </label>
       <label>Latency (ms) <input id="latency" type="number" min="0" max="3000" value="0"></label>
+      <label>Callback delay (minutes) <input id="callback-delay" type="number" min="1" max="10080" value="5"></label>
+      <label>Sample-deck industry
+        <select id="deck-industry">
+          <option value="apparel">Apparel</option>
+          <option value="toys">Toys</option>
+          <option value="books">Books</option>
+          <option value="food">Food</option>
+          <option value="import-export">Import/export</option>
+          <option value="plastics">Plastics</option>
+        </select>
+      </label>
       <label><input id="inject-failure" type="checkbox"> Inject deterministic failure</label>
       <div>
         <button id="send-turn" disabled>Send turn</button>

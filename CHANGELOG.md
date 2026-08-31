@@ -22,6 +22,7 @@ All notable changes to PitchBot are documented here.
 - Versioned VAD/STT/TTS/model candidate and synthetic corpus registries with license/provenance gates.
 - Unicode-aware WER/CER, VAD overlap, real-time factor, structured-output, duration-regression, timing, environment, and manifest validation utilities.
 - Deterministic multilingual conversation safety, bounded fact/revision extraction, evidence-grounded intent classification, and synthetic adversarial/persona cases.
+- Deny-by-default mock action authorization, minimized follow-ups, fake-time callback lifecycle, and six-industry structured sample-deck previews.
 
 ### Security
 

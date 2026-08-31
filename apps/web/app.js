@@ -47,6 +47,14 @@ document.getElementById("create-session").addEventListener("click", async () => 
       body: JSON.stringify({
         lead_ref: document.getElementById("lead-ref").value,
         language: document.getElementById("language").value,
+        preview_consent_granted: document.getElementById("preview-consent").checked,
+        contact_policy: document.getElementById("preview-eligible").checked ? {
+          outreach_allowed: true,
+          allowlisted: true,
+          dnd_check_passed: true,
+          calling_hours_check_passed: true,
+          opted_out: false,
+        } : {},
       }),
     });
     sessionId = body.session_id;
@@ -78,6 +86,8 @@ sendButton.addEventListener("click", async () => {
         text: document.getElementById("turn-text").value,
         language: document.getElementById("language").value,
         preview_action: document.getElementById("preview-action").value,
+        callback_delay_minutes: Number(document.getElementById("callback-delay").value),
+        deck_industry: document.getElementById("deck-industry").value,
         simulated_latency_ms: Number(document.getElementById("latency").value),
         inject_failure: document.getElementById("inject-failure").checked,
       }),

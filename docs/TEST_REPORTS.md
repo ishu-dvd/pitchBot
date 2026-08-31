@@ -178,3 +178,36 @@ No VAD, STT, TTS, STS, or model result is claimed by this report.
 - Rejected text, injected failures, interruption, and audio after conversation stop without retaining rejected input.
 - Hardened opt-out, internal-information, and prompt-injection matching against common separator and zero-width obfuscation.
 - Ordered simulator and conversation session creation to avoid partial session state.
+
+## Guarded follow-ups, callbacks, and sample decks
+
+- **Date:** 2026-08-31
+- **Environment:** Windows 11, Python 3.12.10
+- **Branch:** `feat/followups-artifacts`
+
+### Final validation
+
+- `pytest`: passed (104 tests, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (64 source files checked).
+- Browser JavaScript syntax: passed.
+- Pre-commit hooks: passed.
+- Dependency audit: passed with no known vulnerabilities; the editable local project was skipped.
+
+### Safety coverage
+
+- Default and unknown policy state blocks every preview with explicit reasons.
+- Explicit synthetic disclosure, consent, contact eligibility, conversation disposition, classification state, and quota are required.
+- Follow-up summaries ignore raw transcript and contact fields.
+- Fake-time callbacks validate future bounds, separate resource/operation keys, support cancel/reschedule, and recheck opt-out before mock dispatch.
+- Six-industry deck previews use fixed templates and allowlisted feature labels; no binary file or arbitrary buyer content is rendered.
+- Simulator previews invoke deterministic in-memory mocks only and never report a live action as executed.
+
+### Mandatory pre-commit self-review
+
+- Blocked Cold classifications in addition to review-needed classifications.
+- Counted only approved mock actions against the per-session quota.
+- Preserved immutable per-operation callback results for schedule/cancel idempotency replay.
+- Prevented blocked callback attempts from consuming active capacity and rejected cancellation outside scheduled state.
+- Removed lead identity from scheduler payloads and replaced arbitrary callback agenda/next-step content with fixed values.
+- Removed arbitrary deck business names and allowlisted every follow-up/deck field that reaches mock adapters or previews.

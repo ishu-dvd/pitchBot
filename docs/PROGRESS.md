@@ -78,3 +78,13 @@
 - **Safety decisions:** Opt-out has stop precedence; abuse receives at most one neutral redirection; internal-information and prompt-injection requests are refused before extraction; stopped sessions reject turns and previews; language, accent, frustration, persona, and protected/sensitive traits are never intent evidence.
 - **Deferred:** Model-backed extraction, durable conversation persistence, action authorization/execution, follow-up scheduling, artifacts, provider integration, and live channels.
 - **Rollback:** Revert the PR. Conversation state is process-local and creates no database migration, network request, provider action, or durable record.
+
+## PR 8: Guarded follow-ups, callbacks, and sample decks
+
+- **Branch:** `feat/followups-artifacts`
+- **Status:** Implementation, mandatory adversarial self-review, and final local validation complete; commit, push, CI, and PR pending.
+- **Base:** Merged PR 7 commit `28401a4`.
+- **Scope:** Deny-by-default action policy, minimized follow-up summaries, bounded callback schedule/cancel/reschedule and fake-time dispatch, structured six-industry sample decks, mock adapter orchestration, and guarded simulator previews.
+- **Safety decisions:** Buyer/model content cannot authorize actions; unknown or opted-out policy blocks; dispatch rechecks policy; callback resource and idempotency keys remain separate; only allowlisted facts/features enter follow-ups/decks; simulator defaults remain blocked.
+- **Deferred:** Durable scheduler/storage integration, binary PPTX/PDF rendering, model-generated decks, provider SDKs, real contact references, live calls/messages, and public deployment.
+- **Rollback:** Revert the PR. All callback/deck/action state is in-memory, uses deterministic mocks, and creates no migration, network request, live action, or retained file.

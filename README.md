@@ -15,9 +15,10 @@ The implemented application currently provides only:
 - A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
+- Deny-by-default mock action policy, minimized follow-ups, fake-time callback scheduling, and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.
 
-The simulator conversation state is process-local and is not yet connected to durable storage or provider mocks. Model-backed extraction, concrete speech/model providers, action workflows, deployment, telephony, and WhatsApp are intentionally deferred to separately reviewed pull requests.
+The simulator conversation, callback, and artifact state is process-local and is not yet connected to durable storage. Model-backed extraction, concrete speech/model providers, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 

@@ -31,7 +31,18 @@ async def test_static_simulator_is_same_origin_and_hardened(client: AsyncClient)
 async def test_session_turn_history_and_interrupt_flow(client: AsyncClient) -> None:
     created = await client.post(
         "/api/simulator/sessions",
-        json={"lead_ref": "api-synthetic", "language": "en"},
+        json={
+            "lead_ref": "api-synthetic",
+            "language": "en",
+            "preview_consent_granted": True,
+            "contact_policy": {
+                "outreach_allowed": True,
+                "allowlisted": True,
+                "dnd_check_passed": True,
+                "calling_hours_check_passed": True,
+                "opted_out": False,
+            },
+        },
     )
     assert created.status_code == 201
     session_id = created.json()["session_id"]
@@ -40,7 +51,7 @@ async def test_session_turn_history_and_interrupt_flow(client: AsyncClient) -> N
     turn = await client.post(
         f"/api/simulator/sessions/{session_id}/turns",
         json={
-            "text": "Show a preview",
+            "text": "Please schedule a callback preview",
             "language": "mixed",
             "preview_action": "callback-preview",
             "simulated_latency_ms": 0,
@@ -48,7 +59,8 @@ async def test_session_turn_history_and_interrupt_flow(client: AsyncClient) -> N
         },
     )
     assert turn.status_code == 200
-    assert turn.json()["preview"]["action"] == "callback-preview"
+    assert turn.json()["preview"]["decision"]["status"] == "approved"
+    assert turn.json()["preview"]["callback"]["status"] == "scheduled"
 
     interrupted = await client.post(f"/api/simulator/sessions/{session_id}/interrupt")
     assert interrupted.status_code == 200

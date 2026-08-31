@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. The repositories are not yet connected to HTTP endpoints or conversation logic.
+PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. PR 8 uses follow-up, schedule, proposal, execution, and artifact concepts in bounded process-local mock workflows; repositories are still not connected to HTTP action flows.
 
 ## Domain contracts
 
@@ -17,6 +17,8 @@ Immutable Pydantic contracts cover:
 - Privacy-operation audit records.
 
 All domain timestamps are timezone-aware. Unknown fields are rejected.
+
+Current follow-up summaries accept only allowlisted business type, feature, budget, timeline, and next-step fields. Callback resource IDs are distinct from schedule/cancel/dispatch idempotency keys. Structured deck previews contain fixed industry templates and allowlisted features; binary PPTX files are not generated.
 
 ## Database tables
 
