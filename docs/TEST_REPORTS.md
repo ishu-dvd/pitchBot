@@ -146,3 +146,35 @@ No VAD, STT, TTS, STS, or model result is claimed by this report.
 - Bounded manifest, audio, and transcript inputs and rejected non-standard JSON constants.
 - Required non-empty finite metrics plus exact non-placeholder candidate revision and verified model/voice license for measured results.
 - Prevented overlapping process-global `tracemalloc` measurements.
+
+## Deterministic conversation intelligence
+
+- **Date:** 2026-08-31
+- **Environment:** Windows 11, Python 3.12.10
+- **Branch:** `feat/conversation-intelligence`
+
+### Final validation
+
+- `pytest`: passed (91 tests, no warnings).
+- Ruff lint and format: passed.
+- `mypy src tests migrations`: passed (57 source files checked).
+- Pre-commit hooks: passed.
+- Dependency audit: passed with no known vulnerabilities; the editable local project was skipped.
+
+### Safety coverage
+
+- Explicit opt-out takes precedence over abuse and prompt-injection signals, closes the conversation, and suppresses action previews.
+- Abuse receives one neutral redirection before a second abusive turn closes the conversation.
+- Internal-information and instruction-bypass requests are refused before fact or intent extraction.
+- Repeated turns do not duplicate facts or evidence; changed requirements create explicit revisions and excessive changes request review.
+- Classification uses only explicit commercial evidence and excludes language, accent, frustration, persona labels, and protected or sensitive traits.
+- Synthetic English, Hindi, and Hinglish cases cover varied interaction styles and adversarial behaviors without inferring personas for real buyers.
+
+### Mandatory pre-commit self-review
+
+- Deduplicated evidence dimensions so paraphrased requests cannot inflate intent scores.
+- Returned only facts and revisions accepted within configured state bounds.
+- Suppressed previews for redirects, review-required turns, and stopped conversations.
+- Rejected text, injected failures, interruption, and audio after conversation stop without retaining rejected input.
+- Hardened opt-out, internal-information, and prompt-injection matching against common separator and zero-width obfuscation.
+- Ordered simulator and conversation session creation to avoid partial session state.

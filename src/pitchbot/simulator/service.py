@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 from pitchbot.adapters.clock import Clock, SystemClock
+from pitchbot.conversation import ConversationDisposition, ConversationEngine
 from pitchbot.domain import LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
@@ -25,13 +26,6 @@ DISCLOSURES = {
     LanguageCode.HINDI: "नमस्ते, मैं पिचबॉट हूँ, एक एआई सेल्स असिस्टेंट। यह एक सिमुलेशन है।",
     LanguageCode.MIXED: "Namaste, main PitchBot hoon, ek AI sales assistant. Yeh simulation hai.",
     LanguageCode.UNKNOWN: "Hello, I am PitchBot, an AI sales assistant. Please choose a language.",
-}
-
-REPLIES = {
-    LanguageCode.ENGLISH: "Thanks for sharing. This simulator recorded the turn for review.",
-    LanguageCode.HINDI: "जानकारी साझा करने के लिए धन्यवाद। सिमुलेटर ने समीक्षा के लिए इसे दर्ज किया है।",
-    LanguageCode.MIXED: "Thanks. Simulator ne is turn ko review ke liye record kiya hai.",
-    LanguageCode.UNKNOWN: "Please choose English, Hindi, or mixed language.",
 }
 
 
@@ -63,6 +57,7 @@ class SimulatorService:
         max_events_per_session: int = 200,
         max_history_events_per_lead: int = 500,
         max_audio_chunks_per_session: int = 2_000,
+        conversation_engine: ConversationEngine | None = None,
     ) -> None:
         if (
             min(
@@ -78,6 +73,7 @@ class SimulatorService:
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
         self._max_audio_chunks_per_session = max_audio_chunks_per_session
+        self._conversation = conversation_engine or ConversationEngine()
         self._sessions: dict[UUID, _Session] = {}
 
     def create_session(self, request: CreateSessionRequest) -> SessionResponse:
@@ -89,6 +85,7 @@ class SimulatorService:
             language=request.language,
             events=deque(maxlen=self._max_events_per_session),
         )
+        self._conversation.create_session(session.session_id)
         self._sessions[session.session_id] = session
         self._append_event(
             session,
@@ -101,6 +98,7 @@ class SimulatorService:
     async def process_turn(self, session_id: UUID, request: TurnRequest) -> TurnResponse:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_conversation_open(session_id)
             if request.inject_failure:
                 self._append_event(
                     session,
@@ -110,7 +108,11 @@ class SimulatorService:
                 raise InjectedSimulatorError("Deterministic simulator failure injected")
             if request.simulated_latency_ms:
                 await asyncio.sleep(request.simulated_latency_ms / 1_000)
-
+            outcome = self._conversation.process_turn(
+                session.session_id,
+                text=request.text,
+                language=request.language,
+            )
             session.language = request.language
             self._append_event(
                 session,
@@ -118,15 +120,29 @@ class SimulatorService:
                 text=request.text,
                 language=request.language,
             )
-            reply = REPLIES[request.language]
+            reply = outcome.reply
             self._append_event(
                 session,
                 SimulatorEventType.ASSISTANT_TURN,
                 text=reply,
                 language=request.language,
             )
+            self._append_event(
+                session,
+                SimulatorEventType.CONVERSATION_OUTCOME,
+                language=request.language,
+                metadata={
+                    "disposition": outcome.disposition.value,
+                    "phase": outcome.phase.value,
+                    "temperature": outcome.classification.temperature.value,
+                    "safety_signal_count": len(outcome.safety_signals),
+                    "repeated_turn": outcome.repeated_turn,
+                },
+            )
             preview = self._preview(request.preview_action)
-            if preview is not None:
+            if outcome.disposition is not ConversationDisposition.CONTINUE:
+                preview = None
+            elif preview is not None:
                 self._append_event(
                     session,
                     SimulatorEventType.ACTION_PREVIEW,
@@ -138,12 +154,18 @@ class SimulatorService:
                 session_id=session.session_id,
                 reply=reply,
                 preview=preview,
+                disposition=outcome.disposition,
+                phase=outcome.phase,
+                temperature=outcome.classification.temperature.value,
+                safety_signals=list(outcome.safety_signals),
+                repeated_turn=outcome.repeated_turn,
                 events=list(session.events),
             )
 
     async def interrupt(self, session_id: UUID) -> SessionResponse:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_conversation_open(session_id)
             self._append_event(
                 session,
                 SimulatorEventType.INTERRUPTION,
@@ -159,6 +181,7 @@ class SimulatorService:
     ) -> SimulatorEvent:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_conversation_open(session_id)
             if session.audio_chunks_received >= self._max_audio_chunks_per_session:
                 raise RuntimeError("Simulator audio metadata capacity reached")
             session.audio_chunks_received += 1
@@ -187,6 +210,7 @@ class SimulatorService:
         session = self._get_session(session_id)
         async with session.lock:
             self._sessions.pop(session_id, None)
+            self._conversation.close_session(session_id)
 
     def replay(self, scenario_id: str) -> list[dict[str, str]]:
         try:
@@ -207,6 +231,10 @@ class SimulatorService:
             return self._sessions[session_id]
         except KeyError as error:
             raise SessionNotFoundError(f"Unknown session: {session_id}") from error
+
+    def _ensure_conversation_open(self, session_id: UUID) -> None:
+        if self._conversation.snapshot(session_id).stopped:
+            raise RuntimeError("Conversation is closed")
 
     def _append_event(
         self,

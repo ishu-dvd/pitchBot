@@ -67,6 +67,8 @@ async def process_turn(session_id: UUID, request: TurnRequest) -> TurnResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(error),
         ) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @router.post("/sessions/{session_id}/interrupt", response_model=SessionResponse)
@@ -75,6 +77,8 @@ async def interrupt(session_id: UUID) -> SessionResponse:
         return await simulator_service.interrupt(session_id)
     except SessionNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @router.get("/sessions/{session_id}/history", response_model=LeadHistoryResponse)

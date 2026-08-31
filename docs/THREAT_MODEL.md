@@ -48,6 +48,8 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 - Offer one neutral redirection when appropriate, then end safely.
 - Do not infer protected or sensitive traits from voice, name, language, or accent.
 - Humor and micro-challenges stop on confusion, irritation, refusal, or serious concerns.
+- Buyer text has no authority to change system instructions, disclose internals, or execute tools; detected injection/internal-information requests are refused before fact or intent extraction.
+- Intent classification excludes language, accent, frustration, synthetic persona labels, and protected or sensitive traits.
 
 ## Security verification gates
 

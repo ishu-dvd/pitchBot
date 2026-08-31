@@ -17,12 +17,14 @@ It currently supports:
 - Microphone capture through `MediaRecorder`, preferring Opus where supported.
 - Same-origin WebSocket audio transport with bounded browser queues, backpressure, capped reconnects, and chunk limits.
 - Explicit session closure and capacity recovery.
+- Session-scoped deterministic discovery, requirement revisions, repetition handling, and evidence-grounded Hot/Warm/Cold/Review outcomes.
+- Immediate opt-out stop, one neutral abuse redirection, and safe refusal of internal-information, jailbreak, and prompt-injection requests.
 
 ## Not implemented
 
 - No PSTN, WhatsApp call, WhatsApp message, callback, or artifact action.
 - No speech-to-text or local TTS provider integration.
-- No intent classification, discovery extraction, or conversation state machine.
+- No model-backed/free-form extraction; the current conversation rules are deterministic and intentionally bounded.
 - No durable simulator history; state is process-local and disappears on restart.
 - No authenticated public multi-user deployment. Session UUIDs are local simulator capabilities, not production authentication.
 - No measured browser-audio delivery, transcription accuracy, or latency guarantee.
@@ -63,6 +65,7 @@ The UI may use browser-native speech synthesis for audible replies. Voice availa
 - UI rendering uses `textContent`, not HTML insertion, for transcript and replay content.
 - History exists only inside the current session and requires its UUID; reusing a lead reference cannot expose another session.
 - Sessions, events, lead history, audio metadata, text length, audio chunks, reconnects, and simulated latency are bounded.
+- Conversation turns, retained facts, evidence, and classification history are bounded; only high-level outcomes enter simulator metadata.
 
 ## Cleanup
 
