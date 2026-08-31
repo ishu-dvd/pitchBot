@@ -28,3 +28,4 @@ All notable changes to PitchBot are documented here.
 
 - Added CI secret scanning.
 - Excluded environment files, secrets, runtime data, logs, and artifacts from version control.
+- Hardened mock action retries, callback cancellation races, concurrent capacity admission, session cleanup, and paraphrased internal-instruction extraction attempts.

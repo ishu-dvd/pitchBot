@@ -8,9 +8,9 @@ It currently supports:
 
 - Disclosure-first synthetic sessions.
 - English, Hindi, and mixed-language selection.
-- Text turns with bounded length.
+- Text turns with bounded length and retry-safe client operation identifiers.
 - Policy-reviewed mock WhatsApp, callback, and structured artifact previews with explicit synthetic consent/contact eligibility.
-- Deterministic latency and failure injection.
+- Deterministic latency and failure injection with local state rollback for known action failures.
 - Bounded session timelines and session-scoped history with no cross-session `lead_ref` lookup.
 - Playback interruption using browser speech synthesis cancellation.
 - Deterministic English/Hindi/Hinglish replay fixtures.
@@ -67,8 +67,9 @@ The UI may use browser-native speech synthesis for audible replies. Voice availa
 - UI rendering uses `textContent`, not HTML insertion, for transcript and replay content.
 - History exists only inside the current session and requires its UUID; reusing a lead reference cannot expose another session.
 - Sessions, events, lead history, audio metadata, text length, audio chunks, reconnects, and simulated latency are bounded.
-- Conversation turns, retained facts, evidence, and classification history are bounded; only high-level outcomes enter simulator metadata.
+- Conversation turns, retained turn operations (including failures), facts, evidence, classification history, action records, and mock adapter histories are bounded; only high-level outcomes enter simulator metadata.
+- Turn API callers must provide and reuse `operation_id` for retries; conflicting reuse and operation-capacity exhaustion fail closed.
 
 ## Cleanup
 
-Use **Close session** to remove process-local session state and stop microphone tracks/sockets. Stopping the API clears all remaining simulator memory. No database record or external provider state is created.
+Use **Close session** to remove process-local session, callback, deck, and mock action history and stop microphone tracks/sockets. Scheduled mock callbacks are canceled before removal. A failed or canceled cleanup keeps the session closed to normal work but permits another close request to retry cleanup. Stopping the API clears all remaining simulator memory. No database record or external provider state is created.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from pitchbot.actions import (
@@ -14,7 +15,7 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
-from pitchbot.adapters import Clock, SystemClock
+from pitchbot.adapters import AdapterError, Clock, SystemClock
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
     MockSchedulerAdapter,
@@ -52,6 +53,18 @@ class InjectedSimulatorError(RuntimeError):
     pass
 
 
+class TurnConflictError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class _TurnOperation:
+    fingerprint: str
+    started_at: datetime
+    response: TurnResponse | None = None
+    injected_failure: str | None = None
+
+
 @dataclass(slots=True)
 class _Session:
     session_id: UUID
@@ -63,7 +76,8 @@ class _Session:
     next_sequence: int = 1
     audio_chunks_received: int = 0
     approved_preview_count: int = 0
-    preview_attempt_count: int = 0
+    closing: bool = False
+    turn_operations: dict[UUID, _TurnOperation] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -76,6 +90,7 @@ class SimulatorService:
         max_events_per_session: int = 200,
         max_history_events_per_lead: int = 500,
         max_audio_chunks_per_session: int = 2_000,
+        max_turn_operations_per_session: int = 100,
         conversation_engine: ConversationEngine | None = None,
         action_workflows: ActionWorkflowService | None = None,
     ) -> None:
@@ -85,6 +100,7 @@ class SimulatorService:
                 max_events_per_session,
                 max_history_events_per_lead,
                 max_audio_chunks_per_session,
+                max_turn_operations_per_session,
             )
             < 1
         ):
@@ -93,6 +109,7 @@ class SimulatorService:
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
         self._max_audio_chunks_per_session = max_audio_chunks_per_session
+        self._max_turn_operations_per_session = max_turn_operations_per_session
         self._conversation = conversation_engine or ConversationEngine()
         if action_workflows is None:
             action_policy = ActionPolicy(clock=self._clock)
@@ -138,14 +155,36 @@ class SimulatorService:
     async def process_turn(self, session_id: UUID, request: TurnRequest) -> TurnResponse:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_session_active(session_id, session)
+            fingerprint = request.model_dump_json(exclude={"operation_id"})
+            operation = session.turn_operations.get(request.operation_id)
+            if operation is not None:
+                if operation.fingerprint != fingerprint:
+                    raise TurnConflictError("Turn operation identifier reused with different input")
+                if operation.response is not None:
+                    return operation.response
+                if operation.injected_failure is not None:
+                    raise InjectedSimulatorError(operation.injected_failure)
+            else:
+                if len(session.turn_operations) >= self._max_turn_operations_per_session:
+                    raise RuntimeError("Simulator turn operation capacity reached")
+                operation = _TurnOperation(fingerprint=fingerprint, started_at=self._clock.now())
+                session.turn_operations[request.operation_id] = operation
             self._ensure_conversation_open(session_id)
             if request.inject_failure:
+                message = "Deterministic simulator failure injected"
                 self._append_event(
                     session,
                     SimulatorEventType.FAILURE,
-                    text="Deterministic simulator failure injected.",
+                    text=f"{message}.",
                 )
-                raise InjectedSimulatorError("Deterministic simulator failure injected")
+                operation.injected_failure = message
+                raise InjectedSimulatorError(message)
+            conversation_checkpoint = self._conversation.checkpoint(session_id)
+            event_checkpoint = deque(session.events, maxlen=session.events.maxlen)
+            language_checkpoint = session.language
+            next_sequence_checkpoint = session.next_sequence
+            approved_preview_checkpoint = session.approved_preview_count
             if request.simulated_latency_ms:
                 await asyncio.sleep(request.simulated_latency_ms / 1_000)
             outcome = self._conversation.process_turn(
@@ -183,7 +222,6 @@ class SimulatorService:
             if outcome.disposition is not ConversationDisposition.CONTINUE:
                 preview = None
             elif request.preview_action is not PreviewAction.NONE:
-                session.preview_attempt_count += 1
                 snapshot = self._conversation.snapshot(session.session_id)
                 context = ActionAuthorizationContext(
                     disclosure_delivered=True,
@@ -194,41 +232,57 @@ class SimulatorService:
                     used_actions=session.approved_preview_count,
                 )
                 facts = {fact.key: fact.value for fact in snapshot.facts}
-                if request.preview_action is PreviewAction.WHATSAPP:
-                    preview = await self._actions.preview_whatsapp(
-                        session_id=session.session_id,
-                        follow_up=build_follow_up(
+                try:
+                    if request.preview_action is PreviewAction.WHATSAPP:
+                        preview = await self._actions.preview_whatsapp(
+                            session_id=session.session_id,
+                            follow_up=build_follow_up(
+                                lead_id=snapshot.lead_id,
+                                language=request.language,
+                                facts=facts,
+                                next_steps=("Review the synthetic preview",),
+                            ),
+                            context=context,
+                            operation_id=request.operation_id,
+                        )
+                    elif request.preview_action is PreviewAction.CALLBACK:
+                        preview = await self._actions.preview_callback(
+                            session_id=session.session_id,
                             lead_id=snapshot.lead_id,
+                            delay_minutes=request.callback_delay_minutes,
+                            context=context,
+                            operation_id=request.operation_id,
+                            requested_at=operation.started_at,
+                        )
+                    else:
+                        features = tuple(
+                            item.strip()
+                            for item in str(facts.get("requested_features", "")).split(",")
+                            if item.strip()
+                        )
+                        preview = await self._actions.preview_deck(
+                            session_id=session.session_id,
+                            lead_id=snapshot.lead_id,
+                            industry=request.deck_industry,
                             language=request.language,
-                            facts=facts,
-                            next_steps=("Review the synthetic preview",),
-                        ),
-                        context=context,
-                        operation_number=session.preview_attempt_count,
-                    )
-                elif request.preview_action is PreviewAction.CALLBACK:
-                    preview = await self._actions.preview_callback(
-                        session_id=session.session_id,
-                        lead_id=snapshot.lead_id,
-                        delay_minutes=request.callback_delay_minutes,
-                        context=context,
-                        operation_number=session.preview_attempt_count,
-                    )
-                else:
-                    features = tuple(
-                        item.strip()
-                        for item in str(facts.get("requested_features", "")).split(",")
-                        if item.strip()
-                    )
-                    preview = await self._actions.preview_deck(
-                        session_id=session.session_id,
-                        lead_id=snapshot.lead_id,
-                        industry=request.deck_industry,
-                        language=request.language,
-                        features=features,
-                        context=context,
-                        operation_number=session.preview_attempt_count,
-                    )
+                            features=features,
+                            context=context,
+                            operation_id=request.operation_id,
+                        )
+                except asyncio.CancelledError:
+                    self._conversation.restore(session_id, conversation_checkpoint)
+                    session.events = event_checkpoint
+                    session.language = language_checkpoint
+                    session.next_sequence = next_sequence_checkpoint
+                    session.approved_preview_count = approved_preview_checkpoint
+                    raise
+                except (AdapterError, RuntimeError, ValueError):
+                    self._conversation.restore(session_id, conversation_checkpoint)
+                    session.events = event_checkpoint
+                    session.language = language_checkpoint
+                    session.next_sequence = next_sequence_checkpoint
+                    session.approved_preview_count = approved_preview_checkpoint
+                    raise
                 if preview.decision.status.value == "approved":
                     session.approved_preview_count += 1
                 self._append_event(
@@ -243,7 +297,7 @@ class SimulatorService:
                         "executed": preview.executed,
                     },
                 )
-            return TurnResponse(
+            response = TurnResponse(
                 session_id=session.session_id,
                 reply=reply,
                 preview=preview,
@@ -254,10 +308,13 @@ class SimulatorService:
                 repeated_turn=outcome.repeated_turn,
                 events=list(session.events),
             )
+            operation.response = response
+            return response
 
     async def interrupt(self, session_id: UUID) -> SessionResponse:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_session_active(session_id, session)
             self._ensure_conversation_open(session_id)
             self._append_event(
                 session,
@@ -274,6 +331,7 @@ class SimulatorService:
     ) -> SimulatorEvent:
         session = self._get_session(session_id)
         async with session.lock:
+            self._ensure_session_active(session_id, session)
             self._ensure_conversation_open(session_id)
             if session.audio_chunks_received >= self._max_audio_chunks_per_session:
                 raise RuntimeError("Simulator audio metadata capacity reached")
@@ -300,8 +358,12 @@ class SimulatorService:
         )
 
     async def close_session(self, session_id: UUID) -> None:
-        session = self._get_session(session_id)
+        session = self._get_session(session_id, allow_closing=True)
         async with session.lock:
+            if self._sessions.get(session_id) is not session:
+                raise SessionNotFoundError(f"Unknown session: {session_id}")
+            session.closing = True
+            await self._actions.cleanup_session(session_id)
             self._sessions.pop(session_id, None)
             self._conversation.close_session(session_id)
 
@@ -319,11 +381,18 @@ class SimulatorService:
             for turn in scenario
         ]
 
-    def _get_session(self, session_id: UUID) -> _Session:
+    def _get_session(self, session_id: UUID, *, allow_closing: bool = False) -> _Session:
         try:
-            return self._sessions[session_id]
+            session = self._sessions[session_id]
         except KeyError as error:
             raise SessionNotFoundError(f"Unknown session: {session_id}") from error
+        if session.closing and not allow_closing:
+            raise SessionNotFoundError(f"Unknown session: {session_id}")
+        return session
+
+    def _ensure_session_active(self, session_id: UUID, session: _Session) -> None:
+        if session.closing or self._sessions.get(session_id) is not session:
+            raise SessionNotFoundError(f"Unknown session: {session_id}")
 
     def _ensure_conversation_open(self, session_id: UUID) -> None:
         if self._conversation.snapshot(session_id).stopped:

@@ -143,6 +143,17 @@ class _IdempotentActions:
         self._failures = deque(failures or [])
         self._max_actions = max_actions
 
+    def clear_operations(self, idempotency_key_prefix: str) -> None:
+        keys = tuple(key for key in self._results if key.startswith(idempotency_key_prefix))
+        for key in keys:
+            self._results.pop(key, None)
+            self._fingerprints.pop(key, None)
+        self.actions[:] = [
+            action
+            for action in self.actions
+            if not action.idempotency_key.startswith(idempotency_key_prefix)
+        ]
+
     def record(
         self,
         operation: str,

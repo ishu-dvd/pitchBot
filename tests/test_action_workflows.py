@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -20,13 +22,77 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
-from pitchbot.adapters import FakeClock
+from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
     MockSchedulerAdapter,
     MockTelephonyAdapter,
 )
-from pitchbot.domain import ActionType, ContactPolicy, LanguageCode, LeadTemperature
+from pitchbot.domain import ActionType, ContactPolicy, JsonValue, LanguageCode, LeadTemperature
+
+
+class BlockingScheduleAdapter(MockSchedulerAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.schedule_calls = 0
+
+    async def schedule(
+        self,
+        job_key: str,
+        run_at: datetime,
+        payload: Mapping[str, JsonValue],
+        idempotency_key: str,
+    ) -> ActionResult:
+        self.schedule_calls += 1
+        self.started.set()
+        await self.release.wait()
+        return await super().schedule(job_key, run_at, payload, idempotency_key)
+
+
+class BlockingCancelAdapter(MockSchedulerAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_started = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+
+    async def cancel(self, job_key: str, idempotency_key: str) -> ActionResult:
+        self.cancel_started.set()
+        await self.release_cancel.wait()
+        return await super().cancel(job_key, idempotency_key)
+
+
+class AcceptedThenTimeoutCancelAdapter(MockSchedulerAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeout_once = True
+
+    async def cancel(self, job_key: str, idempotency_key: str) -> ActionResult:
+        result = await super().cancel(job_key, idempotency_key)
+        if self.timeout_once:
+            self.timeout_once = False
+            raise AdapterTimeoutError("ambiguous cancellation timeout")
+        return result
+
+
+class BlockingArtifactAdapter(MockArtifactAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.create_calls = 0
+
+    async def create(
+        self,
+        artifact_key: str,
+        payload: Mapping[str, JsonValue],
+        idempotency_key: str,
+    ) -> ActionResult:
+        self.create_calls += 1
+        self.started.set()
+        await self.release.wait()
+        return await super().create(artifact_key, payload, idempotency_key)
 
 
 def eligible_context(**changes: object) -> ActionAuthorizationContext:
@@ -316,3 +382,227 @@ async def test_all_industry_decks_are_bounded_and_idempotent() -> None:
 
     assert len(adapter.actions) == 6
     assert all(action.payload["field_count"] == 4 for action in adapter.actions)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callback_admission_cannot_exceed_capacity() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = BlockingScheduleAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+
+    def request(identifier: str) -> CallbackRequest:
+        return CallbackRequest(
+            lead_id=uuid4(),
+            callback_id=identifier,
+            run_at=clock.now() + timedelta(minutes=1),
+            timezone="UTC",
+            idempotency_key=f"schedule-{identifier}",
+        )
+
+    first = asyncio.create_task(service.schedule(request("first"), eligible_context()))
+    await scheduler.started.wait()
+    second = asyncio.create_task(service.schedule(request("second"), eligible_context()))
+    await asyncio.sleep(0)
+    assert scheduler.schedule_calls == 1
+
+    scheduler.release.set()
+    assert (await first).status is CallbackStatus.SCHEDULED
+    with pytest.raises(RuntimeError, match="capacity"):
+        await second
+    assert len(scheduler.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_claim_prevents_concurrent_due_dispatch() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = BlockingCancelAdapter()
+    telephony = MockTelephonyAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="cancel-race",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="schedule-cancel-race",
+    )
+    await service.schedule(request, eligible_context())
+    clock.advance(timedelta(minutes=1))
+
+    cancellation = asyncio.create_task(
+        service.cancel(request.callback_id, idempotency_key="cancel-race-operation")
+    )
+    await scheduler.cancel_started.wait()
+    dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
+    await asyncio.sleep(0)
+    assert not telephony.actions
+
+    scheduler.release_cancel.set()
+    assert (await cancellation).status is CallbackStatus.CANCELED
+    assert await dispatch == ()
+    assert not telephony.actions
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_cancellation_remains_non_dispatchable_until_reconciled() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = AcceptedThenTimeoutCancelAdapter()
+    telephony = MockTelephonyAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="ambiguous-cancel",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="schedule-ambiguous-cancel",
+    )
+    await service.schedule(request, eligible_context())
+    clock.advance(timedelta(minutes=1))
+
+    with pytest.raises(AdapterTimeoutError, match="ambiguous"):
+        await service.cancel(request.callback_id, idempotency_key="cancel-ambiguous")
+
+    assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_PENDING
+    assert await service.dispatch_due(lambda _: eligible_context()) == ()
+    assert not telephony.actions
+    reconciled = await service.cancel(request.callback_id, idempotency_key="cancel-ambiguous")
+    assert reconciled.status is CallbackStatus.CANCELED
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deck_admission_cannot_exceed_capacity() -> None:
+    adapter = BlockingArtifactAdapter()
+    service = DeckService(artifact_adapter=adapter, max_decks=1)
+
+    def request(identifier: str) -> DeckRequest:
+        return DeckRequest(
+            lead_id=uuid4(),
+            deck_id=identifier,
+            industry=DeckIndustry.APPAREL,
+            language=LanguageCode.ENGLISH,
+            idempotency_key=f"create-{identifier}",
+        )
+
+    first = asyncio.create_task(service.create(request("first")))
+    await adapter.started.wait()
+    second = asyncio.create_task(service.create(request("second")))
+    await asyncio.sleep(0)
+    assert adapter.create_calls == 1
+
+    adapter.release.set()
+    assert (await first).deck_id == "first"
+    with pytest.raises(RuntimeError, match="capacity"):
+        await second
+    assert len(adapter.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_resource_cleanup_reclaims_callback_and_deck_capacity() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter()
+    telephony = MockTelephonyAdapter()
+    callbacks = CallbackService(
+        scheduler=scheduler,
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    decks = DeckService(artifact_adapter=MockArtifactAdapter(), max_decks=1)
+    callback = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="owned-callback-1",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="owned-callback-operation-1",
+    )
+    deck = DeckRequest(
+        lead_id=uuid4(),
+        deck_id="owned-deck-1",
+        industry=DeckIndustry.BOOKS,
+        language=LanguageCode.ENGLISH,
+        idempotency_key="owned-deck-operation-1",
+    )
+    await callbacks.schedule(callback, eligible_context())
+    await decks.create(deck)
+    clock.advance(timedelta(minutes=1))
+    assert await callbacks.dispatch_due(lambda _: eligible_context())
+    assert telephony.actions
+
+    await callbacks.remove_by_prefix("owned-callback-", "owned-callback-operation-")
+    await decks.remove_by_prefix("owned-deck-", "owned-deck-operation-")
+
+    assert not scheduler.jobs
+    assert not scheduler.actions
+    assert not telephony.actions
+    with pytest.raises(LookupError):
+        callbacks.get(callback.callback_id)
+    with pytest.raises(LookupError):
+        decks.get(deck.deck_id)
+    assert (
+        await callbacks.schedule(
+            callback.model_copy(
+                update={
+                    "callback_id": "replacement-callback",
+                    "run_at": clock.now() + timedelta(minutes=1),
+                    "idempotency_key": "replacement-callback-operation",
+                }
+            ),
+            eligible_context(),
+        )
+    ).status is CallbackStatus.SCHEDULED
+    assert (
+        await decks.create(
+            deck.model_copy(
+                update={
+                    "deck_id": "replacement-deck",
+                    "idempotency_key": "replacement-deck-operation",
+                }
+            )
+        )
+    ).deck_id == "replacement-deck"
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_cancellation_leaves_callback_non_dispatchable() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = AcceptedThenTimeoutCancelAdapter()
+    telephony = MockTelephonyAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="cleanup-failure-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="cleanup-failure-operation",
+    )
+    await service.schedule(request, eligible_context())
+    clock.advance(timedelta(minutes=1))
+
+    with pytest.raises(AdapterTimeoutError, match="ambiguous"):
+        await service.remove_by_prefix("cleanup-failure-", "cleanup-failure-operation")
+
+    assert request.callback_id not in scheduler.jobs
+    assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_PENDING
+    assert await service.dispatch_due(lambda _: eligible_context()) == ()
+    assert not telephony.actions

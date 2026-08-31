@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import UUID, uuid4
 
 from pitchbot.conversation.models import (
@@ -197,6 +198,12 @@ class ConversationEngine:
             evidence=tuple(state.evidence),
             classifications=tuple(state.classifications),
         )
+
+    def checkpoint(self, session_id: UUID) -> ConversationState:
+        return deepcopy(self._get_state(session_id))
+
+    def restore(self, session_id: UUID, checkpoint: ConversationState) -> None:
+        self._states[session_id] = checkpoint
 
     def close_session(self, session_id: UUID) -> None:
         self._states.pop(session_id, None)

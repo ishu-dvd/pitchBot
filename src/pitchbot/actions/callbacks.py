@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -11,7 +12,12 @@ from pitchbot.actions.models import (
     CallbackStatus,
 )
 from pitchbot.actions.policy import ActionPolicy
-from pitchbot.adapters import Clock, SchedulerAdapter, TelephonyAdapter
+from pitchbot.adapters import (
+    Clock,
+    EphemeralOperationStore,
+    SchedulerAdapter,
+    TelephonyAdapter,
+)
 from pitchbot.domain import ActionType
 
 
@@ -41,8 +47,18 @@ class CallbackService:
         self._records: dict[str, CallbackRecord] = {}
         self._operation_fingerprints: dict[str, tuple[str, str]] = {}
         self._operation_results: dict[str, CallbackRecord] = {}
+        self._pending_cancellations: dict[str, str] = {}
+        self._lock = asyncio.Lock()
 
     async def schedule(
+        self,
+        request: CallbackRequest,
+        context: ActionAuthorizationContext,
+    ) -> CallbackRecord:
+        async with self._lock:
+            return await self._schedule(request, context)
+
+    async def _schedule(
         self,
         request: CallbackRequest,
         context: ActionAuthorizationContext,
@@ -58,12 +74,16 @@ class CallbackService:
             return self._blocked(request, BlockReason.CALLBACK_TIME_INVALID)
         existing = self._records.get(request.callback_id)
         active_count = sum(
-            record.status is CallbackStatus.SCHEDULED for record in self._records.values()
+            record.status in {CallbackStatus.SCHEDULED, CallbackStatus.CANCELLATION_PENDING}
+            for record in self._records.values()
         )
         if existing is None and active_count >= self._max_callbacks:
             raise RuntimeError("Callback capacity reached")
-        if existing is not None and existing.status is CallbackStatus.SCHEDULED:
-            raise CallbackConflictError("Callback is already scheduled; cancel before rescheduling")
+        if existing is not None and existing.status in {
+            CallbackStatus.SCHEDULED,
+            CallbackStatus.CANCELLATION_PENDING,
+        }:
+            raise CallbackConflictError("Callback is already scheduled or cancellation is pending")
 
         decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
         if decision.reasons:
@@ -87,6 +107,10 @@ class CallbackService:
         return record
 
     async def cancel(self, callback_id: str, *, idempotency_key: str) -> CallbackRecord:
+        async with self._lock:
+            return await self._cancel(callback_id, idempotency_key=idempotency_key)
+
+    async def _cancel(self, callback_id: str, *, idempotency_key: str) -> CallbackRecord:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must not be empty")
         fingerprint = ("cancel", callback_id)
@@ -97,7 +121,19 @@ class CallbackService:
             existing = self._records[callback_id]
         except KeyError as error:
             raise LookupError("Callback not found") from error
-        if existing.status is not CallbackStatus.SCHEDULED:
+        pending_key = self._pending_cancellations.get(callback_id)
+        if existing.status is CallbackStatus.CANCELLATION_PENDING:
+            if pending_key != idempotency_key:
+                raise CallbackConflictError("Callback cancellation outcome is pending")
+        elif existing.status is CallbackStatus.SCHEDULED:
+            self._records[callback_id] = existing.model_copy(
+                update={
+                    "status": CallbackStatus.CANCELLATION_PENDING,
+                    "updated_at": self._clock.now(),
+                }
+            )
+            self._pending_cancellations[callback_id] = idempotency_key
+        else:
             raise CallbackConflictError("Only a scheduled callback can be canceled")
         result = await self._scheduler.cancel(callback_id, idempotency_key)
         record = existing.model_copy(
@@ -107,10 +143,18 @@ class CallbackService:
                 "updated_at": self._clock.now(),
             }
         )
+        self._pending_cancellations.pop(callback_id, None)
         self._store_operation(idempotency_key, fingerprint, record)
         return record
 
     async def dispatch_due(
+        self,
+        context_for: Callable[[CallbackRequest], ActionAuthorizationContext],
+    ) -> tuple[CallbackRecord, ...]:
+        async with self._lock:
+            return await self._dispatch_due(context_for)
+
+    async def _dispatch_due(
         self,
         context_for: Callable[[CallbackRequest], ActionAuthorizationContext],
     ) -> tuple[CallbackRecord, ...]:
@@ -154,6 +198,48 @@ class CallbackService:
             return self._records[callback_id]
         except KeyError as error:
             raise LookupError("Callback not found") from error
+
+    async def remove_by_prefix(self, callback_id_prefix: str, operation_key_prefix: str) -> None:
+        async with self._lock:
+            callback_ids = tuple(
+                callback_id
+                for callback_id in self._records
+                if callback_id.startswith(callback_id_prefix)
+            )
+            for callback_id in callback_ids:
+                record = self._records[callback_id]
+                if record.status is CallbackStatus.SCHEDULED:
+                    cancellation_key = f"cleanup:{callback_id}"
+                    self._records[callback_id] = record.model_copy(
+                        update={
+                            "status": CallbackStatus.CANCELLATION_PENDING,
+                            "updated_at": self._clock.now(),
+                        }
+                    )
+                    self._pending_cancellations[callback_id] = cancellation_key
+                    await self._scheduler.cancel(callback_id, cancellation_key)
+                elif record.status is CallbackStatus.CANCELLATION_PENDING:
+                    cancellation_key = self._pending_cancellations[callback_id]
+                    await self._scheduler.cancel(callback_id, cancellation_key)
+                elif record.status is CallbackStatus.DISPATCHED and isinstance(
+                    self._scheduler, EphemeralOperationStore
+                ):
+                    await self._scheduler.cancel(callback_id, f"cleanup:{callback_id}")
+                self._pending_cancellations.pop(callback_id, None)
+                operation_keys = tuple(
+                    key
+                    for key, result in self._operation_results.items()
+                    if result.request.callback_id == callback_id
+                )
+                for key in operation_keys:
+                    self._operation_fingerprints.pop(key, None)
+                    self._operation_results.pop(key, None)
+                self._records.pop(callback_id, None)
+            if isinstance(self._scheduler, EphemeralOperationStore):
+                self._scheduler.clear_operations(operation_key_prefix)
+                self._scheduler.clear_operations(f"cleanup:{callback_id_prefix}")
+            if isinstance(self._telephony, EphemeralOperationStore):
+                self._telephony.clear_operations(f"dispatch:{operation_key_prefix}")
 
     def _blocked(self, request: CallbackRequest, *reasons: BlockReason) -> CallbackRecord:
         record = CallbackRecord(
