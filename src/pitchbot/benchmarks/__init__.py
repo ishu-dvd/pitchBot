@@ -1,4 +1,9 @@
 from pitchbot.benchmarks.environment import capture_hardware_profile
+from pitchbot.benchmarks.evaluation import (
+    render_evaluation_report,
+    validate_evaluation_run,
+    write_evaluation_report,
+)
 from pitchbot.benchmarks.metrics import (
     Interval,
     character_error_rate,
@@ -16,7 +21,14 @@ from pitchbot.benchmarks.models import (
     CorpusAvailability,
     CorpusItem,
     CorpusManifest,
+    EvaluationCaseResult,
+    EvaluationCaseStatus,
+    EvaluationHardwareProfile,
+    EvaluationMetric,
+    EvaluationRun,
+    EvaluationRunStatus,
     HardwareProfile,
+    MetricDirection,
     SourceType,
 )
 
@@ -28,14 +40,24 @@ __all__ = [
     "CorpusAvailability",
     "CorpusItem",
     "CorpusManifest",
+    "EvaluationCaseResult",
+    "EvaluationCaseStatus",
+    "EvaluationHardwareProfile",
+    "EvaluationMetric",
+    "EvaluationRun",
+    "EvaluationRunStatus",
     "HardwareProfile",
     "Interval",
+    "MetricDirection",
     "SourceType",
     "capture_hardware_profile",
     "character_error_rate",
     "real_time_factor",
     "relative_duration_delta",
+    "render_evaluation_report",
     "structured_field_accuracy",
+    "validate_evaluation_run",
     "vad_precision_recall_f1",
+    "write_evaluation_report",
     "word_error_rate",
 ]

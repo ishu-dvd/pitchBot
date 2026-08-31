@@ -102,9 +102,19 @@
 ## PR 10: Callback preview retry reconciliation
 
 - **Branch:** `fix/callback-preview-retry`
-- **Status:** Implementation, mandatory adversarial self-review, and final validation complete; commit, push, CI, and PR pending.
+- **Status:** Merged as PR 10.
 - **Base:** Merged PR 9 commit `46cf58d`.
 - **Scope:** Preserve pending callback schedule claims across task cancellation, reconcile the original idempotent provider request after its due time, and propagate callback-time blocks into the preview authorization result.
 - **Safety decisions:** Pending schedules consume capacity and block conflicting callback identifiers; exact retries do not create duplicate provider actions; blocked callback records cannot be labeled approved or consume approved-preview quota.
 - **Deferred:** Durable conversation history, latency/evaluation observability, hybrid retrieval, knowledge graphs, speech providers, binary decks, and live channels remain separate reviewed milestones.
 - **Rollback:** Revert PR 10. It changes only process-local callback retry behavior and adds no migration, network integration, live action, or retained artifact.
+
+## PR 11: Evaluation and latency contracts
+
+- **Branch:** `feat/evaluation-contracts`
+- **Status:** Implementation, mandatory adversarial self-review, and final validation complete; commit, push, CI, and PR pending.
+- **Base:** Merged PR 10 commit `1e2dfe9`.
+- **Scope:** Add strict privacy-minimized evaluation snapshots, a generated JSON Schema, dependency-free static reporting, and architecture contracts for real-time speech, durable memory, hybrid retrieval, knowledge graphs, and local observability.
+- **Safety decisions:** Evaluation artifacts exclude raw conversation/audio content; threshold success is not deployment authority; retrieval has a hard deadline and cannot bypass policy; append-only events remain authoritative over all derived indexes.
+- **Deferred:** Durable simulator journal wiring, BM25 implementation, temporal graph storage, vector/model selection, streaming speech providers, optional MLflow/Phoenix services, binary decks, and live channels remain separate reviewed milestones.
+- **Rollback:** Revert PR 11. It adds no migration, model, network service, external telemetry export, live action, or retained buyer content.

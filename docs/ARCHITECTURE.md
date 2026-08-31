@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, deterministic conversation/classification, and guarded in-memory follow-up, callback, and deck previews. Durable storage is not yet connected to simulator flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, and guarded in-memory follow-up, callback, and deck previews. Durable storage is not yet connected to simulator flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -183,3 +183,78 @@ The interfaces, disabled external adapters, deterministic mocks, retry/timeout h
 - Persist schedules and idempotency keys before attempting actions.
 - Fail closed for policy/provider uncertainty; degrade to text or operator review where safe.
 - Do not advertise real-time latency until measured on labeled target hardware.
+
+### Planned real-time critical path
+
+```mermaid
+sequenceDiagram
+    actor Buyer
+    participant Audio as VAD / streaming STT
+    participant Turn as Conversation engine
+    participant Retrieval as Deadline-bound retrieval
+    participant Policy as Safety and action policy
+    participant Voice as Streaming TTS
+    participant Journal as Append-only journal
+    participant Telemetry as Local telemetry
+
+    Buyer->>Audio: Speech frames
+    Audio-->>Turn: Stable partial / final text
+    par Required turn processing
+        Turn->>Policy: Classify safety and authorization
+    and Optional context
+        Turn->>Retrieval: Query with hard deadline
+        alt Context returned in time
+            Retrieval-->>Turn: Cited, access-filtered context
+        else Timeout or retrieval failure
+            Retrieval-->>Turn: No context
+        end
+    end
+    Turn->>Journal: Append idempotent turn decision
+    Turn-->>Voice: Professional response chunks
+    Voice-->>Buyer: First audio, then stream
+    Turn-->>Telemetry: Stage timings and bounded labels
+```
+
+Retrieval is optional on the speech path. Its initial design target is 50 ms with a 200 ms hard deadline; timeout falls back to current conversation state and must not delay first audio. These are design budgets, not measured claims. Safety policy and durable acceptance cannot be bypassed to meet latency.
+
+### Planned conversation memory and retrieval
+
+```mermaid
+flowchart LR
+    Turn[Validated conversation turn] --> Journal[(Append-only event journal)]
+    Journal --> Facts[Versioned fact projector]
+    Facts --> Graph[(Temporal knowledge graph)]
+    Facts --> Lexical[BM25 index]
+    Facts --> Vector[Vector adapter]
+    Query[Current buyer intent] --> Lexical
+    Query --> Vector
+    Lexical --> Fusion[Reciprocal-rank fusion]
+    Vector --> Fusion
+    Graph --> Filter[Recency, consent, tenant and provenance filters]
+    Fusion --> Filter
+    Filter --> Context[Cited bounded context]
+    Context --> Conversation[Conversation / deck workflow]
+```
+
+The append-only event repository remains authoritative. Derived BM25, vector, and graph views are rebuildable and never become the source of consent, suppression, action, or requirement truth. BM25 is the first deterministic baseline. `sqlite-vec` and HNSW remain adapter candidates; FAISS and BGE-M3 require measured scale, latency, quality, and license evidence before selection.
+
+Facts are temporal and provenance-bearing: observed claims remain distinct from buyer-confirmed facts, revisions supersede rather than overwrite prior values, and every retrieval result must identify its source event. Conversation-derived improvements are aggregated offline after privacy filtering and evaluation; the running system does not rewrite its own prompts, policies, or models.
+
+## Evaluation and observability
+
+```mermaid
+flowchart LR
+    Replay[Synthetic replay / benchmark] --> Snapshot[Versioned evaluation JSON]
+    Snapshot --> Validator[Strict bounded validator]
+    Validator --> Report[Dependency-free static HTML report]
+    Validator --> Gate[Reviewed suite gates]
+    Runtime[Future runtime stages] --> OTel[OpenTelemetry]
+    OTel --> LocalTrace[Optional local Phoenix]
+    Snapshot -. optional import .-> LocalRun[Optional local MLflow]
+    Gate --> Human[Adversarial review and human approval]
+    Human --> Promotion[Reviewed PR promotion]
+```
+
+Evaluation snapshots are the portable source of run evidence. They contain corpus/suite hashes, exact code revision, hardware, finite metrics, bounded case labels, and machine-readable failure codes; they intentionally exclude raw transcripts, prompts, contact details, and audio. The generated HTML has no script or network dependency and applies a restrictive content security policy.
+
+An artifact reporting passing thresholds is not deployment authorization. Promotion also requires a reviewed suite manifest, comparison against the accepted baseline, safety and regression review, and human approval. Optional MLflow or Phoenix interfaces may be added later for local visualization; neither is required to validate artifacts, and no telemetry exporter may send data externally by default.

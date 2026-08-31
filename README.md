@@ -14,6 +14,7 @@ The implemented application currently provides only:
 - Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
 - A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
+- Versioned privacy-minimized evaluation snapshots, strict gate validation, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Deny-by-default mock action policy, minimized follow-ups, fake-time callback scheduling, and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.

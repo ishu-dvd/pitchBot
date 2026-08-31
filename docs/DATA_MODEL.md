@@ -74,3 +74,16 @@ Retention cutoffs must include an explicit UTC offset or timezone. Repeated anon
 ## Portability
 
 The repository uses generic SQLAlchemy JSON, Boolean, DateTime, string, integer, index, and uniqueness constructs. SQLite is the tested local backend. PostgreSQL execution requires a future driver/profile test, but domain and repository contracts do not expose SQLite-specific APIs.
+
+## Planned durable conversation and knowledge views
+
+Durable conversation history will reuse `aggregate_records` and `event_records`; it will not add a second authoritative transcript table. Each accepted turn will have a stable operation identifier, ordered source spans, minimized text or redacted references, the resulting state transition, and policy/action decisions. Replay must restore the same bounded conversation state after restart without re-executing side effects.
+
+The planned runtime knowledge graph is a derived, rebuildable view of:
+
+- Entities scoped by lead, organization, product, industry, or competitor.
+- Temporal facts with observed, confirmed, superseded, disputed, or expired status.
+- Source event, source span, extraction version, confidence, and confirmation provenance.
+- Relationships carrying the same tenant, consent, retention, and deletion scope as their sources.
+
+Retrieval indexes store identifiers and minimized searchable representations, not independent truth. Results must resolve back to retained source events before citation. Anonymization, hard deletion, or expiry invalidates derived lexical, vector, graph, cache, and evaluation references; suppression records remain protected as already defined.

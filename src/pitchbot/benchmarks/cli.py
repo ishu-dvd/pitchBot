@@ -6,12 +6,19 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from pitchbot.benchmarks.environment import capture_hardware_profile
+from pitchbot.benchmarks.evaluation import (
+    ensure_distinct_files,
+    validate_evaluation_run,
+    write_evaluation_report,
+    write_text_atomically,
+)
 from pitchbot.benchmarks.manifest import (
     canonical_manifest_sha256,
     validate_candidate_registry,
     validate_corpus_manifest,
 )
 from pitchbot.benchmarks.metrics import character_error_rate, word_error_rate
+from pitchbot.benchmarks.models import EvaluationRun
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +35,17 @@ def build_parser() -> argparse.ArgumentParser:
     transcript.add_argument("--reference", required=True)
     transcript.add_argument("--hypothesis", required=True)
 
+    evaluation = commands.add_parser("validate-evaluation")
+    evaluation.add_argument("path", type=Path)
+
+    report = commands.add_parser("render-evaluation")
+    report.add_argument("path", type=Path)
+    report.add_argument("output", type=Path)
+    report.add_argument("--force", action="store_true")
+
+    schema = commands.add_parser("evaluation-schema")
+    schema.add_argument("--output", type=Path)
+    schema.add_argument("--force", action="store_true")
     commands.add_parser("environment")
     return parser
 
@@ -55,6 +73,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "validate-evaluation":
+        run = validate_evaluation_run(args.path)
+        gates = "pass" if run.gates_pass() else "fail-or-incomplete"
+        print(f"validated {len(run.cases)} cases; artifact-gates={gates}")
+        return 0
+    if args.command == "render-evaluation":
+        run = validate_evaluation_run(args.path)
+        ensure_distinct_files(args.path, args.output)
+        write_evaluation_report(run, args.output, overwrite=args.force)
+        print(f"rendered evaluation report: {args.output}")
+        return 0
+    if args.command == "evaluation-schema":
+        rendered_schema = json.dumps(EvaluationRun.model_json_schema(), indent=2, sort_keys=True)
+        if args.output is None:
+            print(rendered_schema)
+        else:
+            write_text_atomically(
+                args.output,
+                f"{rendered_schema}\n",
+                overwrite=args.force,
+            )
+            print(f"rendered evaluation schema: {args.output}")
         return 0
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))

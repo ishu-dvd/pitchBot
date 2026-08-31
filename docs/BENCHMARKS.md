@@ -97,12 +97,44 @@ Measured metrics must be finite and non-empty. Placeholder/unknown revisions or 
 
 Hardware-specific jobs must not gate ordinary shared CI because runner variance can create misleading regressions.
 
+## Evaluation snapshots and local reports
+
+The versioned schema at `evals/schemas/evaluation-run-v1.json` supports free, local, trackable evaluation snapshots. It exposes state-dependent threshold, case-status, and run-status constraints for non-Python consumers. The `pitchbot-bench validate-evaluation` command remains authoritative for cross-item uniqueness, timestamp ordering, finite-number, and gate-consistency checks. Each snapshot records:
+
+- Exact code revision plus reviewed suite, corpus, and configuration hashes.
+- Bounded hardware identifiers and numeric capacity labels plus timezone-aware run boundaries; free-form hardware notes are excluded.
+- Finite run/case metrics with explicit units, direction, and thresholds.
+- English/Hindi/Hinglish, industry, and buyer-persona slices.
+- Bounded machine-readable failure codes without raw transcript, prompt, audio, contact, or retrieved content.
+
+Running snapshots may be rewritten atomically by the future harness. Completed or failed snapshots require completion metadata; completed snapshots require unique case results. `artifact-gates=pass` means only that every included threshold and case passed. It is not model, provider, deployment, or live-action approval.
+
+The static report generator escapes all labels, contains no JavaScript or remote resources, and refuses to overwrite an existing report unless `--force` is supplied. Reports belong in ignored `benchmark-results/` unless an artifact is deliberately reviewed for commit.
+
+### Initial design targets
+
+Targets must be encoded in a reviewed suite manifest and measured on labeled target hardware before use:
+
+| Dimension | Initial design target | Required slices |
+|---|---:|---|
+| Retrieval | 50 ms target, 200 ms hard deadline | lexical, hybrid, cold/warm cache |
+| Interruption | speech playback stops within 200 ms p95 | English, Hindi, Hinglish, noise |
+| First response audio | no claim until provider benchmark | language, hardware, warm/cold |
+| Professional speech | at least 4/5 blinded rubric | clarity, brevity, tone, pronunciation |
+| Safety handling | 100% expected disposition on critical cases | abuse, opt-out, injection, extraction |
+| Grounding | 100% citations for externally sourced claims | competitor, product, deck content |
+
+Latency never overrides opt-out, policy, citation, or durable-action requirements. A retrieval timeout degrades to current conversation state rather than delaying speech.
+
 ## Commands
 
 ```powershell
 pitchbot-bench validate-candidates benchmarks/candidates.json
 pitchbot-bench validate-corpus evals/corpora/speech-cases.json
 pitchbot-bench score-transcript --reference "नमस्ते" --hypothesis "नमस्ते"
+pitchbot-bench evaluation-schema --output evals/schemas/evaluation-run-v1.json
+pitchbot-bench validate-evaluation benchmark-results/run.json
+pitchbot-bench render-evaluation benchmark-results/run.json benchmark-results/report.html
 pitchbot-bench environment
 ```
 
