@@ -131,6 +131,8 @@ Latency never overrides opt-out, policy, citation, or durable-action requirement
 ```powershell
 pitchbot-bench validate-candidates benchmarks/candidates.json
 pitchbot-bench validate-corpus evals/corpora/speech-cases.json
+pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json
+pitchbot-bench run-retrieval evals/corpora/retrieval-cases.json benchmark-results/bm25.json --run-id bm25-local-1 --git-revision <commit>
 pitchbot-bench score-transcript --reference "नमस्ते" --hypothesis "नमस्ते"
 pitchbot-bench evaluation-schema --output evals/schemas/evaluation-run-v1.json
 pitchbot-bench validate-evaluation benchmark-results/run.json
@@ -139,3 +141,5 @@ pitchbot-bench environment
 ```
 
 Measured results belong in an explicitly reviewed artifact/report path, not `benchmark-results/`, which is ignored by default.
+
+The retrieval runner emits recall@k, reciprocal rank, timeout rate, and informational latency through the same evaluation schema. Its artifact contains labels and metrics only; synthetic queries, corpus documents, gold identifiers, and retrieved values remain in the reviewed suite and are not copied into run history.

@@ -1,11 +1,13 @@
 from pitchbot.conversation.engine import ConversationEngine
 from pitchbot.conversation.journal import (
+    ConversationFactSnapshot,
     ConversationJournal,
     ConversationJournalError,
     ConversationReplay,
     ConversationTurnEvent,
     ConversationTurnPreparation,
     JournalCorruptionError,
+    JournaledConversationFact,
     JournaledConversationTurn,
     JournalHistoryUnavailableError,
     JournalOperationConflictError,
@@ -24,6 +26,7 @@ from pitchbot.conversation.state import ConversationState
 __all__ = [
     "ConversationDisposition",
     "ConversationEngine",
+    "ConversationFactSnapshot",
     "ConversationJournal",
     "ConversationJournalError",
     "ConversationPhase",
@@ -35,6 +38,7 @@ __all__ = [
     "ConversationTurnEvent",
     "ConversationTurnPreparation",
     "JournalCorruptionError",
+    "JournaledConversationFact",
     "JournalHistoryUnavailableError",
     "JournalOperationConflictError",
     "JournaledConversationTurn",

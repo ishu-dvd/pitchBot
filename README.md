@@ -17,10 +17,11 @@ The implemented application currently provides only:
 - Versioned privacy-minimized evaluation snapshots, strict gate validation, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
+- Dependency-free BM25 retrieval over privacy-validated current structured facts with provenance and portable multilingual evaluation.
 - Deny-by-default mock action policy, minimized follow-ups, fake-time callback scheduling, and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.
 
-Durable simulator history requires an explicitly managed key and an Alembic-migrated database. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, concrete speech/model providers, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
+Durable simulator history requires an explicitly managed key and an Alembic-migrated database. BM25 is not yet connected to the simulator or speech response path. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, vector retrieval, concrete speech/model providers, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 
@@ -58,6 +59,7 @@ See:
 - [Domain and storage model](docs/DATA_MODEL.md)
 - [Provider contracts and deterministic mocks](docs/PROVIDER_CONTRACTS.md)
 - [Browser simulator](docs/SIMULATOR.md)
+- [Deterministic BM25 retrieval](docs/RETRIEVAL.md)
 - [Speech and local runtime benchmarks](docs/BENCHMARKS.md)
 - [Source register](docs/SOURCES.md)
 - [Architecture decisions](docs/adrs/)
