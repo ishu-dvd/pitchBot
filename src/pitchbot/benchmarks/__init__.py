@@ -31,6 +31,13 @@ from pitchbot.benchmarks.models import (
     MetricDirection,
     SourceType,
 )
+from pitchbot.benchmarks.retrieval import (
+    RetrievalSuite,
+    RetrievalSuiteCase,
+    RetrievalSuiteDocument,
+    run_retrieval_evaluation,
+    validate_retrieval_suite,
+)
 
 __all__ = [
     "BenchmarkKind",
@@ -49,14 +56,19 @@ __all__ = [
     "HardwareProfile",
     "Interval",
     "MetricDirection",
+    "RetrievalSuite",
+    "RetrievalSuiteCase",
+    "RetrievalSuiteDocument",
     "SourceType",
     "capture_hardware_profile",
     "character_error_rate",
     "real_time_factor",
     "relative_duration_delta",
     "render_evaluation_report",
+    "run_retrieval_evaluation",
     "structured_field_accuracy",
     "validate_evaluation_run",
+    "validate_retrieval_suite",
     "vad_precision_recall_f1",
     "write_evaluation_report",
     "word_error_rate",

@@ -138,3 +138,13 @@
 - **Safety decisions:** Disabled by default; action failure precedes journal commit; persistence failure rolls back local state; stale sessions are invalidated; privacy closure and wrong keys fail closed; recovered action-preview responses are not reconstructed.
 - **Deferred:** Durable action/scheduler state, authenticated public deployment, BM25, temporal graph storage, vector/model selection, streaming speech, binary decks, and live channels.
 - **Rollback:** Disable durable history or revert PR 13. No schema migration is introduced; existing journal events remain governed by the lead privacy lifecycle.
+
+## PR 14: Deterministic BM25 retrieval baseline
+
+- **Branch:** `feat/bm25-retrieval-baseline`
+- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Base:** Merged PR 13 commit `f491ab6`.
+- **Scope:** Add dependency-free Unicode BM25 over replay-validated current structured facts, provenance-bound results, privacy/version revalidation, strict bounds, cooperative deadlines, and portable multilingual retrieval evaluation.
+- **Safety decisions:** No direct storage reads, runtime cache, raw buyer text, partial timeout results, cross-lead index, action authority, vector dependency, or latency claim; evaluation artifacts exclude queries and retrieved content.
+- **Deferred:** Simulator/speech-path retrieval, async hard timeout, persistent indexes, graph storage, hybrid/vector search, reranking, query expansion, and live channels.
+- **Rollback:** Revert PR 14. No schema migration, persistent index, runtime API, model, network service, or external side effect is introduced.

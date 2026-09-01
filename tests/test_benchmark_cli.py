@@ -14,6 +14,8 @@ def test_cli_validates_repository_manifests(capsys: pytest.CaptureFixture[str]) 
     output = capsys.readouterr().out
     assert "validated 12 items" in output
     assert "canonical_sha256=" in output
+    assert main(["validate-retrieval-suite", "evals/corpora/retrieval-cases.json"]) == 0
+    assert "validated 6 retrieval cases" in capsys.readouterr().out
 
 
 def test_cli_scores_transcript_and_reports_environment(
@@ -46,5 +48,8 @@ def test_cli_emits_evaluation_schema(
 
 
 def test_manifest_files_do_not_contain_phone_numbers() -> None:
-    content = Path("evals/corpora/speech-cases.json").read_text(encoding="utf-8")
-    assert "+91" not in content
+    for path in (
+        Path("evals/corpora/speech-cases.json"),
+        Path("evals/corpora/retrieval-cases.json"),
+    ):
+        assert "+91" not in path.read_text(encoding="utf-8")

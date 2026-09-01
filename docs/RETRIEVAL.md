@@ -1,0 +1,50 @@
+# Deterministic BM25 Retrieval
+
+## Implemented baseline
+
+PitchBot provides a dependency-free BM25 baseline for retrieving current structured facts from one durable conversation session. It supports Unicode letter, combining-mark, and number tokens for English, Hindi, and Hinglish without selecting a vector model or adding a network service.
+
+The runtime path is:
+
+1. `ConversationJournal.facts_for_retrieval` loads the bounded lead stream and performs full replay validation.
+2. Only the session's current facts are projected into an immutable snapshot with lead, session, aggregate-version, fact, source-span, turn-version, language, and occurrence provenance.
+3. `Bm25Index` validates corpus/query bounds and ranks exact lexical matches deterministically.
+4. The journal rechecks aggregate type, active privacy state, and unchanged version before any result is returned.
+
+There is no runtime cache. Every `JournalBm25Retriever.search` call rebuilds from authoritative retained events so a later anonymization, deletion, corruption, or concurrent write cannot silently reuse an older index.
+
+## Bounds and timeout behavior
+
+- At most 1,000 documents, 256 tokens or 4 KiB per document.
+- At most 64 unique query tokens or 4 KiB per query.
+- `top_k` is between 1 and 20.
+- The cooperative deadline is between 1 and 200 ms.
+- A scoring timeout returns no partial results and no document count.
+
+The current synchronous journal load cannot be preempted mid-database call, so 200 ms is a cooperative scoring deadline, not a hard real-time guarantee. Runtime speech integration must add an asynchronous wall-clock timeout before placing retrieval on its optional 200 ms path.
+
+## Safety and privacy
+
+- Retrieval cannot read storage tables directly or bypass journal replay validation.
+- Documents from different leads or sessions cannot be combined in one index.
+- Results contain structured fact values and source provenance; they do not authorize actions.
+- Raw buyer turns, prompts, operation fingerprints, repetition digests, and model-generated summaries are not indexed.
+- Missing, partial, malformed, anonymized, deleted, or changed histories fail closed.
+- BM25 results remain derived context. The append-only journal remains authoritative.
+
+## Evaluation
+
+`evals/corpora/retrieval-cases.json` contains six reviewed synthetic cases spanning English, Hindi, Hinglish, apparel, toys, books, food, import/export, plastics, and distinct buyer personas.
+
+```powershell
+pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json
+pitchbot-bench run-retrieval evals/corpora/retrieval-cases.json benchmark-results/bm25.json --run-id bm25-local-1 --git-revision <commit>
+pitchbot-bench validate-evaluation benchmark-results/bm25.json
+pitchbot-bench render-evaluation benchmark-results/bm25.json benchmark-results/bm25.html
+```
+
+The output reuses the versioned privacy-minimized evaluation schema. It records recall, reciprocal rank, timeout rate, hardware labels, and latency metrics but excludes queries, documents, relevant-document identifiers, and retrieved content. Quality and timeout metrics gate the artifact; latency is informational because shared CI hardware is not a benchmark target.
+
+## Deferred
+
+Synonyms, stemming, transliteration, query expansion, vector search, reciprocal-rank fusion, HNSW, FAISS, `sqlite-vec`, BGE models, persistent indexes, runtime caching, HTTP exposure, and speech-path integration require later measured and reviewed milestones.

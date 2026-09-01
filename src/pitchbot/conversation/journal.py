@@ -105,6 +105,25 @@ class ConversationReplay(BaseModel):
     last_result: ConversationResult
 
 
+class JournaledConversationFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fact: RequirementFact
+    aggregate_version: int = Field(ge=1)
+    session_id: UUID
+    language: LanguageCode
+    occurred_at: AwareDatetime
+
+
+class ConversationFactSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lead_id: UUID
+    session_id: UUID
+    aggregate_version: int = Field(ge=1)
+    facts: tuple[JournaledConversationFact, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationTurnPreparation:
     lead_id: UUID
@@ -385,6 +404,45 @@ class ConversationJournal:
     def replay(self, lead_id: UUID, session_id: UUID) -> ConversationReplay:
         events, status = self._load_events(lead_id)
         return self._replay_loaded(lead_id, session_id, events, status)
+
+    def facts_for_retrieval(
+        self,
+        lead_id: UUID,
+        session_id: UUID,
+    ) -> ConversationFactSnapshot:
+        events, status = self._load_events(lead_id)
+        replay = self._replay_loaded(lead_id, session_id, events, status)
+        facts_by_key: dict[str, JournaledConversationFact] = {}
+        for item in events:
+            if item.event.session_id != session_id:
+                continue
+            for fact in item.event.result.facts:
+                facts_by_key[fact.key] = JournaledConversationFact(
+                    fact=fact,
+                    aggregate_version=item.aggregate_version,
+                    session_id=session_id,
+                    language=item.event.result.language,
+                    occurred_at=item.occurred_at,
+                )
+        if {item.fact.fact_id for item in facts_by_key.values()} != {
+            fact.fact_id for fact in replay.checkpoint.facts
+        }:
+            raise JournalCorruptionError("retrieval facts do not match replayed state")
+        return ConversationFactSnapshot(
+            lead_id=lead_id,
+            session_id=session_id,
+            aggregate_version=replay.aggregate_version,
+            facts=tuple(sorted(facts_by_key.values(), key=lambda item: item.fact.key)),
+        )
+
+    def validate_fact_snapshot(self, snapshot: ConversationFactSnapshot) -> None:
+        status = self._repository.status(snapshot.lead_id)
+        if status is None or status.current_version != snapshot.aggregate_version:
+            raise ConcurrencyConflictError("conversation facts changed during retrieval")
+        if status.aggregate_type != CONVERSATION_AGGREGATE_TYPE:
+            raise JournalCorruptionError("conversation journal aggregate type is invalid")
+        if status.privacy_state != "active":
+            raise JournalHistoryUnavailableError(f"conversation journal is {status.privacy_state}")
 
     def read_turns(
         self,

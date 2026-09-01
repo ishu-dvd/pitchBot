@@ -19,6 +19,10 @@ from pitchbot.benchmarks.manifest import (
 )
 from pitchbot.benchmarks.metrics import character_error_rate, word_error_rate
 from pitchbot.benchmarks.models import EvaluationRun
+from pitchbot.benchmarks.retrieval import (
+    run_retrieval_evaluation,
+    validate_retrieval_suite,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +50,14 @@ def build_parser() -> argparse.ArgumentParser:
     schema = commands.add_parser("evaluation-schema")
     schema.add_argument("--output", type=Path)
     schema.add_argument("--force", action="store_true")
+    retrieval_suite = commands.add_parser("validate-retrieval-suite")
+    retrieval_suite.add_argument("path", type=Path)
+    retrieval_run = commands.add_parser("run-retrieval")
+    retrieval_run.add_argument("path", type=Path)
+    retrieval_run.add_argument("output", type=Path)
+    retrieval_run.add_argument("--run-id", required=True)
+    retrieval_run.add_argument("--git-revision", required=True)
+    retrieval_run.add_argument("--force", action="store_true")
     commands.add_parser("environment")
     return parser
 
@@ -96,6 +108,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 overwrite=args.force,
             )
             print(f"rendered evaluation schema: {args.output}")
+        return 0
+    if args.command == "validate-retrieval-suite":
+        suite = validate_retrieval_suite(args.path)
+        print(f"validated {len(suite.cases)} retrieval cases")
+        return 0
+    if args.command == "run-retrieval":
+        run = run_retrieval_evaluation(
+            args.path,
+            run_id=args.run_id,
+            git_revision=args.git_revision,
+        )
+        write_text_atomically(
+            args.output,
+            f"{run.model_dump_json(indent=2)}\n",
+            overwrite=args.force,
+        )
+        gates = "pass" if run.gates_pass() else "fail"
+        print(f"completed {len(run.cases)} retrieval cases; artifact-gates={gates}")
         return 0
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))

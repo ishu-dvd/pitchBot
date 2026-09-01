@@ -1,0 +1,94 @@
+{
+  "suite_id": "pitchbot-bm25-baseline",
+  "version": "1",
+  "corpus_id": "synthetic-structured-facts",
+  "corpus_version": "1",
+  "top_k": 3,
+  "deadline_ms": 200,
+  "cases": [
+    {
+      "case_id": "en-apparel-direct",
+      "language": "en",
+      "industry": "apparel",
+      "persona": "direct-buyer",
+      "query": "Which catalog and payment features were requested?",
+      "documents": [
+        {"document_id": "features", "key": "requested_features", "value": "catalog,payments", "language": "en"},
+        {"document_id": "business", "key": "business_type", "value": "apparel", "language": "en"},
+        {"document_id": "timeline", "key": "timeline", "value": "near-term", "language": "en"}
+      ],
+      "relevant_document_ids": ["features"],
+      "tags": ["lexical", "features"]
+    },
+    {
+      "case_id": "hi-toys-owner",
+      "language": "hi",
+      "industry": "toys",
+      "persona": "owner",
+      "query": "खिलौने का कैटलॉग",
+      "documents": [
+        {"document_id": "business", "key": "business_type", "value": "खिलौने toys", "language": "hi"},
+        {"document_id": "features", "key": "requested_features", "value": "कैटलॉग", "language": "hi"},
+        {"document_id": "budget", "key": "budget_stated", "value": "बजट 50000", "language": "hi"}
+      ],
+      "relevant_document_ids": ["business", "features"],
+      "tags": ["hindi", "catalog"]
+    },
+    {
+      "case_id": "mixed-books-reseller",
+      "language": "mixed",
+      "industry": "books",
+      "persona": "reseller",
+      "query": "books ke liye search feature",
+      "documents": [
+        {"document_id": "business", "key": "business_type", "value": "books", "language": "mixed"},
+        {"document_id": "features", "key": "requested_features", "value": "catalog,search", "language": "mixed"},
+        {"document_id": "timeline", "key": "timeline", "value": "this month", "language": "mixed"}
+      ],
+      "relevant_document_ids": ["business", "features"],
+      "tags": ["hinglish", "code-switch"]
+    },
+    {
+      "case_id": "mixed-food-wholesaler",
+      "language": "mixed",
+      "industry": "food",
+      "persona": "wholesaler",
+      "query": "food delivery tracking",
+      "documents": [
+        {"document_id": "business", "key": "business_type", "value": "food", "language": "mixed"},
+        {"document_id": "features", "key": "requested_features", "value": "delivery tracking", "language": "mixed"},
+        {"document_id": "budget", "key": "budget_stated", "value": "budget 75000", "language": "mixed"}
+      ],
+      "relevant_document_ids": ["business", "features"],
+      "tags": ["hinglish", "logistics"]
+    },
+    {
+      "case_id": "en-import-export-manager",
+      "language": "en",
+      "industry": "import-export",
+      "persona": "operations-manager",
+      "query": "import export certificates enquiry",
+      "documents": [
+        {"document_id": "business", "key": "business_type", "value": "import-export", "language": "en"},
+        {"document_id": "features", "key": "requested_features", "value": "certificates,enquiry", "language": "en"},
+        {"document_id": "timeline", "key": "timeline", "value": "within 6 weeks", "language": "en"}
+      ],
+      "relevant_document_ids": ["business", "features"],
+      "tags": ["workflow", "certificates"]
+    },
+    {
+      "case_id": "hi-plastics-cautious",
+      "language": "hi",
+      "industry": "plastics",
+      "persona": "cautious-buyer",
+      "query": "प्लास्टिक उत्पाद वेबसाइट",
+      "documents": [
+        {"document_id": "business", "key": "business_type", "value": "प्लास्टिक plastics", "language": "hi"},
+        {"document_id": "features", "key": "requested_features", "value": "उत्पाद वेबसाइट", "language": "hi"},
+        {"document_id": "timeline", "key": "timeline", "value": "इस महीने", "language": "hi"}
+      ],
+      "relevant_document_ids": ["business", "features"],
+      "tags": ["hindi", "products"]
+    }
+  ]
+}
