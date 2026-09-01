@@ -148,3 +148,13 @@
 - **Safety decisions:** No direct storage reads, runtime cache, raw buyer text, partial timeout results, cross-lead index, action authority, vector dependency, or latency claim; evaluation artifacts exclude queries and retrieved content.
 - **Deferred:** Simulator/speech-path retrieval, async hard timeout, persistent indexes, graph storage, hybrid/vector search, reranking, query expansion, and live channels.
 - **Rollback:** Revert PR 14. No schema migration, persistent index, runtime API, model, network service, or external side effect is introduced.
+
+## PR 15: Temporal lead knowledge view
+
+- **Branch:** `feat/temporal-knowledge-graph`
+- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Base:** Merged PR 14 commit `1c59cf7`.
+- **Scope:** Rebuild bounded immutable lead/session/fact graphs from fully replay-validated journal history with explicit supersession, validity intervals, provenance, and conservative cross-session conflicts.
+- **Safety decisions:** No direct storage reader, cache, silent latest-value merge, inferred confirmation, action authority, graph database, model, or network service; malformed history and post-build privacy/version changes fail closed.
+- **Deferred:** Persistent graph projections, organization/product/competitor entities, automatic conflict resolution, BM25/graph fusion, HTTP/RAG wiring, embeddings, and live channels.
+- **Rollback:** Revert PR 15. No schema migration, persistent graph, API, provider, or external side effect is introduced.

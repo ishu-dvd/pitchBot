@@ -34,6 +34,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 | Duplicate actions | Retries send repeated messages | Persisted idempotency keys, unique constraints, and replay-safe adapters |
 | Journal replay poisoning | Malformed or partial events alter restored policy state | Versioned strict payloads, contiguous versions, bounded reads, identity/sequence checks, fail-closed replay |
 | Stale or cross-lead retrieval | Cached or mixed indexes expose invalid facts | No runtime cache; replay-validated single-lead/session snapshots; post-score privacy/version check; bounded provenance-bearing results |
+| Knowledge conflict collapse | A newer session silently overwrites a different claim | Supersede only explicit same-session revisions; preserve differing cross-session claims as conflicts |
 | Recovered action ambiguity | A restart retry recreates an unverifiable preview response | Persist conversation only after action success; reconcile only while the idempotent local result exists; otherwise fail closed |
 | Induced denial of service | Repeated WhatsApp/artifact requests | Per-lead/global quotas, coalescing, bounded queues, timeouts, cancellation, and circuit breakers |
 | PII leakage | Phone numbers appear in logs/evals | Data minimization, structured redaction, synthetic CI fixtures, retention/deletion controls |
@@ -57,6 +58,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 - Callback policy is rechecked at dispatch, and deck generation accepts fixed industry/feature values rather than arbitrary buyer content.
 - Durable conversation replay restores validated checkpoints only; it never reruns rules/models/actions, accepts unknown events, or overwrites a live session. Recovery requires both the session UUID capability and matching synthetic lead reference.
 - BM25 indexes only current structured facts from validated replay, rejects mixed lead/session documents, returns no partial timeout results, and cannot authorize actions.
+- Temporal knowledge builds replay every lead session, reject malformed revision chains, preserve conflict, recheck privacy/version, and remain derived non-authoritative views.
 
 ## Security verification gates
 

@@ -98,7 +98,9 @@ Simulator lead aggregates use a deterministic UUID derived from validated synthe
 
 The implemented BM25 baseline projects current structured facts for one session from a fully validated journal replay. Each result carries the fact ID, source spans, source aggregate version, session, language, and occurrence time. The aggregate's active privacy state and unchanged version are checked again after scoring.
 
-The planned runtime knowledge graph is a derived, rebuildable view of:
+The implemented temporal lead view adds lead/session/fact relations, explicit supersession edges, validity versions/times, and current/superseded/conflicting status. It does not infer that the latest cross-session value is correct: different current values remain conflicting until a later reviewed confirmation mechanism exists.
+
+The future expanded knowledge graph remains a derived, rebuildable view of:
 
 - Entities scoped by lead, organization, product, industry, or competitor.
 - Temporal facts with observed, confirmed, superseded, disputed, or expired status.

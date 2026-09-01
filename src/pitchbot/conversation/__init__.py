@@ -8,9 +8,11 @@ from pitchbot.conversation.journal import (
     ConversationTurnPreparation,
     JournalCorruptionError,
     JournaledConversationFact,
+    JournaledConversationRevision,
     JournaledConversationTurn,
     JournalHistoryUnavailableError,
     JournalOperationConflictError,
+    LeadKnowledgeSourceSnapshot,
     canonical_operation_fingerprint,
 )
 from pitchbot.conversation.models import (
@@ -39,8 +41,10 @@ __all__ = [
     "ConversationTurnPreparation",
     "JournalCorruptionError",
     "JournaledConversationFact",
+    "JournaledConversationRevision",
     "JournalHistoryUnavailableError",
     "JournalOperationConflictError",
+    "LeadKnowledgeSourceSnapshot",
     "JournaledConversationTurn",
     "SafetySignal",
     "canonical_operation_fingerprint",
