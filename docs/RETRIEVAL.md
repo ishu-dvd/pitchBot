@@ -41,6 +41,13 @@ The synchronous journal load happens before the first cooperative checkpoint and
 - Raw buyer turns, prompts, operation fingerprints, repetition digests, and model-generated summaries are not indexed.
 - Missing, partial, malformed, anonymized, deleted, or changed histories fail closed.
 - BM25 results remain derived context. The append-only journal remains authoritative.
+- The simulator's lead recall consumes retrieval strictly as display context. It runs after
+  the durable commit and off the event loop, is skipped on safety signals, non-continuing
+  dispositions, and durable replay, is capped by explicit `recall_top_k`/`recall_deadline_ms`
+  budgets, self-disables per session after repeated budget expiry because the journal load is
+  not preemptible, degrades to no recall on any failure, appends no timeline event, and strips
+  `fact_id` and `source_span_ids` before the response leaves the process. See
+  `docs/SIMULATOR.md`.
 
 ## Evaluation
 
@@ -61,4 +68,4 @@ The outputs reuse the versioned privacy-minimized evaluation schema. They retain
 
 ## Deferred
 
-Synonyms, stemming, transliteration, query expansion, vector search, reciprocal-rank fusion, HNSW, FAISS, `sqlite-vec`, BGE models, persistent indexes, runtime caching, HTTP exposure, and speech-path integration require later measured and reviewed milestones.
+Synonyms, stemming, transliteration, query expansion, vector search, reciprocal-rank fusion, HNSW, FAISS, `sqlite-vec`, BGE models, persistent indexes, runtime caching, HTTP exposure, using recalled claims to generate replies or drive classification, and speech-path integration require later measured and reviewed milestones.
