@@ -25,6 +25,10 @@ All notable changes to PitchBot are documented here.
 - Deny-by-default mock action authorization, minimized follow-ups, fake-time callback lifecycle, and six-industry structured sample-deck previews.
 - Strict evaluation-run contracts, generated JSON Schema, and dependency-free local HTML reports.
 - Restart-safe append-only conversation journaling with incremental transitions, typed-input retry reconciliation, rollback-safe persistence, optimistic concurrency, and fail-closed replay.
+- Shared wall-clock retrieval budgets enforced cooperatively across graph projection, indexing, scoring, and ranking, with version-preserving timeouts and no partial results.
+- Customer-confirmation provenance on temporal fact claims, retained across supersession and derived only from confirmed journal revisions.
+- Graph retrieval evaluation now projects reviewed corpora through the production temporal builder and gates on projection fidelity.
+- Paraphrase-resistant safety detection for opt-out, internal-instruction extraction, and prompt injection using bounded-window intent templates.
 
 ### Security
 

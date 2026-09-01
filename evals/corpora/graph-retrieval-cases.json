@@ -2,7 +2,7 @@
   "suite_id": "pitchbot-graph-retrieval",
   "version": "1",
   "corpus_id": "synthetic-temporal-claims",
-  "corpus_version": "1",
+  "corpus_version": "2",
   "top_k": 5,
   "deadline_ms": 200,
   "cases": [
@@ -28,7 +28,7 @@
       "query": "toys catalog apparel",
       "claims": [
         {"claim_id": "b1", "session_id": "discovery", "key": "business_type", "value": "apparel", "language": "en", "status": "superseded", "superseded_by_claim_id": "b2"},
-        {"claim_id": "b2", "session_id": "discovery", "key": "business_type", "value": "toys", "language": "en", "status": "current"},
+        {"claim_id": "b2", "session_id": "discovery", "key": "business_type", "value": "toys", "language": "en", "status": "current", "confirmed_by_customer": true},
         {"claim_id": "b3", "session_id": "requirements", "key": "requested_features", "value": "catalog", "language": "en", "status": "current"}
       ],
       "relevant_claim_ids": ["b2", "b3"],
@@ -87,6 +87,22 @@
       ],
       "relevant_claim_ids": ["f1", "f2", "f3"],
       "tags": ["cross-session", "workflow"]
+    },
+    {
+      "case_id": "hi-electronics-confirmed-revision",
+      "language": "hi",
+      "industry": "electronics",
+      "persona": "price-sensitive-buyer",
+      "query": "बजट समयसीमा",
+      "claims": [
+        {"claim_id": "g1", "session_id": "discovery", "key": "budget", "value": "10000 रुपये", "language": "hi", "status": "superseded", "superseded_by_claim_id": "g2"},
+        {"claim_id": "g2", "session_id": "discovery", "key": "budget", "value": "25000 बजट", "language": "hi", "status": "current", "confirmed_by_customer": true},
+        {"claim_id": "g3", "session_id": "followup", "key": "timeline", "value": "अगले महीने", "language": "hi", "status": "superseded", "superseded_by_claim_id": "g4"},
+        {"claim_id": "g4", "session_id": "followup", "key": "timeline", "value": "इस सप्ताह समयसीमा", "language": "hi", "status": "current"}
+      ],
+      "relevant_claim_ids": ["g2", "g4"],
+      "excluded_claim_ids": ["g1", "g3"],
+      "tags": ["supersession", "confirmation", "hindi"]
     }
   ]
 }

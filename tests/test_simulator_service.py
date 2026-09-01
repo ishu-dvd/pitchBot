@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -35,6 +37,8 @@ from pitchbot.simulator.models import (
 from pitchbot.simulator.service import (
     DurableActionReplayUnavailableError,
     InjectedSimulatorError,
+    SessionAdmissionConflictError,
+    SessionCapacityError,
     SimulatorService,
 )
 from pitchbot.storage import SqlAlchemyEventRepository, SqlAlchemyPrivacyRepository
@@ -996,3 +1000,198 @@ async def test_lead_privacy_closure_blocks_durable_history_and_new_turns(
         )
     with pytest.raises(LookupError):
         simulator.get_session(session.session_id)
+
+
+def test_concurrent_session_admission_never_exceeds_capacity() -> None:
+    admission = SimulatorService(
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        max_sessions=5,
+    )
+    contenders = 24
+    barrier = threading.Barrier(contenders)
+
+    def admit(index: int) -> str:
+        barrier.wait(timeout=10)
+        try:
+            admission.create_session(CreateSessionRequest(lead_ref=f"race-{index}"))
+        except RuntimeError as error:
+            return str(error)
+        return "admitted"
+
+    with ThreadPoolExecutor(max_workers=contenders) as pool:
+        outcomes = list(pool.map(admit, range(contenders)))
+
+    assert outcomes.count("admitted") == 5
+    assert all("session capacity" in item for item in outcomes if item != "admitted")
+    with pytest.raises(RuntimeError, match="session capacity"):
+        admission.create_session(CreateSessionRequest(lead_ref="race-overflow"))
+
+
+def test_concurrent_resume_of_one_session_admits_exactly_one_caller(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, repository = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="resume-race"))
+    asyncio.run(
+        first_service.process_turn(
+            session.session_id,
+            TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+        )
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingJournal(ConversationJournal):
+        def restore_session(self, engine: ConversationEngine, lead_id: UUID, session_id: UUID):  # type: ignore[no-untyped-def]
+            entered.set()
+            assert release.wait(timeout=10)
+            return super().restore_session(engine, lead_id, session_id)
+
+    restarted = SimulatorService(
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        conversation_engine=ConversationEngine(turn_digest_key=TURN_DIGEST_KEY),
+        conversation_journal=_BlockingJournal(repository),
+    )
+    request = ResumeSessionRequest(lead_ref="resume-race")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        winner = pool.submit(restarted.resume_session, session.session_id, request)
+        assert entered.wait(timeout=10)
+        with pytest.raises(SessionAdmissionConflictError, match="already being resumed"):
+            restarted.resume_session(session.session_id, request)
+        release.set()
+        assert winner.result(timeout=10).session_id == session.session_id
+
+    assert restarted.resume_session(session.session_id, request).session_id == session.session_id
+
+
+def test_failed_resume_releases_admission_and_leaves_no_orphan_conversation(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="orphan-key"))
+    asyncio.run(
+        first_service.process_turn(
+            session.session_id,
+            TurnRequest(text="Please show a demo.", language=LanguageCode.ENGLISH),
+        )
+    )
+    repository = SqlAlchemyEventRepository(session_factory)
+    restarted = SimulatorService(
+        max_sessions=2,
+        conversation_engine=ConversationEngine(turn_digest_key=b"different-simulator-journal-key!"),
+        conversation_journal=ConversationJournal(repository),
+    )
+    request = ResumeSessionRequest(lead_ref="orphan-key")
+
+    for _ in range(4):
+        with pytest.raises(ValueError, match="different digest key"):
+            restarted.resume_session(session.session_id, request)
+
+    recovered = SimulatorService(
+        max_sessions=2,
+        conversation_engine=ConversationEngine(turn_digest_key=TURN_DIGEST_KEY),
+        conversation_journal=ConversationJournal(repository),
+    )
+    assert recovered.resume_session(session.session_id, request).session_id == session.session_id
+
+
+def test_close_session_teardown_blocks_a_concurrent_resume(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _BlockingEngine(ConversationEngine):
+        def close_session(self, session_id: UUID) -> None:
+            entered.set()
+            assert release.wait(timeout=10)
+            super().close_session(session_id)
+
+    repository = SqlAlchemyEventRepository(session_factory)
+    service = SimulatorService(
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        conversation_engine=_BlockingEngine(turn_digest_key=TURN_DIGEST_KEY),
+        conversation_journal=ConversationJournal(repository),
+    )
+    session = service.create_session(CreateSessionRequest(lead_ref="teardown-race"))
+    asyncio.run(
+        service.process_turn(
+            session.session_id,
+            TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+        )
+    )
+    request = ResumeSessionRequest(lead_ref="teardown-race")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        closing = pool.submit(lambda: asyncio.run(service.close_session(session.session_id)))
+        assert entered.wait(timeout=10)
+        with pytest.raises(SessionAdmissionConflictError, match="already being resumed"):
+            service.resume_session(session.session_id, request)
+        release.set()
+        closing.result(timeout=10)
+
+    resumed = service.resume_session(session.session_id, request)
+    assert resumed.session_id == session.session_id
+
+
+@pytest.mark.asyncio
+async def test_action_cleanup_cannot_be_interleaved_with_a_resume(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    workflows = BlockingCleanupWorkflows(clock)
+    repository = SqlAlchemyEventRepository(session_factory)
+    simulator = SimulatorService(
+        clock=clock,
+        action_workflows=workflows,
+        conversation_engine=ConversationEngine(turn_digest_key=TURN_DIGEST_KEY),
+        conversation_journal=ConversationJournal(repository),
+    )
+    session = simulator.create_session(CreateSessionRequest(lead_ref="cleanup-resume-race"))
+    await simulator.process_turn(
+        session.session_id,
+        TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+    )
+    request = ResumeSessionRequest(lead_ref="cleanup-resume-race")
+
+    closing = asyncio.create_task(simulator.close_session(session.session_id))
+    await workflows.cleanup_started.wait()
+    with pytest.raises(SessionAdmissionConflictError, match="already being resumed"):
+        simulator.resume_session(session.session_id, request)
+    workflows.release_cleanup.set()
+    await closing
+
+    assert simulator.resume_session(session.session_id, request).session_id == session.session_id
+
+
+@pytest.mark.asyncio
+async def test_failed_action_cleanup_frees_the_admission_reservation() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    workflows = FailOnceCleanupWorkflows(clock)
+    simulator = SimulatorService(clock=clock, action_workflows=workflows, max_sessions=1)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="cleanup-reservation"))
+
+    with pytest.raises(AdapterTimeoutError, match="cleanup timeout"):
+        await simulator.close_session(session.session_id)
+    await simulator.close_session(session.session_id)
+
+    assert (
+        simulator.create_session(CreateSessionRequest(lead_ref="after-cleanup")).lead_ref
+        == "after-cleanup"
+    )
+
+
+def test_capacity_exhaustion_is_a_distinct_error_from_other_runtime_failures() -> None:
+    service = SimulatorService(
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        max_sessions=1,
+    )
+    service.create_session(CreateSessionRequest(lead_ref="capacity-one"))
+    with pytest.raises(SessionCapacityError):
+        service.create_session(CreateSessionRequest(lead_ref="capacity-two"))
+    assert not isinstance(SessionAdmissionConflictError(""), SessionCapacityError)

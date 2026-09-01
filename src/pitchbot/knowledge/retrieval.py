@@ -5,6 +5,7 @@ from time import monotonic_ns
 from typing import Protocol
 from uuid import UUID
 
+from pitchbot.knowledge.graph import KnowledgeGraphDeadlineExceededError
 from pitchbot.knowledge.models import (
     FactClaimStatus,
     LeadKnowledgeGraph,
@@ -17,15 +18,24 @@ from pitchbot.retrieval import (
     Bm25Index,
     FactProvenance,
     LexicalDocument,
+    RetrievalDeadline,
+    RetrievalDeadlineExceededError,
     RetrievalScope,
     validate_bm25_request,
 )
 
 
 class LeadKnowledgeGraphSource(Protocol):
-    def build(self, lead_id: UUID) -> LeadKnowledgeGraph: ...
+    def build(
+        self,
+        lead_id: UUID,
+        *,
+        deadline: RetrievalDeadline | None = None,
+    ) -> LeadKnowledgeGraph: ...
 
     def validate(self, graph: LeadKnowledgeGraph) -> None: ...
+
+    def validate_version(self, lead_id: UUID, aggregate_version: int) -> None: ...
 
 
 class LeadKnowledgeBm25Retriever:
@@ -47,38 +57,39 @@ class LeadKnowledgeBm25Retriever:
         deadline_ms: int = MAX_DEADLINE_MS,
     ) -> LeadKnowledgeRetrievalResponse:
         validate_bm25_request(query, top_k, deadline_ms)
-        started = self._clock()
-        graph = self._graph_builder.build(lead_id)
+        budget = RetrievalDeadline.start(deadline_ms, clock=self._clock)
+        try:
+            graph = self._graph_builder.build(lead_id, deadline=budget)
+        except KnowledgeGraphDeadlineExceededError as exceeded:
+            self._graph_builder.validate_version(lead_id, exceeded.aggregate_version)
+            return self._timeout_response(lead_id, exceeded.aggregate_version, budget)
         claims_by_id = {
             claim.fact.fact_id: claim
             for claim in graph.claims
             if claim.status is not FactClaimStatus.SUPERSEDED
         }
-        index = Bm25Index(
-            (self._document(claim) for claim in claims_by_id.values()),
-            scope=RetrievalScope.LEAD,
-        )
-        elapsed_ns = max(0, self._clock() - started)
-        remaining_ms = deadline_ms - elapsed_ns // 1_000_000
-        if remaining_ms < 1:
+        try:
+            index = Bm25Index(
+                (self._document(claim) for claim in claims_by_id.values()),
+                scope=RetrievalScope.LEAD,
+                deadline=budget,
+            )
+        except RetrievalDeadlineExceededError:
             self._graph_builder.validate(graph)
-            return self._timeout_response(graph, started)
+            return self._timeout_response(graph.lead_id, graph.aggregate_version, budget)
         ranked, _, timed_out = index.search(
             query,
             top_k=top_k,
-            deadline_ms=int(remaining_ms),
-            clock=self._clock,
+            deadline_ms=deadline_ms,
+            deadline=budget,
         )
-        if timed_out:
-            self._graph_builder.validate(graph)
-            return self._timeout_response(graph, started)
         self._graph_builder.validate(graph)
-        if self._clock() - started >= deadline_ms * 1_000_000:
-            return self._timeout_response(graph, started)
+        if timed_out or budget.expired():
+            return self._timeout_response(graph.lead_id, graph.aggregate_version, budget)
         return LeadKnowledgeRetrievalResponse(
             lead_id=lead_id,
             aggregate_version=graph.aggregate_version,
-            duration_ms=max(0.0, (self._clock() - started) / 1_000_000),
+            duration_ms=budget.elapsed_ms(),
             indexed_claim_count=index.document_count,
             timed_out=False,
             results=tuple(
@@ -92,15 +103,16 @@ class LeadKnowledgeBm25Retriever:
             ),
         )
 
+    @staticmethod
     def _timeout_response(
-        self,
-        graph: LeadKnowledgeGraph,
-        started: int,
+        lead_id: UUID,
+        aggregate_version: int,
+        budget: RetrievalDeadline,
     ) -> LeadKnowledgeRetrievalResponse:
         return LeadKnowledgeRetrievalResponse(
-            lead_id=graph.lead_id,
-            aggregate_version=graph.aggregate_version,
-            duration_ms=max(0.0, (self._clock() - started) / 1_000_000),
+            lead_id=lead_id,
+            aggregate_version=aggregate_version,
+            duration_ms=budget.elapsed_ms(),
             indexed_claim_count=0,
             timed_out=True,
             results=(),

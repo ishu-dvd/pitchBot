@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -79,6 +80,14 @@ class DurableHistoryDisabledError(RuntimeError):
 
 
 class DurableActionReplayUnavailableError(RuntimeError):
+    pass
+
+
+class SessionAdmissionConflictError(RuntimeError):
+    pass
+
+
+class SessionCapacityError(RuntimeError):
     pass
 
 
@@ -163,10 +172,10 @@ class SimulatorService:
             )
         self._actions = action_workflows
         self._sessions: dict[UUID, _Session] = {}
+        self._registry_lock = threading.Lock()
+        self._admitting: set[UUID] = set()
 
     def create_session(self, request: CreateSessionRequest) -> SessionResponse:
-        if len(self._sessions) >= self._max_sessions:
-            raise RuntimeError("Simulator session capacity reached")
         session_id = uuid4()
         lead_id = (
             uuid5(_LEAD_ID_NAMESPACE, request.lead_ref) if self._journal is not None else uuid4()
@@ -180,15 +189,42 @@ class SimulatorService:
             preview_consent_granted=request.preview_consent_granted,
             contact_policy=request.contact_policy,
         )
-        self._conversation.create_session(session.session_id, lead_id=lead_id)
-        self._sessions[session.session_id] = session
         self._append_event(
             session,
             SimulatorEventType.DISCLOSURE,
             text=DISCLOSURES[request.language],
             language=request.language,
         )
+        with self._registry_lock:
+            self._reserve_capacity()
+            self._conversation.create_session(session_id, lead_id=lead_id)
+            self._sessions[session_id] = session
         return self._session_response(session)
+
+    def _reserve_capacity(self) -> None:
+        if len(self._sessions) + len(self._admitting) >= self._max_sessions:
+            raise SessionCapacityError("Simulator session capacity reached")
+
+    def _begin_teardown(self, session_id: UUID, session: _Session) -> bool:
+        """Remove the session and hold its identifier so no resume can interleave."""
+
+        with self._registry_lock:
+            if self._sessions.get(session_id) is not session:
+                return False
+            del self._sessions[session_id]
+            self._admitting.add(session_id)
+        return True
+
+    def _release_admission(self, session_id: UUID) -> None:
+        with self._registry_lock:
+            self._admitting.discard(session_id)
+
+    def _abort_teardown(self, session_id: UUID, session: _Session) -> None:
+        """Republish a session whose teardown failed, so closing stays retryable."""
+
+        with self._registry_lock:
+            self._sessions[session_id] = session
+            self._admitting.discard(session_id)
 
     async def process_turn(self, session_id: UUID, request: TurnRequest) -> TurnResponse:
         session = self._get_session(session_id)
@@ -493,30 +529,43 @@ class SimulatorService:
     ) -> SessionResponse:
         if self._journal is None:
             raise DurableHistoryDisabledError("Durable conversation history is disabled")
-        existing = self._sessions.get(session_id)
-        if existing is not None:
-            if existing.lead_ref != request.lead_ref:
-                raise SessionNotFoundError(f"Unknown session: {session_id}")
-            return self._session_response(existing)
-        if len(self._sessions) >= self._max_sessions:
-            raise RuntimeError("Simulator session capacity reached")
-        lead_id = uuid5(_LEAD_ID_NAMESPACE, request.lead_ref)
-        replay = self._journal.restore_session(
-            self._conversation,
-            lead_id,
-            session_id,
-        )
-        session = _Session(
-            session_id=session_id,
-            lead_id=lead_id,
-            lead_ref=request.lead_ref,
-            language=replay.last_result.language,
-            events=deque(maxlen=self._max_events_per_session),
-            preview_consent_granted=False,
-            contact_policy=ContactPolicy(),
-            recovered=True,
-        )
-        self._sessions[session_id] = session
+        with self._registry_lock:
+            existing = self._sessions.get(session_id)
+            if existing is not None:
+                if existing.lead_ref != request.lead_ref:
+                    raise SessionNotFoundError(f"Unknown session: {session_id}")
+                return self._session_response(existing)
+            if session_id in self._admitting:
+                raise SessionAdmissionConflictError(
+                    f"Simulator session is already being resumed: {session_id}"
+                )
+            self._reserve_capacity()
+            self._admitting.add(session_id)
+        try:
+            lead_id = uuid5(_LEAD_ID_NAMESPACE, request.lead_ref)
+            replay = self._journal.restore_session(
+                self._conversation,
+                lead_id,
+                session_id,
+            )
+            session = _Session(
+                session_id=session_id,
+                lead_id=lead_id,
+                lead_ref=request.lead_ref,
+                language=replay.last_result.language,
+                events=deque(maxlen=self._max_events_per_session),
+                preview_consent_granted=False,
+                contact_policy=ContactPolicy(),
+                recovered=True,
+            )
+        except BaseException:
+            self._conversation.close_session(session_id)
+            with self._registry_lock:
+                self._admitting.discard(session_id)
+            raise
+        with self._registry_lock:
+            self._sessions[session_id] = session
+            self._admitting.discard(session_id)
         return self._session_response(session)
 
     def get_durable_history(
@@ -551,12 +600,20 @@ class SimulatorService:
     async def close_session(self, session_id: UUID) -> None:
         session = self._get_session(session_id, allow_closing=True)
         async with session.lock:
-            if self._sessions.get(session_id) is not session:
-                raise SessionNotFoundError(f"Unknown session: {session_id}")
             session.closing = True
-            await self._actions.cleanup_session(session_id)
-            self._sessions.pop(session_id, None)
-            self._conversation.close_session(session_id)
+            if not self._begin_teardown(session_id, session):
+                raise SessionNotFoundError(f"Unknown session: {session_id}")
+            # The reservation is held across action cleanup too, so a concurrent resume
+            # cannot restore state that this teardown is about to erase by prefix.
+            try:
+                await self._actions.cleanup_session(session_id)
+            except BaseException:
+                self._abort_teardown(session_id, session)
+                raise
+            try:
+                self._conversation.close_session(session_id)
+            finally:
+                self._release_admission(session_id)
 
     def replay(self, scenario_id: str) -> list[dict[str, str]]:
         try:
@@ -608,12 +665,18 @@ class SimulatorService:
 
     async def _discard_session(self, session: _Session) -> None:
         session.closing = True
-        self._sessions.pop(session.session_id, None)
-        self._conversation.close_session(session.session_id)
+        session_id = session.session_id
+        if not self._begin_teardown(session_id, session):
+            return
         try:
-            await self._actions.cleanup_session(session.session_id)
+            await self._actions.cleanup_session(session_id)
         except (AdapterError, RuntimeError, ValueError):
             logger.exception("Failed to clean up invalidated simulator session")
+        finally:
+            try:
+                self._conversation.close_session(session_id)
+            finally:
+                self._release_admission(session_id)
 
     def _get_session(self, session_id: UUID, *, allow_closing: bool = False) -> _Session:
         try:

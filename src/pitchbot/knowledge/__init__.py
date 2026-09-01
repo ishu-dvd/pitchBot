@@ -1,4 +1,8 @@
-from pitchbot.knowledge.graph import TemporalKnowledgeGraphBuilder
+from pitchbot.knowledge.graph import (
+    KnowledgeGraphDeadlineExceededError,
+    LeadKnowledgeSourceReader,
+    TemporalKnowledgeGraphBuilder,
+)
 from pitchbot.knowledge.models import (
     FactClaimStatus,
     KnowledgeNodeType,
@@ -13,6 +17,7 @@ from pitchbot.knowledge.retrieval import LeadKnowledgeBm25Retriever, LeadKnowled
 
 __all__ = [
     "FactClaimStatus",
+    "KnowledgeGraphDeadlineExceededError",
     "KnowledgeNodeType",
     "KnowledgeRelation",
     "KnowledgeRelationType",
@@ -20,6 +25,7 @@ __all__ = [
     "LeadKnowledgeBm25Retriever",
     "LeadKnowledgeGraphSource",
     "LeadKnowledgeRetrievalResponse",
+    "LeadKnowledgeSourceReader",
     "RankedKnowledgeClaim",
     "TemporalFactClaim",
     "TemporalKnowledgeGraphBuilder",

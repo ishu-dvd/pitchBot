@@ -4,13 +4,17 @@ import json
 import math
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from time import monotonic_ns
 from uuid import UUID
 
 from pitchbot.conversation import ConversationFactSnapshot, ConversationJournal
 from pitchbot.domain import JsonValue
+from pitchbot.retrieval.deadline import (
+    RetrievalDeadline,
+    RetrievalDeadlineExceededError,
+)
 from pitchbot.retrieval.models import (
     FactProvenance,
     LexicalDocument,
@@ -92,6 +96,7 @@ class Bm25Index:
         k1: float = 1.5,
         b: float = 0.75,
         scope: RetrievalScope | str = RetrievalScope.SESSION,
+        deadline: RetrievalDeadline | None = None,
     ) -> None:
         if not math.isfinite(k1) or k1 <= 0:
             raise ValueError("BM25 k1 must be finite and positive")
@@ -113,11 +118,16 @@ class Bm25Index:
             validated_scope is RetrievalScope.SESSION and len(session_ids) > 1
         ):
             raise ValueError("BM25 documents must belong to one lead and session")
+        # Corpus validity is decided before the budget is honored so corruption is never
+        # downgraded to a retryable timeout by where the deadline happens to expire.
+        tokenized = [validate_bm25_document(item.key, item.value) for item in materialized]
+        if deadline is not None:
+            deadline.check()
 
         indexed: list[_IndexedDocument] = []
         document_frequency: Counter[str] = Counter()
-        for document in materialized:
-            terms = validate_bm25_document(document.key, document.value)
+        pairs = list(zip(materialized, tokenized, strict=True))
+        for document, terms in pairs if deadline is None else deadline.guard(pairs):
             frequencies = Counter(terms)
             document_frequency.update(frequencies.keys())
             indexed.append(
@@ -146,16 +156,16 @@ class Bm25Index:
         top_k: int = 5,
         deadline_ms: int = MAX_DEADLINE_MS,
         clock: Callable[[], int] = monotonic_ns,
+        deadline: RetrievalDeadline | None = None,
     ) -> tuple[tuple[RankedFact, ...], float, bool]:
         query_terms = validate_bm25_request(query, top_k, deadline_ms)
 
-        started = clock()
-        deadline = started + deadline_ms * 1_000_000
+        budget = RetrievalDeadline.start(deadline_ms, clock=clock) if deadline is None else deadline
         scored: list[tuple[float, UUID, tuple[str, ...], LexicalDocument]] = []
         document_count = len(self._documents)
         for indexed in self._documents:
-            if clock() >= deadline:
-                return (), max(0.0, (clock() - started) / 1_000_000), True
+            if budget.expired():
+                return (), budget.elapsed_ms(), True
             score = 0.0
             matched: list[str] = []
             for term in query_terms:
@@ -183,6 +193,8 @@ class Bm25Index:
                         indexed.document,
                     )
                 )
+        if budget.expired():
+            return (), budget.elapsed_ms(), True
         scored.sort(key=lambda item: (-item[0], str(item[1])))
         results = tuple(
             RankedFact(
@@ -196,7 +208,7 @@ class Bm25Index:
                 start=1,
             )
         )
-        return results, max(0.0, (clock() - started) / 1_000_000), False
+        return results, budget.elapsed_ms(), False
 
 
 class JournalBm25Retriever:
@@ -219,32 +231,27 @@ class JournalBm25Retriever:
         deadline_ms: int = MAX_DEADLINE_MS,
     ) -> RetrievalResponse:
         validate_bm25_request(query, top_k, deadline_ms)
-        started = self._clock()
+        budget = RetrievalDeadline.start(deadline_ms, clock=self._clock)
         snapshot = self._journal.facts_for_retrieval(lead_id, session_id)
-        documents = self._documents(snapshot)
-        index = Bm25Index(documents)
-        elapsed_ns = max(0, self._clock() - started)
-        remaining_ms = deadline_ms - elapsed_ns // 1_000_000
-        if remaining_ms < 1:
+        try:
+            index = Bm25Index(self._documents(snapshot), deadline=budget)
+        except RetrievalDeadlineExceededError:
             self._journal.validate_fact_snapshot(snapshot)
-            return self._timeout_response(snapshot, started)
+            return self._timeout_response(snapshot, budget)
         results, _, timed_out = index.search(
             query,
             top_k=top_k,
-            deadline_ms=int(remaining_ms),
-            clock=self._clock,
+            deadline_ms=deadline_ms,
+            deadline=budget,
         )
-        if timed_out:
-            self._journal.validate_fact_snapshot(snapshot)
-            return self._timeout_response(snapshot, started)
         self._journal.validate_fact_snapshot(snapshot)
-        if self._clock() - started >= deadline_ms * 1_000_000:
-            return self._timeout_response(snapshot, started)
+        if timed_out or budget.expired():
+            return self._timeout_response(snapshot, budget)
         return RetrievalResponse(
             lead_id=lead_id,
             session_id=session_id,
             aggregate_version=snapshot.aggregate_version,
-            duration_ms=max(0.0, (self._clock() - started) / 1_000_000),
+            duration_ms=budget.elapsed_ms(),
             indexed_document_count=index.document_count,
             timed_out=False,
             results=results,
@@ -253,21 +260,21 @@ class JournalBm25Retriever:
     def _timeout_response(
         self,
         snapshot: ConversationFactSnapshot,
-        started: int,
+        budget: RetrievalDeadline,
     ) -> RetrievalResponse:
         return RetrievalResponse(
             lead_id=snapshot.lead_id,
             session_id=snapshot.session_id,
             aggregate_version=snapshot.aggregate_version,
-            duration_ms=max(0.0, (self._clock() - started) / 1_000_000),
+            duration_ms=budget.elapsed_ms(),
             indexed_document_count=0,
             timed_out=True,
             results=(),
         )
 
     @staticmethod
-    def _documents(snapshot: ConversationFactSnapshot) -> tuple[LexicalDocument, ...]:
-        return tuple(
+    def _documents(snapshot: ConversationFactSnapshot) -> Iterator[LexicalDocument]:
+        return (
             LexicalDocument(
                 key=item.fact.key,
                 value=item.fact.value,

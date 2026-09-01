@@ -5,7 +5,8 @@ import json
 import os
 import platform
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic_ns
@@ -24,17 +25,24 @@ from pitchbot.benchmarks.models import (
     EvaluationRunStatus,
     MetricDirection,
 )
-from pitchbot.domain import JsonValue, LanguageCode, RequirementFact
+from pitchbot.conversation import (
+    JournaledConversationFact,
+    JournaledConversationRevision,
+    LeadKnowledgeSourceSnapshot,
+)
+from pitchbot.domain import JsonValue, LanguageCode, RequirementFact, RequirementRevision
 from pitchbot.knowledge import (
     FactClaimStatus,
     KnowledgeNodeType,
-    KnowledgeRelation,
     KnowledgeRelationType,
     LeadKnowledgeBm25Retriever,
     LeadKnowledgeGraph,
-    TemporalFactClaim,
+    TemporalKnowledgeGraphBuilder,
 )
-from pitchbot.retrieval import validate_bm25_document, validate_bm25_request
+from pitchbot.retrieval import (
+    validate_bm25_document,
+    validate_bm25_request,
+)
 
 _EVALUATION_NAMESPACE = UUID("59d677c8-d97a-4d7f-a5a5-679648cfdf6d")
 
@@ -54,6 +62,7 @@ class GraphRetrievalSuiteClaim(GraphRetrievalSuiteModel):
         default=None,
         pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$",
     )
+    confirmed_by_customer: bool = False
 
 
 class GraphRetrievalSuiteCase(GraphRetrievalSuiteModel):
@@ -150,6 +159,13 @@ class GraphRetrievalSuiteCase(GraphRetrievalSuiteModel):
             expected = FactClaimStatus.CONFLICTING if len(values) > 1 else FactClaimStatus.CURRENT
             if any(claim.status is not expected for claim in claims):
                 raise ValueError("graph retrieval active claim status contradicts its values")
+        unconfirmable = {
+            claim.claim_id
+            for claim in self.claims
+            if claim.confirmed_by_customer and claim.claim_id not in replacement_ids
+        }
+        if unconfirmable:
+            raise ValueError("only replacement graph retrieval claims can be customer confirmed")
 
 
 class GraphRetrievalSuite(GraphRetrievalSuiteModel):
@@ -171,17 +187,37 @@ class GraphRetrievalSuite(GraphRetrievalSuiteModel):
         return self
 
 
-class _StaticGraphSource:
-    def __init__(self, graph: LeadKnowledgeGraph) -> None:
-        self._graph = graph
+class _StaticKnowledgeSource:
+    def __init__(self, snapshot: LeadKnowledgeSourceSnapshot) -> None:
+        self._snapshot = snapshot
 
-    def build(self, lead_id: UUID) -> LeadKnowledgeGraph:
-        if lead_id != self._graph.lead_id:
+    def knowledge_source(
+        self,
+        lead_id: UUID,
+        *,
+        max_sessions: int,
+        max_facts: int,
+        max_revisions: int,
+    ) -> LeadKnowledgeSourceSnapshot:
+        if lead_id != self._snapshot.lead_id:
             raise ValueError("graph retrieval evaluation lead does not match")
-        return self._graph
+        if (
+            len(self._snapshot.session_ids) > max_sessions
+            or len(self._snapshot.facts) > max_facts
+            or len(self._snapshot.revisions) > max_revisions
+        ):
+            raise ValueError("graph retrieval evaluation case exceeds knowledge graph capacity")
+        return self._snapshot
 
-    def validate(self, graph: LeadKnowledgeGraph) -> None:
-        if graph is not self._graph:
+    def validate_knowledge_source(self, snapshot: LeadKnowledgeSourceSnapshot) -> None:
+        if snapshot is not self._snapshot:
+            raise RuntimeError("graph retrieval evaluation source changed")
+
+    def validate_knowledge_version(self, lead_id: UUID, aggregate_version: int) -> None:
+        if (
+            lead_id != self._snapshot.lead_id
+            or aggregate_version != self._snapshot.aggregate_version
+        ):
             raise RuntimeError("graph retrieval evaluation source changed")
 
 
@@ -221,6 +257,9 @@ def run_graph_retrieval_evaluation(
     ]
     exclusion_rates = [
         _metric_value(item, "graph_retrieval.excluded_claim_rate") for item in case_results
+    ]
+    fidelities = [
+        _metric_value(item, "graph_retrieval.projection_fidelity") for item in case_results
     ]
     durations = sorted(item.duration_ms for item in case_results)
     p95_index = max(0, (95 * len(durations) + 99) // 100 - 1)
@@ -287,6 +326,13 @@ def run_graph_retrieval_evaluation(
                 unit="ms",
                 direction=MetricDirection.INFORMATIONAL,
             ),
+            EvaluationMetric(
+                name="graph_retrieval.mean_projection_fidelity",
+                value=sum(fidelities) / len(fidelities),
+                unit="ratio",
+                direction=MetricDirection.AT_LEAST,
+                threshold=1.0,
+            ),
         ),
         cases=case_results,
     )
@@ -298,9 +344,13 @@ def _run_graph_case(
     *,
     clock: Callable[[], int] = monotonic_ns,
 ) -> EvaluationCaseResult:
-    graph, labels_by_fact_id = _build_graph(item)
-    response = LeadKnowledgeBm25Retriever(_StaticGraphSource(graph), clock=clock).search(
-        graph.lead_id,
+    snapshot, labels_by_fact_id, expected_claims = _build_source(item)
+    builder = TemporalKnowledgeGraphBuilder(_StaticKnowledgeSource(snapshot))
+    projection_fidelity = _projection_fidelity(
+        builder.build(snapshot.lead_id), labels_by_fact_id, expected_claims
+    )
+    response = LeadKnowledgeBm25Retriever(builder, clock=clock).search(
+        snapshot.lead_id,
         item.query,
         top_k=suite.top_k,
         deadline_ms=suite.deadline_ms,
@@ -330,6 +380,8 @@ def _run_graph_case(
         failure_codes.append("graph-retrieval-rank")
     if excluded_rate > 0:
         failure_codes.append("graph-retrieval-excluded-claim")
+    if projection_fidelity < 1.0:
+        failure_codes.append("graph-projection-mismatch")
     return EvaluationCaseResult(
         case_id=item.case_id,
         status=(EvaluationCaseStatus.PASSED if not failure_codes else EvaluationCaseStatus.FAILED),
@@ -361,6 +413,13 @@ def _run_graph_case(
                 threshold=0.0,
             ),
             EvaluationMetric(
+                name="graph_retrieval.projection_fidelity",
+                value=projection_fidelity,
+                unit="ratio",
+                direction=MetricDirection.AT_LEAST,
+                threshold=1.0,
+            ),
+            EvaluationMetric(
                 name="graph_retrieval.latency_ms",
                 value=response.duration_ms,
                 unit="ms",
@@ -371,9 +430,84 @@ def _run_graph_case(
     )
 
 
-def _build_graph(
+@dataclass(frozen=True, slots=True)
+class _ExpectedClaim:
+    """Exact projection the production builder must produce for a corpus claim."""
+
+    key: str
+    value: str
+    confidence: float
+    captured_at: datetime
+    status: FactClaimStatus
+    session_id: UUID
+    language: LanguageCode
+    valid_from_version: int
+    valid_from: datetime
+    valid_to_version: int | None
+    valid_to: datetime | None
+    superseded_by_fact_id: UUID | None
+    confirmed_by_customer: bool
+    confirmed_by_revision_id: UUID | None
+    confirmed_at: datetime | None
+
+
+def _expected_relations(
+    lead_id: UUID,
+    session_ids: Iterable[UUID],
+    expected: dict[str, _ExpectedClaim],
+    fact_ids: dict[str, UUID],
+) -> set[tuple[str, UUID, str, str, UUID]]:
+    relations = {
+        (
+            KnowledgeNodeType.LEAD.value,
+            lead_id,
+            KnowledgeRelationType.HAS_SESSION.value,
+            KnowledgeNodeType.SESSION.value,
+            session_id,
+        )
+        for session_id in session_ids
+    }
+    for label, gold in expected.items():
+        relations.add(
+            (
+                KnowledgeNodeType.SESSION.value,
+                gold.session_id,
+                KnowledgeRelationType.OBSERVED_FACT.value,
+                KnowledgeNodeType.FACT.value,
+                fact_ids[label],
+            )
+        )
+        if gold.superseded_by_fact_id is not None:
+            relations.add(
+                (
+                    KnowledgeNodeType.FACT.value,
+                    fact_ids[label],
+                    KnowledgeRelationType.SUPERSEDED_BY.value,
+                    KnowledgeNodeType.FACT.value,
+                    gold.superseded_by_fact_id,
+                )
+            )
+    return relations
+
+
+def _derived_relations(
+    graph: LeadKnowledgeGraph,
+) -> set[tuple[str, UUID, str, str, UUID]]:
+    return {
+        (
+            relation.source_type.value,
+            relation.source_id,
+            relation.relation.value,
+            relation.target_type.value,
+            relation.target_id,
+        )
+        for relation in graph.relations
+    }
+
+
+def _build_source(
     item: GraphRetrievalSuiteCase,
-) -> tuple[LeadKnowledgeGraph, dict[UUID, str]]:
+) -> tuple[LeadKnowledgeSourceSnapshot, dict[UUID, str], dict[str, _ExpectedClaim]]:
     lead_id = uuid5(_EVALUATION_NAMESPACE, f"{item.case_id}:lead")
     session_ids = {
         claim.session_id: uuid5(
@@ -386,30 +520,75 @@ def _build_graph(
         claim.claim_id: uuid5(_EVALUATION_NAMESPACE, f"{item.case_id}:claim:{claim.claim_id}")
         for claim in item.claims
     }
-    occurred_at = datetime(2026, 1, 1, tzinfo=UTC)
+    revision_ids = {
+        claim.claim_id: uuid5(_EVALUATION_NAMESPACE, f"{item.case_id}:revision:{claim.claim_id}")
+        for claim in item.claims
+    }
+    epoch = datetime(2026, 1, 1, tzinfo=UTC)
     positions = {claim.claim_id: position for position, claim in enumerate(item.claims, start=1)}
-    claims = tuple(
-        TemporalFactClaim(
+    occurred_at = {
+        claim_id: epoch + timedelta(seconds=position) for claim_id, position in positions.items()
+    }
+    facts = tuple(
+        JournaledConversationFact(
             fact=RequirementFact(
                 fact_id=fact_ids[claim.claim_id],
                 lead_id=lead_id,
                 key=claim.key,
                 value=claim.value,
                 confidence=1.0,
-                captured_at=occurred_at + timedelta(seconds=positions[claim.claim_id]),
+                captured_at=occurred_at[claim.claim_id],
             ),
+            aggregate_version=positions[claim.claim_id],
+            session_id=session_ids[claim.session_id],
+            language=claim.language,
+            occurred_at=occurred_at[claim.claim_id],
+        )
+        for claim in item.claims
+    )
+    claims_by_id = {claim.claim_id: claim for claim in item.claims}
+    revisions = tuple(
+        JournaledConversationRevision(
+            revision=RequirementRevision(
+                revision_id=revision_ids[claim.claim_id],
+                lead_id=lead_id,
+                key=claim.key,
+                previous_fact_id=fact_ids[claim.claim_id],
+                replacement_fact_id=fact_ids[replacement_id],
+                confirmed_by_customer=claims_by_id[replacement_id].confirmed_by_customer,
+                reason=f"evaluation revision for {claim.claim_id}",
+                revised_at=occurred_at[replacement_id],
+            ),
+            aggregate_version=positions[replacement_id],
+            session_id=session_ids[claim.session_id],
+            occurred_at=occurred_at[replacement_id],
+        )
+        for claim in item.claims
+        if (replacement_id := claim.superseded_by_claim_id) is not None
+    )
+    predecessors = {
+        claim.superseded_by_claim_id: claim.claim_id
+        for claim in item.claims
+        if claim.superseded_by_claim_id is not None
+    }
+    expected = {
+        claim.claim_id: _ExpectedClaim(
+            key=claim.key,
+            value=_canonical_value(claim.value),
+            confidence=1.0,
+            captured_at=occurred_at[claim.claim_id],
             status=claim.status,
             session_id=session_ids[claim.session_id],
             language=claim.language,
             valid_from_version=positions[claim.claim_id],
-            valid_from=occurred_at + timedelta(seconds=positions[claim.claim_id]),
+            valid_from=occurred_at[claim.claim_id],
             valid_to_version=(
                 positions[claim.superseded_by_claim_id]
                 if claim.superseded_by_claim_id is not None
                 else None
             ),
             valid_to=(
-                occurred_at + timedelta(seconds=positions[claim.superseded_by_claim_id])
+                occurred_at[claim.superseded_by_claim_id]
                 if claim.superseded_by_claim_id is not None
                 else None
             ),
@@ -418,50 +597,74 @@ def _build_graph(
                 if claim.superseded_by_claim_id is not None
                 else None
             ),
+            confirmed_by_customer=claim.confirmed_by_customer,
+            confirmed_by_revision_id=(
+                revision_ids[predecessors[claim.claim_id]] if claim.confirmed_by_customer else None
+            ),
+            confirmed_at=(occurred_at[claim.claim_id] if claim.confirmed_by_customer else None),
         )
         for claim in item.claims
-    )
-    relations = [
-        KnowledgeRelation(
-            source_type=KnowledgeNodeType.LEAD,
-            source_id=lead_id,
-            relation=KnowledgeRelationType.HAS_SESSION,
-            target_type=KnowledgeNodeType.SESSION,
-            target_id=session_id,
-        )
-        for session_id in session_ids.values()
-    ]
-    relations.extend(
-        KnowledgeRelation(
-            source_type=KnowledgeNodeType.SESSION,
-            source_id=claim.session_id,
-            relation=KnowledgeRelationType.OBSERVED_FACT,
-            target_type=KnowledgeNodeType.FACT,
-            target_id=claim.fact.fact_id,
-        )
-        for claim in claims
-    )
-    relations.extend(
-        KnowledgeRelation(
-            source_type=KnowledgeNodeType.FACT,
-            source_id=claim.fact.fact_id,
-            relation=KnowledgeRelationType.SUPERSEDED_BY,
-            target_type=KnowledgeNodeType.FACT,
-            target_id=claim.superseded_by_fact_id,
-        )
-        for claim in claims
-        if claim.superseded_by_fact_id is not None
-    )
+    }
     return (
-        LeadKnowledgeGraph(
+        LeadKnowledgeSourceSnapshot(
             lead_id=lead_id,
-            aggregate_version=len(claims),
+            aggregate_version=len(item.claims),
             session_ids=tuple(session_ids.values()),
-            claims=claims,
-            relations=tuple(relations),
+            facts=facts,
+            revisions=revisions,
         ),
         {fact_id: claim_id for claim_id, fact_id in fact_ids.items()},
+        expected,
     )
+
+
+def _projection_fidelity(
+    graph: LeadKnowledgeGraph,
+    labels_by_fact_id: dict[UUID, str],
+    expected: dict[str, _ExpectedClaim],
+) -> float:
+    """Fraction of corpus claims the production projection reproduced exactly.
+
+    Relations are produced by the same production builder, so a relation regression
+    fails the whole case rather than silently scoring one.
+    """
+
+    if len(graph.claims) != len(expected):
+        return 0.0
+    fact_ids = {label: fact_id for fact_id, label in labels_by_fact_id.items()}
+    derived_relations = _derived_relations(graph)
+    if len(derived_relations) != len(graph.relations) or derived_relations != (
+        _expected_relations(graph.lead_id, graph.session_ids, expected, fact_ids)
+    ):
+        return 0.0
+    matched_labels: set[str] = set()
+    for claim in graph.claims:
+        label = labels_by_fact_id.get(claim.fact.fact_id)
+        if label is None or label in matched_labels:
+            continue
+        gold = expected.get(label)
+        if gold is None:
+            continue
+        derived = _ExpectedClaim(
+            key=claim.fact.key,
+            value=_canonical_value(claim.fact.value),
+            confidence=claim.fact.confidence,
+            captured_at=claim.fact.captured_at,
+            status=claim.status,
+            session_id=claim.session_id,
+            language=claim.language,
+            valid_from_version=claim.valid_from_version,
+            valid_from=claim.valid_from,
+            valid_to_version=claim.valid_to_version,
+            valid_to=claim.valid_to,
+            superseded_by_fact_id=claim.superseded_by_fact_id,
+            confirmed_by_customer=claim.confirmed_by_customer,
+            confirmed_by_revision_id=claim.confirmed_by_revision_id,
+            confirmed_at=claim.confirmed_at,
+        )
+        if derived == gold:
+            matched_labels.add(label)
+    return len(matched_labels) / len(expected)
 
 
 def _metric_value(case: EvaluationCaseResult, name: str) -> float:
