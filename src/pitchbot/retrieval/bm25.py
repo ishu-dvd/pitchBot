@@ -118,13 +118,16 @@ class Bm25Index:
             validated_scope is RetrievalScope.SESSION and len(session_ids) > 1
         ):
             raise ValueError("BM25 documents must belong to one lead and session")
+        # Corpus validity is decided before the budget is honored so corruption is never
+        # downgraded to a retryable timeout by where the deadline happens to expire.
+        tokenized = [validate_bm25_document(item.key, item.value) for item in materialized]
         if deadline is not None:
             deadline.check()
 
         indexed: list[_IndexedDocument] = []
         document_frequency: Counter[str] = Counter()
-        for document in materialized if deadline is None else deadline.guard(materialized):
-            terms = validate_bm25_document(document.key, document.value)
+        pairs = list(zip(materialized, tokenized, strict=True))
+        for document, terms in pairs if deadline is None else deadline.guard(pairs):
             frequencies = Counter(terms)
             document_frequency.update(frequencies.keys())
             indexed.append(

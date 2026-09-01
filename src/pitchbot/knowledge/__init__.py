@@ -1,5 +1,6 @@
 from pitchbot.knowledge.graph import (
     KnowledgeGraphDeadlineExceededError,
+    LeadKnowledgeSourceReader,
     TemporalKnowledgeGraphBuilder,
 )
 from pitchbot.knowledge.models import (
@@ -24,6 +25,7 @@ __all__ = [
     "LeadKnowledgeBm25Retriever",
     "LeadKnowledgeGraphSource",
     "LeadKnowledgeRetrievalResponse",
+    "LeadKnowledgeSourceReader",
     "RankedKnowledgeClaim",
     "TemporalFactClaim",
     "TemporalKnowledgeGraphBuilder",

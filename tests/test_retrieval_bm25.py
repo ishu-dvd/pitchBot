@@ -19,6 +19,7 @@ from pitchbot.retrieval import (
     RetrievalScope,
     tokenize,
 )
+from pitchbot.retrieval.bm25 import MAX_DOCUMENT_BYTES
 from pitchbot.storage import SqlAlchemyEventRepository, SqlAlchemyPrivacyRepository
 
 TURN_DIGEST_KEY = b"retrieval-test-turn-digest-key!!"
@@ -347,6 +348,27 @@ def test_index_construction_stops_before_tokenizing_an_over_budget_corpus() -> N
 
     index = Bm25Index(documents, deadline=RetrievalDeadline.start(200, clock=SteppingClock(0)))
     assert index.document_count == 64
+
+
+def test_corrupt_document_beyond_the_guard_stride_is_never_downgraded_to_a_timeout() -> None:
+    lead_id = uuid4()
+    session_id = uuid4()
+    documents = tuple(
+        _document(
+            f"key_{index}",
+            "x" * (MAX_DOCUMENT_BYTES + 1) if index == 40 else f"catalog value {index}",
+            fact_id=uuid4(),
+            lead_id=lead_id,
+            session_id=session_id,
+        )
+        for index in range(64)
+    )
+
+    with pytest.raises(ValueError, match="exceeds size limit"):
+        Bm25Index(
+            documents,
+            deadline=RetrievalDeadline.start(1, clock=ScriptedClock(0, 5_000_000)),
+        )
 
 
 def test_search_shares_one_budget_with_the_caller_and_skips_late_ranking() -> None:

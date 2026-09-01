@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from typing import Protocol
 from uuid import UUID
 
 from pitchbot.conversation import (
-    ConversationJournal,
     JournaledConversationFact,
     JournaledConversationRevision,
     JournalHistoryUnavailableError,
@@ -31,10 +31,25 @@ class KnowledgeGraphDeadlineExceededError(RetrievalDeadlineExceededError):
         self.aggregate_version = aggregate_version
 
 
+class LeadKnowledgeSourceReader(Protocol):
+    def knowledge_source(
+        self,
+        lead_id: UUID,
+        *,
+        max_sessions: int,
+        max_facts: int,
+        max_revisions: int,
+    ) -> LeadKnowledgeSourceSnapshot: ...
+
+    def validate_knowledge_source(self, snapshot: LeadKnowledgeSourceSnapshot) -> None: ...
+
+    def validate_knowledge_version(self, lead_id: UUID, aggregate_version: int) -> None: ...
+
+
 class TemporalKnowledgeGraphBuilder:
     def __init__(
         self,
-        journal: ConversationJournal,
+        journal: LeadKnowledgeSourceReader,
         *,
         max_sessions: int = 1_000,
         max_claims: int = 1_000,
@@ -100,8 +115,8 @@ class TemporalKnowledgeGraphBuilder:
             if len({_canonical_value(item.fact.value) for item in claims}) > 1
             for item in claims
         }
-        confirmed_ids = {
-            item.revision.replacement_fact_id
+        confirmations = {
+            item.revision.replacement_fact_id: item
             for item in source.revisions
             if item.revision.confirmed_by_customer
         }
@@ -111,7 +126,7 @@ class TemporalKnowledgeGraphBuilder:
                 item,
                 revisions_by_previous.get(item.fact.fact_id),
                 conflicting=item.fact.fact_id in conflicting_ids,
-                confirmed=item.fact.fact_id in confirmed_ids,
+                confirmation=confirmations.get(item.fact.fact_id),
             )
             for item in facts
         )
@@ -142,8 +157,12 @@ class TemporalKnowledgeGraphBuilder:
         revision: JournaledConversationRevision | None,
         *,
         conflicting: bool,
-        confirmed: bool,
+        confirmation: JournaledConversationRevision | None,
     ) -> TemporalFactClaim:
+        confirmed_by_revision_id = (
+            confirmation.revision.revision_id if confirmation is not None else None
+        )
+        confirmed_at = confirmation.occurred_at if confirmation is not None else None
         if revision is not None:
             return TemporalFactClaim(
                 fact=item.fact,
@@ -155,7 +174,9 @@ class TemporalKnowledgeGraphBuilder:
                 valid_to_version=revision.aggregate_version,
                 valid_to=revision.occurred_at,
                 superseded_by_fact_id=revision.revision.replacement_fact_id,
-                confirmed_by_customer=False,
+                confirmed_by_customer=confirmation is not None,
+                confirmed_by_revision_id=confirmed_by_revision_id,
+                confirmed_at=confirmed_at,
             )
         return TemporalFactClaim(
             fact=item.fact,
@@ -164,7 +185,9 @@ class TemporalKnowledgeGraphBuilder:
             language=item.language,
             valid_from_version=item.aggregate_version,
             valid_from=item.occurred_at,
-            confirmed_by_customer=confirmed,
+            confirmed_by_customer=confirmation is not None,
+            confirmed_by_revision_id=confirmed_by_revision_id,
+            confirmed_at=confirmed_at,
         )
 
     @staticmethod

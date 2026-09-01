@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from pitchbot.conversation import ConversationEngine, ConversationJournal
-from pitchbot.domain import LanguageCode
+from pitchbot.conversation import (
+    ConversationEngine,
+    ConversationJournal,
+    JournaledConversationFact,
+    JournaledConversationRevision,
+    LeadKnowledgeSourceSnapshot,
+)
+from pitchbot.domain import LanguageCode, RequirementFact, RequirementRevision
 from pitchbot.knowledge import (
     FactClaimStatus,
     KnowledgeRelationType,
+    TemporalFactClaim,
     TemporalKnowledgeGraphBuilder,
 )
 from pitchbot.storage import SqlAlchemyEventRepository, SqlAlchemyPrivacyRepository
@@ -242,9 +249,6 @@ def test_backdated_revision_is_reported_as_journal_corruption(
 
 
 def test_temporal_claim_rejects_backwards_time() -> None:
-    from pitchbot.domain import RequirementFact
-    from pitchbot.knowledge import TemporalFactClaim
-
     lead_id = uuid4()
     fact = RequirementFact(
         lead_id=lead_id,
@@ -264,4 +268,153 @@ def test_temporal_claim_rejects_backwards_time() -> None:
             valid_to_version=2,
             valid_to=datetime(2026, 1, 1, tzinfo=UTC),
             superseded_by_fact_id=uuid4(),
+        )
+
+
+def _confirmation_snapshot(
+    *,
+    confirmed: bool,
+) -> tuple[LeadKnowledgeSourceSnapshot, UUID, UUID]:
+    lead_id = uuid4()
+    session_id = uuid4()
+    epoch = datetime(2026, 1, 1, tzinfo=UTC)
+    previous = RequirementFact(
+        lead_id=lead_id,
+        key="budget",
+        value="10000",
+        confidence=0.9,
+        captured_at=epoch,
+    )
+    replacement = RequirementFact(
+        lead_id=lead_id,
+        key="budget",
+        value="25000",
+        confidence=0.9,
+        captured_at=epoch + timedelta(seconds=1),
+    )
+    facts = tuple(
+        JournaledConversationFact(
+            fact=fact,
+            aggregate_version=version,
+            session_id=session_id,
+            language=LanguageCode.ENGLISH,
+            occurred_at=fact.captured_at,
+        )
+        for version, fact in enumerate((previous, replacement), start=1)
+    )
+    revision = JournaledConversationRevision(
+        revision=RequirementRevision(
+            lead_id=lead_id,
+            key="budget",
+            previous_fact_id=previous.fact_id,
+            replacement_fact_id=replacement.fact_id,
+            confirmed_by_customer=confirmed,
+            reason="customer restated the budget",
+            revised_at=epoch + timedelta(seconds=1),
+        ),
+        aggregate_version=2,
+        session_id=session_id,
+        occurred_at=epoch + timedelta(seconds=1),
+    )
+    snapshot = LeadKnowledgeSourceSnapshot(
+        lead_id=lead_id,
+        aggregate_version=2,
+        session_ids=(session_id,),
+        facts=facts,
+        revisions=(revision,),
+    )
+    return snapshot, previous.fact_id, replacement.fact_id
+
+
+class _SnapshotSource:
+    def __init__(self, snapshot: LeadKnowledgeSourceSnapshot) -> None:
+        self._snapshot = snapshot
+
+    def knowledge_source(
+        self,
+        lead_id: UUID,
+        *,
+        max_sessions: int,
+        max_facts: int,
+        max_revisions: int,
+    ) -> LeadKnowledgeSourceSnapshot:
+        assert lead_id == self._snapshot.lead_id
+        return self._snapshot
+
+    def validate_knowledge_source(self, snapshot: LeadKnowledgeSourceSnapshot) -> None:
+        assert snapshot is self._snapshot
+
+    def validate_knowledge_version(self, lead_id: UUID, aggregate_version: int) -> None:
+        assert lead_id == self._snapshot.lead_id
+        assert aggregate_version == self._snapshot.aggregate_version
+
+
+def test_customer_confirmation_carries_revision_provenance() -> None:
+    snapshot, previous_id, replacement_id = _confirmation_snapshot(confirmed=True)
+    graph = TemporalKnowledgeGraphBuilder(_SnapshotSource(snapshot)).build(snapshot.lead_id)
+    claims = {claim.fact.fact_id: claim for claim in graph.claims}
+    revision_id = snapshot.revisions[0].revision.revision_id
+
+    replacement = claims[replacement_id]
+    assert replacement.status is FactClaimStatus.CURRENT
+    assert replacement.confirmed_by_customer is True
+    assert replacement.confirmed_by_revision_id == revision_id
+    assert replacement.confirmed_at == snapshot.revisions[0].occurred_at
+    superseded = claims[previous_id]
+    assert superseded.status is FactClaimStatus.SUPERSEDED
+    assert superseded.confirmed_by_customer is False
+    assert superseded.confirmed_by_revision_id is None
+
+
+def test_unconfirmed_revision_leaves_no_confirmation_provenance() -> None:
+    snapshot, _, replacement_id = _confirmation_snapshot(confirmed=False)
+    graph = TemporalKnowledgeGraphBuilder(_SnapshotSource(snapshot)).build(snapshot.lead_id)
+    claims = {claim.fact.fact_id: claim for claim in graph.claims}
+
+    assert claims[replacement_id].confirmed_by_customer is False
+    assert claims[replacement_id].confirmed_by_revision_id is None
+    assert claims[replacement_id].confirmed_at is None
+
+
+def test_temporal_claim_rejects_confirmation_without_provenance() -> None:
+    lead_id = uuid4()
+    fact = RequirementFact(
+        lead_id=lead_id,
+        key="budget",
+        value="25000",
+        confidence=0.9,
+        captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    with pytest.raises(ValueError, match="confirmation provenance"):
+        TemporalFactClaim(
+            fact=fact,
+            status=FactClaimStatus.CURRENT,
+            session_id=uuid4(),
+            language=LanguageCode.ENGLISH,
+            valid_from_version=1,
+            valid_from=datetime(2026, 1, 1, tzinfo=UTC),
+            confirmed_by_customer=True,
+        )
+
+
+def test_temporal_claim_rejects_confirmation_before_validity() -> None:
+    lead_id = uuid4()
+    fact = RequirementFact(
+        lead_id=lead_id,
+        key="budget",
+        value="25000",
+        confidence=0.9,
+        captured_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    with pytest.raises(ValueError, match="confirmation cannot precede"):
+        TemporalFactClaim(
+            fact=fact,
+            status=FactClaimStatus.CURRENT,
+            session_id=uuid4(),
+            language=LanguageCode.ENGLISH,
+            valid_from_version=1,
+            valid_from=datetime(2026, 1, 2, tzinfo=UTC),
+            confirmed_by_customer=True,
+            confirmed_by_revision_id=uuid4(),
+            confirmed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )

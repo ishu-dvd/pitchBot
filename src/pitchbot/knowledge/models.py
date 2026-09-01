@@ -41,6 +41,8 @@ class TemporalFactClaim(KnowledgeModel):
     valid_to: AwareDatetime | None = None
     superseded_by_fact_id: UUID | None = None
     confirmed_by_customer: bool = False
+    confirmed_by_revision_id: UUID | None = None
+    confirmed_at: AwareDatetime | None = None
 
     @model_validator(mode="after")
     def validate_interval(self) -> TemporalFactClaim:
@@ -58,6 +60,13 @@ class TemporalFactClaim(KnowledgeModel):
             raise ValueError("fact validity versions must increase")
         if self.valid_to is not None and self.valid_to < self.valid_from:
             raise ValueError("fact validity time cannot decrease")
+        confirmation_fields = (self.confirmed_by_revision_id, self.confirmed_at)
+        if self.confirmed_by_customer is not all(
+            value is not None for value in confirmation_fields
+        ):
+            raise ValueError("confirmed claims require complete confirmation provenance")
+        if self.confirmed_at is not None and self.confirmed_at < self.valid_from:
+            raise ValueError("fact confirmation cannot precede its validity")
         return self
 
 

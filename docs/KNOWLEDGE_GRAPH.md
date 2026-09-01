@@ -19,7 +19,7 @@ Only an explicit revision produced inside the same conversation session closes a
 
 Current claims with the same key and different canonical values across sessions are marked `conflicting`. PitchBot does not silently select the newest value because separate sessions may describe different business contexts or an unresolved buyer correction. Equal values across sessions remain separate current observations.
 
-`confirmed_by_customer` is carried only when an explicit revision marks its replacement as confirmed. The current deterministic extractor does not infer confirmation.
+`confirmed_by_customer` is carried only when an explicit revision marks its replacement as confirmed. The current deterministic extractor does not infer confirmation. Confirmed claims also record `confirmed_by_revision_id` and `confirmed_at`, so a reader can trace which journal revision established the confirmation and when. Confirmation is historical and is retained after a claim is later superseded; the model rejects a confirmed claim without complete provenance or with a confirmation timestamp that precedes the claim's validity.
 
 ## Construction and validation
 

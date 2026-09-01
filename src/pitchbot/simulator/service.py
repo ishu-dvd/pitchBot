@@ -87,6 +87,10 @@ class SessionAdmissionConflictError(RuntimeError):
     pass
 
 
+class SessionCapacityError(RuntimeError):
+    pass
+
+
 _LEAD_ID_NAMESPACE = UUID("a327c17a-6d9f-4c26-b255-5366e5bb8d1d")
 
 
@@ -199,7 +203,28 @@ class SimulatorService:
 
     def _reserve_capacity(self) -> None:
         if len(self._sessions) + len(self._admitting) >= self._max_sessions:
-            raise RuntimeError("Simulator session capacity reached")
+            raise SessionCapacityError("Simulator session capacity reached")
+
+    def _begin_teardown(self, session_id: UUID, session: _Session) -> bool:
+        """Remove the session and hold its identifier so no resume can interleave."""
+
+        with self._registry_lock:
+            if self._sessions.get(session_id) is not session:
+                return False
+            del self._sessions[session_id]
+            self._admitting.add(session_id)
+        return True
+
+    def _release_admission(self, session_id: UUID) -> None:
+        with self._registry_lock:
+            self._admitting.discard(session_id)
+
+    def _abort_teardown(self, session_id: UUID, session: _Session) -> None:
+        """Republish a session whose teardown failed, so closing stays retryable."""
+
+        with self._registry_lock:
+            self._sessions[session_id] = session
+            self._admitting.discard(session_id)
 
     async def process_turn(self, session_id: UUID, request: TurnRequest) -> TurnResponse:
         session = self._get_session(session_id)
@@ -575,14 +600,20 @@ class SimulatorService:
     async def close_session(self, session_id: UUID) -> None:
         session = self._get_session(session_id, allow_closing=True)
         async with session.lock:
-            if self._sessions.get(session_id) is not session:
-                raise SessionNotFoundError(f"Unknown session: {session_id}")
             session.closing = True
-            await self._actions.cleanup_session(session_id)
-            with self._registry_lock:
-                if self._sessions.get(session_id) is session:
-                    del self._sessions[session_id]
-            self._conversation.close_session(session_id)
+            if not self._begin_teardown(session_id, session):
+                raise SessionNotFoundError(f"Unknown session: {session_id}")
+            # The reservation is held across action cleanup too, so a concurrent resume
+            # cannot restore state that this teardown is about to erase by prefix.
+            try:
+                await self._actions.cleanup_session(session_id)
+            except BaseException:
+                self._abort_teardown(session_id, session)
+                raise
+            try:
+                self._conversation.close_session(session_id)
+            finally:
+                self._release_admission(session_id)
 
     def replay(self, scenario_id: str) -> list[dict[str, str]]:
         try:
@@ -634,14 +665,18 @@ class SimulatorService:
 
     async def _discard_session(self, session: _Session) -> None:
         session.closing = True
-        with self._registry_lock:
-            if self._sessions.get(session.session_id) is session:
-                del self._sessions[session.session_id]
-        self._conversation.close_session(session.session_id)
+        session_id = session.session_id
+        if not self._begin_teardown(session_id, session):
+            return
         try:
-            await self._actions.cleanup_session(session.session_id)
+            await self._actions.cleanup_session(session_id)
         except (AdapterError, RuntimeError, ValueError):
             logger.exception("Failed to clean up invalidated simulator session")
+        finally:
+            try:
+                self._conversation.close_session(session_id)
+            finally:
+                self._release_admission(session_id)
 
     def _get_session(self, session_id: UUID, *, allow_closing: bool = False) -> _Session:
         try:

@@ -156,3 +156,35 @@ async def test_durable_history_routes_are_bounded_and_explicitly_disabled(
     assert "disabled" in history.json()["detail"]
     assert invalid_limit.status_code == 422
     assert resume.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_only_capacity_exhaustion_maps_to_too_many_requests(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pitchbot.simulator import router as simulator_router
+    from pitchbot.simulator.service import SessionCapacityError
+
+    class _Failing:
+        def __init__(self, error: BaseException) -> None:
+            self._error = error
+
+        def create_session(self, request: object) -> object:
+            raise self._error
+
+    monkeypatch.setattr(
+        simulator_router,
+        "simulator_service",
+        _Failing(SessionCapacityError("Simulator session capacity reached")),
+    )
+    response = await client.post("/api/simulator/sessions", json={"lead_ref": "cap"})
+    assert response.status_code == 429
+
+    monkeypatch.setattr(
+        simulator_router,
+        "simulator_service",
+        _Failing(RuntimeError("adapter exploded")),
+    )
+    with pytest.raises(RuntimeError, match="adapter exploded"):
+        await client.post("/api/simulator/sessions", json={"lead_ref": "cap"})

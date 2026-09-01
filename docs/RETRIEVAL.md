@@ -46,7 +46,7 @@ The synchronous journal load happens before the first cooperative checkpoint and
 
 `evals/corpora/retrieval-cases.json` contains six reviewed synthetic cases spanning English, Hindi, Hinglish, apparel, toys, books, food, import/export, plastics, and distinct buyer personas.
 
-`evals/corpora/graph-retrieval-cases.json` adds six lead-scoped temporal cases covering unresolved conflicts, explicit supersession, equal cross-session observations, the same language/industry/persona diversity, and a zero-tolerance superseded-claim exposure gate. It runs the production `LeadKnowledgeBm25Retriever` against deterministic immutable graphs without storage, network, or model dependencies.
+`evals/corpora/graph-retrieval-cases.json` adds seven lead-scoped temporal cases covering unresolved conflicts, explicit supersession, customer-confirmed revisions, equal cross-session observations, the same language/industry/persona diversity, and a zero-tolerance superseded-claim exposure gate. Cases are replayed as journal fact/revision snapshots through the production `TemporalKnowledgeGraphBuilder`, so claim status, conflict detection, and confirmation provenance are derived by production code and compared against the reviewed corpus labels (`graph_retrieval.projection_fidelity`). Fidelity is therefore a regression gate on the builder rather than an independent gate on the corpus, because the suite validator derives each expected status from the same supersession fields the builder reads. Retrieval then runs the production `LeadKnowledgeBm25Retriever` without storage, network, or model dependencies.
 
 ```powershell
 pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json

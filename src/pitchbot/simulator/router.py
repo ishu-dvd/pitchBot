@@ -29,6 +29,7 @@ from pitchbot.simulator.service import (
     DurableHistoryDisabledError,
     InjectedSimulatorError,
     SessionAdmissionConflictError,
+    SessionCapacityError,
     SessionNotFoundError,
     SimulatorService,
 )
@@ -69,7 +70,7 @@ def is_allowed_websocket_origin(origin: str | None, host: str | None) -> bool:
 def create_session(request: CreateSessionRequest) -> SessionResponse:
     try:
         return simulator_service.create_session(request)
-    except RuntimeError as error:
+    except SessionCapacityError as error:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
         ) from error
@@ -100,7 +101,7 @@ def resume_session(session_id: UUID, request: ResumeSessionRequest) -> SessionRe
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except RuntimeError as error:
+    except SessionCapacityError as error:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
         ) from error
