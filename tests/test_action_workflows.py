@@ -100,6 +100,25 @@ class AcceptedThenTimeoutCancelAdapter(MockSchedulerAdapter):
         return result
 
 
+class AcceptedThenPermanentCancelAdapter(AcceptedThenBlockingScheduleAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_keys: list[str] = []
+        self.fail_cancel_once = True
+
+    async def cancel(self, job_key: str, idempotency_key: str) -> ActionResult:
+        self.cancel_keys.append(idempotency_key)
+        if self.fail_cancel_once:
+            self.fail_cancel_once = False
+            raise PermanentAdapterError("definitive pending cleanup failure")
+        return await super().cancel(job_key, idempotency_key)
+
+
+class RetainingMockSchedulerAdapter(MockSchedulerAdapter):
+    def clear_operations(self, idempotency_key_prefix: str) -> None:
+        pass
+
+
 class BlockingArtifactAdapter(MockArtifactAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -651,6 +670,69 @@ async def test_ambiguous_cancellation_remains_non_dispatchable_until_reconciled(
 
 
 @pytest.mark.asyncio
+async def test_permanent_cancellation_requires_new_key_and_blocks_dispatch() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[None, PermanentAdapterError("definitive cancellation failure"), None]
+    )
+    telephony = MockTelephonyAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="permanent-cancel",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="schedule-permanent-cancel",
+    )
+    await service.schedule(request, eligible_context())
+    clock.advance(timedelta(minutes=1))
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.cancel(request.callback_id, idempotency_key="cancel-permanent")
+
+    assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_REQUIRED
+    assert request.callback_id in scheduler.jobs
+    assert await service.dispatch_due(lambda _: eligible_context()) == ()
+    assert not telephony.actions
+    with pytest.raises(CallbackConflictError, match="permanently failed"):
+        await service.cancel(request.callback_id, idempotency_key="cancel-permanent")
+    with pytest.raises(RuntimeError, match="capacity"):
+        await service.schedule(
+            request.model_copy(
+                update={
+                    "callback_id": "blocked-by-reconciliation",
+                    "run_at": clock.now() + timedelta(minutes=1),
+                    "idempotency_key": "schedule-blocked-by-reconciliation",
+                }
+            ),
+            eligible_context(),
+        )
+
+    reconciled = await service.cancel(
+        request.callback_id,
+        idempotency_key="cancel-permanent-reconcile",
+    )
+    assert reconciled.status is CallbackStatus.CANCELED
+    assert request.callback_id not in scheduler.jobs
+    replacement = request.model_copy(
+        update={
+            "callback_id": "replacement-after-reconciliation",
+            "run_at": clock.now() + timedelta(minutes=1),
+            "idempotency_key": "schedule-replacement-after-reconciliation",
+        }
+    )
+    assert (await service.schedule(replacement, eligible_context())).status is (
+        CallbackStatus.SCHEDULED
+    )
+
+
+@pytest.mark.asyncio
 async def test_concurrent_deck_admission_cannot_exceed_capacity() -> None:
     adapter = BlockingArtifactAdapter()
     service = DeckService(artifact_adapter=adapter, max_decks=1)
@@ -772,3 +854,123 @@ async def test_failed_cleanup_cancellation_leaves_callback_non_dispatchable() ->
     assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_PENDING
     assert await service.dispatch_due(lambda _: eligible_context()) == ()
     assert not telephony.actions
+
+
+@pytest.mark.asyncio
+async def test_cleanup_reconciles_permanent_cancellation_with_distinct_key() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[None, PermanentAdapterError("definitive cleanup failure"), None]
+    )
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="cleanup-permanent-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="cleanup-permanent-operation",
+    )
+    await service.schedule(request, eligible_context())
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.remove_by_prefix("cleanup-permanent-", "cleanup-permanent-operation")
+
+    assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_REQUIRED
+    assert request.callback_id in scheduler.jobs
+
+    await service.remove_by_prefix("cleanup-permanent-", "cleanup-permanent-operation")
+
+    assert request.callback_id not in scheduler.jobs
+    with pytest.raises(LookupError):
+        service.get(request.callback_id)
+    replacement = request.model_copy(
+        update={
+            "callback_id": "cleanup-capacity-recovered",
+            "idempotency_key": "cleanup-capacity-recovered-operation",
+        }
+    )
+    assert (await service.schedule(replacement, eligible_context())).status is (
+        CallbackStatus.SCHEDULED
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_schedule_cleanup_advances_only_after_permanent_failure() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = AcceptedThenPermanentCancelAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="pending-cleanup-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="pending-cleanup-operation",
+    )
+    pending = asyncio.create_task(service.schedule(request, eligible_context()))
+    await scheduler.accepted.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.remove_by_prefix("pending-cleanup-", "pending-cleanup-operation")
+
+    failed_key = scheduler.cancel_keys[0]
+    with pytest.raises(CallbackConflictError, match="permanently failed"):
+        await service.cancel(request.callback_id, idempotency_key=failed_key)
+
+    await service.remove_by_prefix("pending-cleanup-", "pending-cleanup-operation")
+
+    assert len(scheduler.cancel_keys) == 2
+    assert len(set(scheduler.cancel_keys)) == 2
+    assert request.callback_id not in scheduler.jobs
+
+
+@pytest.mark.asyncio
+async def test_cleanup_key_is_unique_across_callback_id_reuse() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = RetainingMockSchedulerAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="reused-cleanup-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="reused-cleanup-schedule-1",
+    )
+    await service.schedule(request, eligible_context())
+    await service.remove_by_prefix("reused-cleanup-", "reused-cleanup-schedule-")
+    await service.schedule(
+        request.model_copy(
+            update={
+                "idempotency_key": "reused-cleanup-schedule-2",
+                "run_at": clock.now() + timedelta(minutes=2),
+            }
+        ),
+        eligible_context(),
+    )
+    await service.remove_by_prefix("reused-cleanup-", "reused-cleanup-schedule-")
+
+    cancellation_keys = [
+        action.idempotency_key for action in scheduler.actions if action.operation == "cancel"
+    ]
+    assert cancellation_keys == [
+        "cleanup:reused-cleanup-callback:1:1",
+        "cleanup:reused-cleanup-callback:2:1",
+    ]

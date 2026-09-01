@@ -162,7 +162,7 @@
 ## PR 16: Graph-aware lead retrieval
 
 - **Branch:** `feat/graph-aware-retrieval`
-- **Status:** Implementation in progress.
+- **Status:** Merged as PR 16.
 - **Base:** Merged PR 15 commit `556f9a8`.
 - **Scope:** Add explicit session/lead BM25 scope and no-cache lead retrieval over current and conflicting temporal claims while excluding superseded claims and retaining status/provenance.
 - **Safety decisions:** Mixed leads fail closed; session scope remains the default; graph construction counts toward the cooperative deadline; timeout returns no partial results; privacy/version is rechecked after scoring and timeout; retrieval remains non-authoritative.
@@ -172,9 +172,19 @@
 ## PR 17: Graph retrieval evaluation
 
 - **Branch:** `feat/graph-retrieval-evaluation`
-- **Status:** Implementation in progress.
+- **Status:** Merged as PR 17.
 - **Base:** Merged PR 16 commit `640d5ae`.
 - **Scope:** Add a reviewed multilingual temporal retrieval suite and deterministic production-path runner with recall, rank, timeout, informational latency, and superseded-claim exposure metrics.
 - **Safety decisions:** All superseded claims in a case require explicit exclusion gold; exposure threshold is zero; active statuses must match cross-session values; artifacts omit queries, claims, gold identifiers, and retrieved values; fixtures use no storage, model, or network service.
 - **Deferred:** Simulator/speech response wiring, async hard timeout, persistent indexes, structural graph queries, automatic conflict resolution, hybrid/vector retrieval, reranking, and live channels.
 - **Rollback:** Revert PR 17. No schema migration, runtime API, model, provider, retained buyer data, or external side effect is introduced.
+
+## PR 18: Callback cancellation reconciliation
+
+- **Branch:** `fix/callback-cancellation-reconciliation`
+- **Status:** Implementation in progress.
+- **Base:** Merged PR 17 commit `816aa3d`.
+- **Scope:** Preserve permanent scheduler cancellation rejection as an explicit non-dispatchable reconciliation state, reject failed idempotency-key reuse, and support new-key/manual or cleanup recovery.
+- **Safety decisions:** Unresolved jobs continue consuming callback capacity; due dispatch excludes them; cleanup keys bind schedule incarnation and attempt, ambiguous outcomes retain the same key, permanent rejection advances it, failed keys remain tombstoned, and local state is removed only after provider acknowledgement.
+- **Deferred:** Durable scheduler state, provider-specific reconciliation/webhooks, graph benchmark journal fidelity, simulator admission locking, prompt-injection paraphrase hardening, retrieval wall-clock orchestration, and live channels.
+- **Rollback:** Revert PR 18. This changes only bounded process-local callback/mock behavior and adds no schema migration, network provider, live action, or durable schedule.

@@ -18,7 +18,7 @@ Immutable Pydantic contracts cover:
 
 All domain timestamps are timezone-aware. Unknown fields are rejected.
 
-Current follow-up summaries accept only allowlisted business type, feature, budget, timeline, and next-step fields. Callback resource IDs are distinct from schedule/cancel/dispatch idempotency keys. Structured deck previews contain fixed industry templates and allowlisted features; binary PPTX files are not generated.
+Current follow-up summaries accept only allowlisted business type, feature, budget, timeline, and next-step fields. Callback resource IDs are distinct from schedule/cancel/dispatch idempotency keys. Callback cancellation states distinguish pending/ambiguous work from permanent rejection requiring a new reconciliation operation; neither state is dispatchable. Structured deck previews contain fixed industry templates and allowlisted features; binary PPTX files are not generated.
 
 ## Database tables
 

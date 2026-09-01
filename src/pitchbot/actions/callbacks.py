@@ -32,6 +32,7 @@ class _PendingSchedule:
     request: CallbackRequest
     context: ActionAuthorizationContext
     fingerprint: tuple[str, str]
+    incarnation: int
 
 
 class CallbackService:
@@ -58,6 +59,11 @@ class CallbackService:
         self._operation_results: dict[str, CallbackRecord] = {}
         self._pending_schedules: dict[str, _PendingSchedule] = {}
         self._pending_cancellations: dict[str, str] = {}
+        self._pending_schedule_cancellations: dict[str, str] = {}
+        self._failed_cancellations: dict[str, str] = {}
+        self._callback_incarnations: dict[str, int] = {}
+        self._cleanup_attempts: dict[tuple[str, int], int] = {}
+        self._incarnation_sequence = 0
         self._lock = asyncio.Lock()
 
     async def schedule(
@@ -92,7 +98,12 @@ class CallbackService:
             active_callback_ids = {
                 record.request.callback_id
                 for record in self._records.values()
-                if record.status in {CallbackStatus.SCHEDULED, CallbackStatus.CANCELLATION_PENDING}
+                if record.status
+                in {
+                    CallbackStatus.SCHEDULED,
+                    CallbackStatus.CANCELLATION_PENDING,
+                    CallbackStatus.CANCELLATION_REQUIRED,
+                }
             }
             active_callback_ids.update(
                 item.request.callback_id for item in self._pending_schedules.values()
@@ -105,6 +116,7 @@ class CallbackService:
             if existing is not None and existing.status in {
                 CallbackStatus.SCHEDULED,
                 CallbackStatus.CANCELLATION_PENDING,
+                CallbackStatus.CANCELLATION_REQUIRED,
             }:
                 raise CallbackConflictError(
                     "Callback is already scheduled or cancellation is pending"
@@ -115,11 +127,14 @@ class CallbackService:
             decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
             if decision.reasons:
                 return self._blocked(request, *decision.reasons)
-            self._pending_schedules[request.idempotency_key] = _PendingSchedule(
+            self._incarnation_sequence += 1
+            pending = _PendingSchedule(
                 request=request,
                 context=context,
                 fingerprint=fingerprint,
+                incarnation=self._incarnation_sequence,
             )
+            self._pending_schedules[request.idempotency_key] = pending
         try:
             result = await self._scheduler.schedule(
                 request.callback_id,
@@ -140,6 +155,7 @@ class CallbackService:
             updated_at=self._clock.now(),
         )
         self._pending_schedules.pop(request.idempotency_key, None)
+        self._callback_incarnations[request.callback_id] = pending.incarnation
         self._store_operation(request.idempotency_key, fingerprint, record)
         return record
 
@@ -162,7 +178,10 @@ class CallbackService:
         if existing.status is CallbackStatus.CANCELLATION_PENDING:
             if pending_key != idempotency_key:
                 raise CallbackConflictError("Callback cancellation outcome is pending")
-        elif existing.status is CallbackStatus.SCHEDULED:
+        elif existing.status in {
+            CallbackStatus.SCHEDULED,
+            CallbackStatus.CANCELLATION_REQUIRED,
+        }:
             self._records[callback_id] = existing.model_copy(
                 update={
                     "status": CallbackStatus.CANCELLATION_PENDING,
@@ -172,7 +191,18 @@ class CallbackService:
             self._pending_cancellations[callback_id] = idempotency_key
         else:
             raise CallbackConflictError("Only a scheduled callback can be canceled")
-        result = await self._scheduler.cancel(callback_id, idempotency_key)
+        try:
+            result = await self._scheduler.cancel(callback_id, idempotency_key)
+        except PermanentAdapterError:
+            self._records[callback_id] = existing.model_copy(
+                update={
+                    "status": CallbackStatus.CANCELLATION_REQUIRED,
+                    "updated_at": self._clock.now(),
+                }
+            )
+            self._pending_cancellations.pop(callback_id, None)
+            self._record_failed_cancellation(idempotency_key, callback_id)
+            raise
         record = existing.model_copy(
             update={
                 "status": CallbackStatus.CANCELED,
@@ -245,11 +275,31 @@ class CallbackService:
             )
             for key in pending_schedule_keys:
                 pending = self._pending_schedules[key]
-                await self._scheduler.cancel(
-                    pending.request.callback_id,
-                    f"cleanup:{pending.request.callback_id}",
-                )
+                cancellation_key = self._pending_schedule_cancellations.get(key)
+                if cancellation_key is None:
+                    cancellation_key = self._next_cleanup_key(
+                        pending.request.callback_id,
+                        pending.incarnation,
+                    )
+                    self._pending_schedule_cancellations[key] = cancellation_key
+                try:
+                    await self._scheduler.cancel(
+                        pending.request.callback_id,
+                        cancellation_key,
+                    )
+                except PermanentAdapterError:
+                    self._pending_schedule_cancellations.pop(key, None)
+                    self._record_failed_cancellation(
+                        cancellation_key,
+                        pending.request.callback_id,
+                    )
+                    raise
                 self._pending_schedules.pop(key, None)
+                self._pending_schedule_cancellations.pop(key, None)
+                self._cleanup_attempts.pop(
+                    (pending.request.callback_id, pending.incarnation),
+                    None,
+                )
             callback_ids = tuple(
                 callback_id
                 for callback_id in self._records
@@ -257,8 +307,14 @@ class CallbackService:
             )
             for callback_id in callback_ids:
                 record = self._records[callback_id]
-                if record.status is CallbackStatus.SCHEDULED:
-                    cancellation_key = f"cleanup:{callback_id}"
+                if record.status in {
+                    CallbackStatus.SCHEDULED,
+                    CallbackStatus.CANCELLATION_REQUIRED,
+                }:
+                    cancellation_key = self._next_cleanup_key(
+                        callback_id,
+                        self._callback_incarnations[callback_id],
+                    )
                     self._records[callback_id] = record.model_copy(
                         update={
                             "status": CallbackStatus.CANCELLATION_PENDING,
@@ -266,14 +322,42 @@ class CallbackService:
                         }
                     )
                     self._pending_cancellations[callback_id] = cancellation_key
-                    await self._scheduler.cancel(callback_id, cancellation_key)
+                    try:
+                        await self._scheduler.cancel(callback_id, cancellation_key)
+                    except PermanentAdapterError:
+                        self._records[callback_id] = record.model_copy(
+                            update={
+                                "status": CallbackStatus.CANCELLATION_REQUIRED,
+                                "updated_at": self._clock.now(),
+                            }
+                        )
+                        self._pending_cancellations.pop(callback_id, None)
+                        self._record_failed_cancellation(cancellation_key, callback_id)
+                        raise
                 elif record.status is CallbackStatus.CANCELLATION_PENDING:
                     cancellation_key = self._pending_cancellations[callback_id]
-                    await self._scheduler.cancel(callback_id, cancellation_key)
+                    try:
+                        await self._scheduler.cancel(callback_id, cancellation_key)
+                    except PermanentAdapterError:
+                        self._records[callback_id] = record.model_copy(
+                            update={
+                                "status": CallbackStatus.CANCELLATION_REQUIRED,
+                                "updated_at": self._clock.now(),
+                            }
+                        )
+                        self._pending_cancellations.pop(callback_id, None)
+                        self._record_failed_cancellation(cancellation_key, callback_id)
+                        raise
                 elif record.status is CallbackStatus.DISPATCHED and isinstance(
                     self._scheduler, EphemeralOperationStore
                 ):
-                    await self._scheduler.cancel(callback_id, f"cleanup:{callback_id}")
+                    await self._scheduler.cancel(
+                        callback_id,
+                        self._next_cleanup_key(
+                            callback_id,
+                            self._callback_incarnations[callback_id],
+                        ),
+                    )
                 self._pending_cancellations.pop(callback_id, None)
                 operation_keys = tuple(
                     key
@@ -283,6 +367,9 @@ class CallbackService:
                 for key in operation_keys:
                     self._operation_fingerprints.pop(key, None)
                     self._operation_results.pop(key, None)
+                incarnation = self._callback_incarnations.pop(callback_id, None)
+                if incarnation is not None:
+                    self._cleanup_attempts.pop((callback_id, incarnation), None)
                 self._records.pop(callback_id, None)
             if isinstance(self._scheduler, EphemeralOperationStore):
                 self._scheduler.clear_operations(operation_key_prefix)
@@ -309,6 +396,10 @@ class CallbackService:
             raise CallbackConflictError("Idempotency key reused with different callback input")
         if previous is None:
             return None
+        if self._failed_cancellations.get(idempotency_key) is not None:
+            raise CallbackConflictError(
+                "Callback cancellation operation permanently failed; use a new idempotency key"
+            )
         try:
             return self._operation_results[idempotency_key]
         except KeyError as error:
@@ -323,3 +414,13 @@ class CallbackService:
         self._operation_fingerprints[idempotency_key] = fingerprint
         self._operation_results[idempotency_key] = record
         self._records[record.request.callback_id] = record
+
+    def _next_cleanup_key(self, callback_id: str, incarnation: int) -> str:
+        attempt_key = (callback_id, incarnation)
+        attempt = self._cleanup_attempts.get(attempt_key, 0) + 1
+        self._cleanup_attempts[attempt_key] = attempt
+        return f"cleanup:{callback_id}:{incarnation}:{attempt}"
+
+    def _record_failed_cancellation(self, idempotency_key: str, callback_id: str) -> None:
+        self._operation_fingerprints[idempotency_key] = ("cancel", callback_id)
+        self._failed_cancellations[idempotency_key] = callback_id
