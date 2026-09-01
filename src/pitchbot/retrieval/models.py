@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import StrEnum
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -9,6 +10,11 @@ from pitchbot.domain import JsonValue, LanguageCode
 
 class RetrievalModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class RetrievalScope(StrEnum):
+    SESSION = "session"
+    LEAD = "lead"
 
 
 class FactProvenance(RetrievalModel):

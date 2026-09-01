@@ -132,7 +132,7 @@
 ## PR 13: Durable simulator history
 
 - **Branch:** `feat/simulator-durable-history`
-- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Status:** Merged as PR 13.
 - **Base:** Merged PR 12 commit `75eca2d`.
 - **Scope:** Wire simulator turns to the existing conversation journal with prepare/commit semantics, managed-key configuration, restart resume, and bounded minimized durable-history API.
 - **Safety decisions:** Disabled by default; action failure precedes journal commit; persistence failure rolls back local state; stale sessions are invalidated; privacy closure and wrong keys fail closed; recovered action-preview responses are not reconstructed.
@@ -142,7 +142,7 @@
 ## PR 14: Deterministic BM25 retrieval baseline
 
 - **Branch:** `feat/bm25-retrieval-baseline`
-- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Status:** Merged as PR 14.
 - **Base:** Merged PR 13 commit `f491ab6`.
 - **Scope:** Add dependency-free Unicode BM25 over replay-validated current structured facts, provenance-bound results, privacy/version revalidation, strict bounds, cooperative deadlines, and portable multilingual retrieval evaluation.
 - **Safety decisions:** No direct storage reads, runtime cache, raw buyer text, partial timeout results, cross-lead index, action authority, vector dependency, or latency claim; evaluation artifacts exclude queries and retrieved content.
@@ -152,9 +152,19 @@
 ## PR 15: Temporal lead knowledge view
 
 - **Branch:** `feat/temporal-knowledge-graph`
-- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Status:** Merged as PR 15.
 - **Base:** Merged PR 14 commit `1c59cf7`.
 - **Scope:** Rebuild bounded immutable lead/session/fact graphs from fully replay-validated journal history with explicit supersession, validity intervals, provenance, and conservative cross-session conflicts.
 - **Safety decisions:** No direct storage reader, cache, silent latest-value merge, inferred confirmation, action authority, graph database, model, or network service; malformed history and post-build privacy/version changes fail closed.
 - **Deferred:** Persistent graph projections, organization/product/competitor entities, automatic conflict resolution, BM25/graph fusion, HTTP/RAG wiring, embeddings, and live channels.
 - **Rollback:** Revert PR 15. No schema migration, persistent graph, API, provider, or external side effect is introduced.
+
+## PR 16: Graph-aware lead retrieval
+
+- **Branch:** `feat/graph-aware-retrieval`
+- **Status:** Implementation in progress.
+- **Base:** Merged PR 15 commit `556f9a8`.
+- **Scope:** Add explicit session/lead BM25 scope and no-cache lead retrieval over current and conflicting temporal claims while excluding superseded claims and retaining status/provenance.
+- **Safety decisions:** Mixed leads fail closed; session scope remains the default; graph construction counts toward the cooperative deadline; timeout returns no partial results; privacy/version is rechecked after scoring and timeout; retrieval remains non-authoritative.
+- **Deferred:** Simulator/speech response wiring, async hard timeout, persistent indexes, structural graph queries, automatic conflict resolution, hybrid/vector search, reranking, and live channels.
+- **Rollback:** Revert PR 16. No schema migration, persistent index, API, model, provider, or external side effect is introduced.
