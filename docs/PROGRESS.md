@@ -168,3 +168,13 @@
 - **Safety decisions:** Mixed leads fail closed; session scope remains the default; graph construction counts toward the cooperative deadline; timeout returns no partial results; privacy/version is rechecked after scoring and timeout; retrieval remains non-authoritative.
 - **Deferred:** Simulator/speech response wiring, async hard timeout, persistent indexes, structural graph queries, automatic conflict resolution, hybrid/vector search, reranking, and live channels.
 - **Rollback:** Revert PR 16. No schema migration, persistent index, API, model, provider, or external side effect is introduced.
+
+## PR 17: Graph retrieval evaluation
+
+- **Branch:** `feat/graph-retrieval-evaluation`
+- **Status:** Implementation in progress.
+- **Base:** Merged PR 16 commit `640d5ae`.
+- **Scope:** Add a reviewed multilingual temporal retrieval suite and deterministic production-path runner with recall, rank, timeout, informational latency, and superseded-claim exposure metrics.
+- **Safety decisions:** All superseded claims in a case require explicit exclusion gold; exposure threshold is zero; active statuses must match cross-session values; artifacts omit queries, claims, gold identifiers, and retrieved values; fixtures use no storage, model, or network service.
+- **Deferred:** Simulator/speech response wiring, async hard timeout, persistent indexes, structural graph queries, automatic conflict resolution, hybrid/vector retrieval, reranking, and live channels.
+- **Rollback:** Revert PR 17. No schema migration, runtime API, model, provider, retained buyer data, or external side effect is introduced.

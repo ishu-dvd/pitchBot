@@ -5,6 +5,7 @@ from pitchbot.retrieval.bm25 import (
     Bm25Index,
     JournalBm25Retriever,
     tokenize,
+    validate_bm25_document,
     validate_bm25_request,
 )
 from pitchbot.retrieval.models import (
@@ -27,5 +28,6 @@ __all__ = [
     "RetrievalResponse",
     "RetrievalScope",
     "tokenize",
+    "validate_bm25_document",
     "validate_bm25_request",
 ]

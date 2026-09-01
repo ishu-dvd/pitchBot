@@ -67,6 +67,16 @@ def validate_bm25_request(query: str, top_k: int, deadline_ms: int) -> tuple[str
     return query_terms
 
 
+def validate_bm25_document(key: str, value: JsonValue) -> tuple[str, ...]:
+    text = f"{key.replace('_', ' ')} {_render_value(value)}"
+    if len(text.encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        raise ValueError("BM25 document exceeds size limit")
+    terms = tokenize(text)
+    if len(terms) > MAX_DOCUMENT_TOKENS:
+        raise ValueError("BM25 document exceeds token limit")
+    return terms
+
+
 @dataclass(frozen=True, slots=True)
 class _IndexedDocument:
     document: LexicalDocument
@@ -107,12 +117,7 @@ class Bm25Index:
         indexed: list[_IndexedDocument] = []
         document_frequency: Counter[str] = Counter()
         for document in materialized:
-            text = f"{document.key.replace('_', ' ')} {_render_value(document.value)}"
-            if len(text.encode("utf-8")) > MAX_DOCUMENT_BYTES:
-                raise ValueError("BM25 document exceeds size limit")
-            terms = tokenize(text)
-            if len(terms) > MAX_DOCUMENT_TOKENS:
-                raise ValueError("BM25 document exceeds token limit")
+            terms = validate_bm25_document(document.key, document.value)
             frequencies = Counter(terms)
             document_frequency.update(frequencies.keys())
             indexed.append(
