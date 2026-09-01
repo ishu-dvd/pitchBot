@@ -73,6 +73,8 @@ The UI may use browser-native speech synthesis for audible replies. Voice availa
 - Conversation turns, retained turn operations (including failures), facts, evidence, classification history, action records, and mock adapter histories are bounded; only high-level outcomes enter simulator metadata.
 - Turn API callers must provide and reuse `operation_id` for retries; conflicting reuse and operation-capacity exhaustion fail closed.
 - Durable reads require an active session UUID capability, validate the complete lead stream, and expose no raw buyer text, internal lead/source identifiers, operation fingerprints, or turn digests.
+- Session admission and removal are serialized by an explicit registry lock. Read endpoints are synchronous and run on a worker thread pool, so capacity checks and registry writes are one atomic step and cannot be interleaved.
+- Resume reserves the session identifier before the slow journal restore. A second concurrent resume of the same session is rejected with a conflict instead of restoring twice, and a failed restore releases both the reservation and any partially restored conversation state.
 
 ## Cleanup
 

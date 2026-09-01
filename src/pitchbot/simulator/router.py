@@ -28,6 +28,7 @@ from pitchbot.simulator.models import (
 from pitchbot.simulator.service import (
     DurableHistoryDisabledError,
     InjectedSimulatorError,
+    SessionAdmissionConflictError,
     SessionNotFoundError,
     SimulatorService,
 )
@@ -95,8 +96,14 @@ def resume_session(session_id: UUID, request: ResumeSessionRequest) -> SessionRe
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except ConversationJournalError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except SessionAdmissionConflictError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(error)
+        ) from error
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
