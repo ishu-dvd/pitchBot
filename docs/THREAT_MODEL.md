@@ -44,6 +44,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 | Malicious file | Uploaded sample contains active content | Content-type verification, size limits, malware scan, safe rendering, no executable formats |
 | Webhook forgery | Fake provider callback updates lead state | Signature/timestamp verification, replay protection, narrow ingress |
 | Schedule abuse | Invalid timezone or repeated callback | Validated timezone/hours, suppression recheck at execution, cancellation and deduplication |
+| Cancellation rejection | Provider rejects cancellation while its job remains live | Explicit cancellation-required state; no dispatch; active-capacity retention; failed-key tombstone; new-key reconciliation before cleanup |
 | Operator misuse | Live channels enabled accidentally | Default-off flags, least privilege, audit events, two-person activation, kill switch |
 
 ## Abuse conversation handling

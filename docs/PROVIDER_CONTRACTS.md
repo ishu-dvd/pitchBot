@@ -17,7 +17,7 @@ The adapter boundary covers:
 - Binary object storage.
 - Replaceable UTC clocks.
 
-Resource identity and operation idempotency are separate. For example, a scheduler job key identifies the job while an idempotency key identifies one schedule/cancel attempt. This permits a canceled job to be rescheduled with a new operation key.
+Resource identity and operation idempotency are separate. For example, a scheduler job key identifies the job while an idempotency key identifies one schedule/cancel attempt. This permits a canceled job to be rescheduled with a new operation key. A permanently rejected cancellation enters `cancellation-required`: it remains non-dispatchable and capacity-counted, the failed operation key cannot be reused, and reconciliation requires a new key.
 
 ## Streaming
 
@@ -82,4 +82,4 @@ The recommended order for a future provider operation is:
 
 ## Clocks
 
-`SystemClock` returns UTC. `FakeClock` requires timezone-aware input and cannot move backward. PR 8 implements bounded in-memory callback scheduling for deterministic tests: future times are validated, cancel/reschedule uses distinct operation keys, due jobs are ordered deterministically, and policy is rechecked before mock telephony dispatch. Schedules disappear on restart and are not production callbacks.
+`SystemClock` returns UTC. `FakeClock` requires timezone-aware input and cannot move backward. PR 8 implements bounded in-memory callback scheduling for deterministic tests: future times are validated, cancel/reschedule uses distinct operation keys, due jobs are ordered deterministically, and policy is rechecked before mock telephony dispatch. Permanent cancellation rejection is retained for explicit reconciliation; cleanup keys bind callback ID, schedule incarnation, and attempt, retain the same key after ambiguous outcomes, advance after permanent rejection, and remove local state only after provider acknowledgement. Schedules disappear on restart and are not production callbacks.

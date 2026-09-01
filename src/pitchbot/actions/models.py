@@ -78,6 +78,7 @@ class CallbackRequest(ActionModel):
 class CallbackStatus(StrEnum):
     SCHEDULED = "scheduled"
     CANCELLATION_PENDING = "cancellation-pending"
+    CANCELLATION_REQUIRED = "cancellation-required"
     CANCELED = "canceled"
     DISPATCHED = "dispatched"
     BLOCKED = "blocked"
