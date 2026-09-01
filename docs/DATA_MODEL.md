@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. PR 8 uses follow-up, schedule, proposal, execution, and artifact concepts in bounded process-local mock workflows. PR 12 adds a durable conversation journal on the existing event tables; it is not yet connected to HTTP action flows.
+PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. PR 8 uses follow-up, schedule, proposal, execution, and artifact concepts in bounded process-local mock workflows. PR 12 adds a durable conversation journal on the existing event tables, and PR 13 connects it to default-off simulator HTTP flows.
 
 ## Domain contracts
 
@@ -86,9 +86,13 @@ All sessions for a lead share that lead's `lead` aggregate. Every accepted turn 
 
 Idempotent lookup precedes processing, so an exact retry returns the persisted event even after an ambiguous acknowledgement; reuse with different typed input fails. Processing is rolled back in memory if persistence fails. New operations require the next lead aggregate version and a live state matching durable history.
 
+Simulator integration uses a prepare/commit boundary: it validates the operation and aggregate version before conversation/action processing, then persists only after any mock action succeeds. Action failures and persistence failures roll back local conversation and timeline state. An accepted action turn can reconcile an acknowledgement loss while its process-local idempotent action result remains available; after restart, action-preview response reconstruction fails closed.
+
 Journal reads are bounded and verify aggregate type, version, and privacy state before and after loading. Purged, anonymized, hard-deleted, oversized, malformed, unsupported, or internally inconsistent histories cannot be replayed. Replay rebuilds state from per-turn transitions without executing conversation rules, model calls, or actions. Restoration refuses to overwrite a live session; explicit synchronization replaces stale state only from validated durable history. No migration or duplicate transcript/checkpoint table is introduced.
 
 Lead-level export, anonymization, and hard deletion cover every associated session. Time-based deletion of any source event makes the journal unavailable rather than retaining or silently reconstructing expired data from cumulative copies.
+
+Simulator lead aggregates use a deterministic UUID derived from validated synthetic `lead_ref`; session UUIDs remain unguessable capabilities. Durable API replay validates the entire stream before returning at most 100 typed results and excludes raw buyer text, internal lead/source identifiers, request fingerprints, and repetition digests.
 
 ## Planned knowledge views
 

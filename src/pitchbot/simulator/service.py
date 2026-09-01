@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from pitchbot.actions import (
     ActionAuthorizationContext,
@@ -22,13 +23,26 @@ from pitchbot.adapters.mocks import (
     MockTelephonyAdapter,
     MockWhatsAppAdapter,
 )
-from pitchbot.conversation import ConversationDisposition, ConversationEngine
+from pitchbot.conversation import (
+    ConversationDisposition,
+    ConversationEngine,
+    ConversationJournal,
+    ConversationResult,
+    ConversationState,
+    JournalCorruptionError,
+    JournalHistoryUnavailableError,
+    JournalOperationConflictError,
+)
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
+    DurableConversationResult,
+    DurableHistoryResponse,
+    DurableHistoryTurn,
     LeadHistoryResponse,
     PreviewAction,
+    ResumeSessionRequest,
     SessionResponse,
     SimulatorEvent,
     SimulatorEventType,
@@ -36,6 +50,9 @@ from pitchbot.simulator.models import (
     TurnResponse,
 )
 from pitchbot.simulator.scenarios import SCENARIOS
+from pitchbot.storage import AggregateClosedError, ConcurrencyConflictError
+
+logger = logging.getLogger(__name__)
 
 DISCLOSURES = {
     LanguageCode.ENGLISH: "Hello, I am PitchBot, an AI sales assistant. This is a simulation.",
@@ -57,17 +74,30 @@ class TurnConflictError(RuntimeError):
     pass
 
 
+class DurableHistoryDisabledError(RuntimeError):
+    pass
+
+
+class DurableActionReplayUnavailableError(RuntimeError):
+    pass
+
+
+_LEAD_ID_NAMESPACE = UUID("a327c17a-6d9f-4c26-b255-5366e5bb8d1d")
+
+
 @dataclass(slots=True)
 class _TurnOperation:
     fingerprint: str
     started_at: datetime
     response: TurnResponse | None = None
     injected_failure: str | None = None
+    action_completed: bool = False
 
 
 @dataclass(slots=True)
 class _Session:
     session_id: UUID
+    lead_id: UUID
     lead_ref: str
     language: LanguageCode
     events: deque[SimulatorEvent]
@@ -77,6 +107,7 @@ class _Session:
     audio_chunks_received: int = 0
     approved_preview_count: int = 0
     closing: bool = False
+    recovered: bool = False
     turn_operations: dict[UUID, _TurnOperation] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -92,6 +123,7 @@ class SimulatorService:
         max_audio_chunks_per_session: int = 2_000,
         max_turn_operations_per_session: int = 100,
         conversation_engine: ConversationEngine | None = None,
+        conversation_journal: ConversationJournal | None = None,
         action_workflows: ActionWorkflowService | None = None,
     ) -> None:
         if (
@@ -111,6 +143,7 @@ class SimulatorService:
         self._max_audio_chunks_per_session = max_audio_chunks_per_session
         self._max_turn_operations_per_session = max_turn_operations_per_session
         self._conversation = conversation_engine or ConversationEngine()
+        self._journal = conversation_journal
         if action_workflows is None:
             action_policy = ActionPolicy(clock=self._clock)
             action_workflows = ActionWorkflowService(
@@ -134,15 +167,20 @@ class SimulatorService:
     def create_session(self, request: CreateSessionRequest) -> SessionResponse:
         if len(self._sessions) >= self._max_sessions:
             raise RuntimeError("Simulator session capacity reached")
+        session_id = uuid4()
+        lead_id = (
+            uuid5(_LEAD_ID_NAMESPACE, request.lead_ref) if self._journal is not None else uuid4()
+        )
         session = _Session(
-            session_id=uuid4(),
+            session_id=session_id,
+            lead_id=lead_id,
             lead_ref=request.lead_ref,
             language=request.language,
             events=deque(maxlen=self._max_events_per_session),
             preview_consent_granted=request.preview_consent_granted,
             contact_policy=request.contact_policy,
         )
-        self._conversation.create_session(session.session_id)
+        self._conversation.create_session(session.session_id, lead_id=lead_id)
         self._sessions[session.session_id] = session
         self._append_event(
             session,
@@ -156,7 +194,13 @@ class SimulatorService:
         session = self._get_session(session_id)
         async with session.lock:
             self._ensure_session_active(session_id, session)
-            fingerprint = request.model_dump_json(exclude={"operation_id"})
+            if session.recovered and request.preview_action is not PreviewAction.NONE:
+                raise DurableActionReplayUnavailableError(
+                    "Action previews are unavailable for recovered sessions"
+                )
+            fingerprint = request.model_dump_json(
+                exclude={"inject_failure", "operation_id", "simulated_latency_ms"}
+            )
             operation = session.turn_operations.get(request.operation_id)
             if operation is not None:
                 if operation.fingerprint != fingerprint:
@@ -170,8 +214,11 @@ class SimulatorService:
                     raise RuntimeError("Simulator turn operation capacity reached")
                 operation = _TurnOperation(fingerprint=fingerprint, started_at=self._clock.now())
                 session.turn_operations[request.operation_id] = operation
-            self._ensure_conversation_open(session_id)
+            if self._journal is None:
+                self._ensure_conversation_open(session_id)
             if request.inject_failure:
+                if self._journal is not None:
+                    self._ensure_conversation_open(session_id)
                 message = "Deterministic simulator failure injected"
                 self._append_event(
                     session,
@@ -187,11 +234,63 @@ class SimulatorService:
             approved_preview_checkpoint = session.approved_preview_count
             if request.simulated_latency_ms:
                 await asyncio.sleep(request.simulated_latency_ms / 1_000)
-            outcome = self._conversation.process_turn(
-                session.session_id,
-                text=request.text,
-                language=request.language,
-            )
+            preparation = None
+            replaying_durable_turn = False
+            if self._journal is not None:
+                try:
+                    preparation = self._journal.prepare_turn(
+                        self._conversation,
+                        session_id,
+                        operation_id=request.operation_id,
+                        text=request.text,
+                        language=request.language,
+                        operation_context=request.model_dump(
+                            mode="json",
+                            exclude={
+                                "inject_failure",
+                                "language",
+                                "operation_id",
+                                "simulated_latency_ms",
+                                "text",
+                            },
+                        ),
+                    )
+                except ConcurrencyConflictError:
+                    await self._discard_session(session)
+                    raise
+                except JournalOperationConflictError:
+                    session.turn_operations.pop(request.operation_id, None)
+                    raise
+                except (
+                    AggregateClosedError,
+                    JournalCorruptionError,
+                    JournalHistoryUnavailableError,
+                ):
+                    await self._discard_session(session)
+                    raise
+                if preparation.existing is not None:
+                    if (
+                        request.preview_action is not PreviewAction.NONE
+                        and not operation.action_completed
+                    ):
+                        raise DurableActionReplayUnavailableError(
+                            "Action preview response is unavailable after session recovery"
+                        )
+                    outcome = preparation.existing.event.result
+                    if request.preview_action is PreviewAction.NONE:
+                        session.language = outcome.language
+                        response = self._turn_response(session, outcome, preview=None)
+                        operation.response = response
+                        return response
+                    replaying_durable_turn = True
+            conversation_checkpoint = self._conversation.checkpoint(session_id)
+            if not replaying_durable_turn:
+                self._ensure_conversation_open(session_id)
+                outcome = self._conversation.process_turn(
+                    session.session_id,
+                    text=request.text,
+                    language=request.language,
+                )
             session.language = request.language
             self._append_event(
                 session,
@@ -269,6 +368,7 @@ class SimulatorService:
                             context=context,
                             operation_id=request.operation_id,
                         )
+                    operation.action_completed = True
                 except asyncio.CancelledError:
                     self._conversation.restore(session_id, conversation_checkpoint)
                     session.events = event_checkpoint
@@ -297,17 +397,46 @@ class SimulatorService:
                         "executed": preview.executed,
                     },
                 )
-            response = TurnResponse(
-                session_id=session.session_id,
-                reply=reply,
-                preview=preview,
-                disposition=outcome.disposition,
-                phase=outcome.phase,
-                temperature=outcome.classification.temperature.value,
-                safety_signals=list(outcome.safety_signals),
-                repeated_turn=outcome.repeated_turn,
-                events=list(session.events),
-            )
+            if self._journal is not None and not replaying_durable_turn:
+                if preparation is None:
+                    raise RuntimeError("Durable journal preparation is missing")
+                try:
+                    self._journal.commit_turn(
+                        self._conversation,
+                        preparation,
+                        outcome,
+                    )
+                except ConcurrencyConflictError:
+                    await self._discard_session(session)
+                    raise
+                except (
+                    AggregateClosedError,
+                    JournalCorruptionError,
+                    JournalHistoryUnavailableError,
+                ):
+                    await self._discard_session(session)
+                    raise
+                except asyncio.CancelledError:
+                    self._restore_turn(
+                        session,
+                        conversation_checkpoint,
+                        event_checkpoint,
+                        language_checkpoint,
+                        next_sequence_checkpoint,
+                        approved_preview_checkpoint,
+                    )
+                    raise
+                except Exception:
+                    self._restore_turn(
+                        session,
+                        conversation_checkpoint,
+                        event_checkpoint,
+                        language_checkpoint,
+                        next_sequence_checkpoint,
+                        approved_preview_checkpoint,
+                    )
+                    raise
+            response = self._turn_response(session, outcome, preview=preview)
             operation.response = response
             return response
 
@@ -357,6 +486,68 @@ class SimulatorService:
             events=list(session.events),
         )
 
+    def resume_session(
+        self,
+        session_id: UUID,
+        request: ResumeSessionRequest,
+    ) -> SessionResponse:
+        if self._journal is None:
+            raise DurableHistoryDisabledError("Durable conversation history is disabled")
+        existing = self._sessions.get(session_id)
+        if existing is not None:
+            if existing.lead_ref != request.lead_ref:
+                raise SessionNotFoundError(f"Unknown session: {session_id}")
+            return self._session_response(existing)
+        if len(self._sessions) >= self._max_sessions:
+            raise RuntimeError("Simulator session capacity reached")
+        lead_id = uuid5(_LEAD_ID_NAMESPACE, request.lead_ref)
+        replay = self._journal.restore_session(
+            self._conversation,
+            lead_id,
+            session_id,
+        )
+        session = _Session(
+            session_id=session_id,
+            lead_id=lead_id,
+            lead_ref=request.lead_ref,
+            language=replay.last_result.language,
+            events=deque(maxlen=self._max_events_per_session),
+            preview_consent_granted=False,
+            contact_policy=ContactPolicy(),
+            recovered=True,
+        )
+        self._sessions[session_id] = session
+        return self._session_response(session)
+
+    def get_durable_history(
+        self,
+        session_id: UUID,
+        *,
+        limit: int,
+    ) -> DurableHistoryResponse:
+        if self._journal is None:
+            raise DurableHistoryDisabledError("Durable conversation history is disabled")
+        session = self._get_session(session_id)
+        turns = self._journal.read_turns(
+            session.lead_id,
+            session_id,
+            limit=limit,
+        )
+        return DurableHistoryResponse(
+            session_id=session_id,
+            turns=[
+                DurableHistoryTurn(
+                    aggregate_version=turn.aggregate_version,
+                    occurred_at=turn.occurred_at,
+                    result=DurableConversationResult.model_validate(
+                        turn.event.result,
+                        from_attributes=True,
+                    ),
+                )
+                for turn in turns
+            ],
+        )
+
     async def close_session(self, session_id: UUID) -> None:
         session = self._get_session(session_id, allow_closing=True)
         async with session.lock:
@@ -380,6 +571,49 @@ class SimulatorService:
             }
             for turn in scenario
         ]
+
+    @staticmethod
+    def _turn_response(
+        session: _Session,
+        outcome: ConversationResult,
+        *,
+        preview: ActionPreviewResult | None,
+    ) -> TurnResponse:
+        return TurnResponse(
+            session_id=session.session_id,
+            reply=outcome.reply,
+            preview=preview,
+            disposition=outcome.disposition,
+            phase=outcome.phase,
+            temperature=outcome.classification.temperature.value,
+            safety_signals=list(outcome.safety_signals),
+            repeated_turn=outcome.repeated_turn,
+            events=list(session.events),
+        )
+
+    def _restore_turn(
+        self,
+        session: _Session,
+        conversation_checkpoint: ConversationState,
+        event_checkpoint: deque[SimulatorEvent],
+        language_checkpoint: LanguageCode,
+        next_sequence_checkpoint: int,
+        approved_preview_checkpoint: int,
+    ) -> None:
+        self._conversation.restore(session.session_id, conversation_checkpoint)
+        session.events = event_checkpoint
+        session.language = language_checkpoint
+        session.next_sequence = next_sequence_checkpoint
+        session.approved_preview_count = approved_preview_checkpoint
+
+    async def _discard_session(self, session: _Session) -> None:
+        session.closing = True
+        self._sessions.pop(session.session_id, None)
+        self._conversation.close_session(session.session_id)
+        try:
+            await self._actions.cleanup_session(session.session_id)
+        except (AdapterError, RuntimeError, ValueError):
+            logger.exception("Failed to clean up invalidated simulator session")
 
     def _get_session(self, session_id: UUID, *, allow_closing: bool = False) -> _Session:
         try:
