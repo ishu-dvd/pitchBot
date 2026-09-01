@@ -25,7 +25,13 @@ There is no runtime cache. Every journal or lead search rebuilds from authoritat
 - The cooperative deadline is between 1 and 200 ms.
 - A scoring timeout returns no partial results and no document count.
 
-The current synchronous journal load cannot be preempted mid-database call, so 200 ms is a cooperative scoring deadline, not a hard real-time guarantee. Runtime speech integration must add an asynchronous wall-clock timeout before placing retrieval on its optional 200 ms path.
+One `RetrievalDeadline` is created per search and shared by every later step, so the reported budget covers the whole operation rather than each step separately. It is checked cooperatively during graph projection, relation construction, tokenization/indexing, per-document scoring, and again before ranking, so no single step can silently consume the entire budget and still return results.
+
+Hard corpus invariants — document capacity, unique fact identifiers, and single-lead/single-session scope — are evaluated before the deadline is honored. A corrupt corpus therefore always fails loudly instead of being reported as a retryable timeout on a slow run.
+
+When graph projection runs out of budget it raises a knowledge-graph deadline error carrying the source aggregate version, so the retriever can still recheck privacy state and version and answer with an honest timeout instead of a partially projected graph.
+
+The synchronous journal load happens before the first cooperative checkpoint and cannot be preempted mid-database call, so 200 ms remains a cooperative deadline rather than a hard real-time guarantee. Runtime speech integration must add an asynchronous wall-clock timeout before placing retrieval on its optional 200 ms path.
 
 ## Safety and privacy
 

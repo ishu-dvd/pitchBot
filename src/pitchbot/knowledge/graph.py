@@ -9,6 +9,7 @@ from pitchbot.conversation import (
     JournaledConversationFact,
     JournaledConversationRevision,
     JournalHistoryUnavailableError,
+    LeadKnowledgeSourceSnapshot,
 )
 from pitchbot.knowledge.models import (
     FactClaimStatus,
@@ -18,6 +19,16 @@ from pitchbot.knowledge.models import (
     LeadKnowledgeGraph,
     TemporalFactClaim,
 )
+from pitchbot.retrieval import RetrievalDeadline, RetrievalDeadlineExceededError
+
+
+class KnowledgeGraphDeadlineExceededError(RetrievalDeadlineExceededError):
+    """Graph construction stopped on an exhausted budget after reading its source."""
+
+    def __init__(self, lead_id: UUID, aggregate_version: int) -> None:
+        super().__init__("knowledge graph construction deadline exceeded")
+        self.lead_id = lead_id
+        self.aggregate_version = aggregate_version
 
 
 class TemporalKnowledgeGraphBuilder:
@@ -46,13 +57,34 @@ class TemporalKnowledgeGraphBuilder:
         self._max_revisions = resolved_max_revisions
         self._max_relations = max_relations
 
-    def build(self, lead_id: UUID) -> LeadKnowledgeGraph:
+    def build(
+        self,
+        lead_id: UUID,
+        *,
+        deadline: RetrievalDeadline | None = None,
+    ) -> LeadKnowledgeGraph:
         source = self._journal.knowledge_source(
             lead_id,
             max_sessions=self._max_sessions,
             max_facts=self._max_claims,
             max_revisions=self._max_revisions,
         )
+        try:
+            return self._project(source, lead_id, deadline)
+        except RetrievalDeadlineExceededError:
+            raise KnowledgeGraphDeadlineExceededError(
+                lead_id,
+                source.aggregate_version,
+            ) from None
+
+    def _project(
+        self,
+        source: LeadKnowledgeSourceSnapshot,
+        lead_id: UUID,
+        deadline: RetrievalDeadline | None,
+    ) -> LeadKnowledgeGraph:
+        if deadline is not None:
+            deadline.check()
         revisions_by_previous = {
             item.revision.previous_fact_id: item
             for item in source.revisions
@@ -73,6 +105,7 @@ class TemporalKnowledgeGraphBuilder:
             for item in source.revisions
             if item.revision.confirmed_by_customer
         }
+        facts = source.facts if deadline is None else deadline.guard(source.facts)
         claims = tuple(
             self._claim(
                 item,
@@ -80,11 +113,13 @@ class TemporalKnowledgeGraphBuilder:
                 conflicting=item.fact.fact_id in conflicting_ids,
                 confirmed=item.fact.fact_id in confirmed_ids,
             )
-            for item in source.facts
+            for item in facts
         )
-        relations = self._relations(source.lead_id, source.session_ids, claims)
+        relations = self._relations(source.lead_id, source.session_ids, claims, deadline)
         if len(relations) > self._max_relations:
             raise JournalHistoryUnavailableError("knowledge graph relation capacity reached")
+        if deadline is not None:
+            deadline.check()
         graph = LeadKnowledgeGraph(
             lead_id=lead_id,
             aggregate_version=source.aggregate_version,
@@ -96,10 +131,10 @@ class TemporalKnowledgeGraphBuilder:
         return graph
 
     def validate(self, graph: LeadKnowledgeGraph) -> None:
-        self._journal.validate_knowledge_version(
-            graph.lead_id,
-            graph.aggregate_version,
-        )
+        self.validate_version(graph.lead_id, graph.aggregate_version)
+
+    def validate_version(self, lead_id: UUID, aggregate_version: int) -> None:
+        self._journal.validate_knowledge_version(lead_id, aggregate_version)
 
     @staticmethod
     def _claim(
@@ -137,6 +172,7 @@ class TemporalKnowledgeGraphBuilder:
         lead_id: UUID,
         session_ids: tuple[UUID, ...],
         claims: tuple[TemporalFactClaim, ...],
+        deadline: RetrievalDeadline | None = None,
     ) -> tuple[KnowledgeRelation, ...]:
         relations = [
             KnowledgeRelation(
@@ -148,7 +184,7 @@ class TemporalKnowledgeGraphBuilder:
             )
             for session_id in session_ids
         ]
-        for claim in claims:
+        for claim in claims if deadline is None else deadline.guard(claims):
             relations.append(
                 KnowledgeRelation(
                     source_type=KnowledgeNodeType.SESSION,

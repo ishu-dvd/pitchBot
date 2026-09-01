@@ -182,9 +182,19 @@
 ## PR 18: Callback cancellation reconciliation
 
 - **Branch:** `fix/callback-cancellation-reconciliation`
-- **Status:** Implementation in progress.
+- **Status:** Merged as PR 18.
 - **Base:** Merged PR 17 commit `816aa3d`.
 - **Scope:** Preserve permanent scheduler cancellation rejection as an explicit non-dispatchable reconciliation state, reject failed idempotency-key reuse, and support new-key/manual or cleanup recovery.
 - **Safety decisions:** Unresolved jobs continue consuming callback capacity; due dispatch excludes them; cleanup keys bind schedule incarnation and attempt, ambiguous outcomes retain the same key, permanent rejection advances it, failed keys remain tombstoned, and local state is removed only after provider acknowledgement.
 - **Deferred:** Durable scheduler state, provider-specific reconciliation/webhooks, graph benchmark journal fidelity, simulator admission locking, prompt-injection paraphrase hardening, retrieval wall-clock orchestration, and live channels.
 - **Rollback:** Revert PR 18. This changes only bounded process-local callback/mock behavior and adds no schema migration, network provider, live action, or durable schedule.
+
+## PR 19: Honest wall-clock retrieval budgets
+
+- **Branch:** `perf/retrieval-wallclock-deadline`
+- **Status:** Implementation in progress.
+- **Base:** Merged PR 18 commit `3ba645d`.
+- **Scope:** Introduce a single `RetrievalDeadline` per search, share it across temporal graph projection, document materialization, tokenization/indexing, scoring, and ranking, and report version-preserving timeouts when any step exhausts it.
+- **Safety decisions:** Timeouts still return no partial results and no indexed count; graph-projection expiry carries the source aggregate version so privacy state and version are rechecked exactly once; the shared origin removes the truncated remaining-budget overshoot; evaluation fixtures raise the same deadline error as the production builder.
+- **Deferred:** Asynchronous hard timeouts, preempting the synchronous journal load, persistent indexes, simulator/speech response wiring, graph benchmark journal fidelity, simulator admission locking, prompt-injection paraphrase hardening, temporal confirmation provenance, and live channels.
+- **Rollback:** Revert PR 19. It adds no schema migration, persistent index, API, model, provider, retained buyer data, or external side effect.

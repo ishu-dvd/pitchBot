@@ -27,6 +27,7 @@ from pitchbot.benchmarks.models import (
 from pitchbot.domain import JsonValue, LanguageCode, RequirementFact
 from pitchbot.knowledge import (
     FactClaimStatus,
+    KnowledgeGraphDeadlineExceededError,
     KnowledgeNodeType,
     KnowledgeRelation,
     KnowledgeRelationType,
@@ -34,7 +35,11 @@ from pitchbot.knowledge import (
     LeadKnowledgeGraph,
     TemporalFactClaim,
 )
-from pitchbot.retrieval import validate_bm25_document, validate_bm25_request
+from pitchbot.retrieval import (
+    RetrievalDeadline,
+    validate_bm25_document,
+    validate_bm25_request,
+)
 
 _EVALUATION_NAMESPACE = UUID("59d677c8-d97a-4d7f-a5a5-679648cfdf6d")
 
@@ -175,13 +180,24 @@ class _StaticGraphSource:
     def __init__(self, graph: LeadKnowledgeGraph) -> None:
         self._graph = graph
 
-    def build(self, lead_id: UUID) -> LeadKnowledgeGraph:
+    def build(
+        self,
+        lead_id: UUID,
+        *,
+        deadline: RetrievalDeadline | None = None,
+    ) -> LeadKnowledgeGraph:
         if lead_id != self._graph.lead_id:
             raise ValueError("graph retrieval evaluation lead does not match")
+        if deadline is not None and deadline.expired():
+            raise KnowledgeGraphDeadlineExceededError(lead_id, self._graph.aggregate_version)
         return self._graph
 
     def validate(self, graph: LeadKnowledgeGraph) -> None:
         if graph is not self._graph:
+            raise RuntimeError("graph retrieval evaluation source changed")
+
+    def validate_version(self, lead_id: UUID, aggregate_version: int) -> None:
+        if lead_id != self._graph.lead_id or aggregate_version != self._graph.aggregate_version:
             raise RuntimeError("graph retrieval evaluation source changed")
 
 

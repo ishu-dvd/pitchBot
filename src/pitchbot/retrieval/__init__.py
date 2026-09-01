@@ -8,6 +8,11 @@ from pitchbot.retrieval.bm25 import (
     validate_bm25_document,
     validate_bm25_request,
 )
+from pitchbot.retrieval.deadline import (
+    DEADLINE_CHECK_INTERVAL,
+    RetrievalDeadline,
+    RetrievalDeadlineExceededError,
+)
 from pitchbot.retrieval.models import (
     FactProvenance,
     LexicalDocument,
@@ -17,6 +22,7 @@ from pitchbot.retrieval.models import (
 )
 
 __all__ = [
+    "DEADLINE_CHECK_INTERVAL",
     "MAX_DEADLINE_MS",
     "MAX_DOCUMENTS",
     "MAX_RESULTS",
@@ -25,6 +31,8 @@ __all__ = [
     "JournalBm25Retriever",
     "LexicalDocument",
     "RankedFact",
+    "RetrievalDeadline",
+    "RetrievalDeadlineExceededError",
     "RetrievalResponse",
     "RetrievalScope",
     "tokenize",

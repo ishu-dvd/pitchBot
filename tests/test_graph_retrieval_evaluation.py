@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from clocks import ScriptedClock
 from pydantic import ValidationError
 
 from pitchbot.benchmarks.cli import main
@@ -161,9 +162,9 @@ def test_graph_retrieval_evaluation_timeout_has_no_partial_quality_credit() -> N
 
 def test_graph_retrieval_evaluation_rejects_late_over_deadline_results() -> None:
     suite = validate_graph_retrieval_suite(SUITE_PATH)
-    ticks = iter((0, 0, 0, 0, 0, 0, 0, 199_000_000, 201_000_000))
+    clock = ScriptedClock(0, 0, 0, 0, 0, 0, 0, 199_000_000, 201_000_000)
 
-    result = _run_graph_case(suite.cases[0], suite, clock=lambda: next(ticks))
+    result = _run_graph_case(suite.cases[0], suite, clock=clock)
 
     assert result.duration_ms == 201
     assert "graph-retrieval-timeout" in result.failure_codes
