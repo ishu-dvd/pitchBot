@@ -74,6 +74,28 @@ def test_stale_expected_version_is_rejected(
         events.append(lead_id, "lead", "lead.updated", {}, expected_version=0)
 
 
+def test_event_reads_support_validated_bounds(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    events, _, _ = repositories(session_factory)
+    lead_id = uuid4()
+    for expected_version in range(3):
+        events.append(
+            lead_id,
+            "lead",
+            "lead.updated",
+            {"index": expected_version},
+            expected_version=expected_version,
+        )
+
+    assert [event.aggregate_version for event in events.read(lead_id, limit=2)] == [1, 2]
+    with pytest.raises(ValueError, match="limit"):
+        events.read(lead_id, limit=0)
+    with pytest.raises(ValueError, match="limit"):
+        events.read(lead_id, limit=10_001)
+
+
 def test_aggregate_type_cannot_change(
     migrated_database: tuple[str, sessionmaker[Session]],
 ) -> None:
@@ -153,6 +175,24 @@ def test_redacted_export_and_anonymization(
     assert len(privacy.history(lead_id)) == 1
     with pytest.raises(AggregateClosedError):
         events.append(lead_id, "lead", "lead.updated", {})
+
+
+def test_privacy_closure_precedes_event_mutation(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    events, _, privacy = repositories(session_factory)
+    lead_id = uuid4()
+    events.append(lead_id, "lead", "lead.created", {"name": "Synthetic buyer"})
+
+    assert privacy.anonymize(lead_id) == 1
+    status = events.status(lead_id)
+    assert status is not None
+    assert status.privacy_state == "anonymized"
+    assert events.read(lead_id)[0].payload == {"anonymized": True}
+    with pytest.raises(AggregateClosedError):
+        events.append(lead_id, "lead", "lead.updated", {"name": "late write"})
+    assert len(events.read(lead_id)) == 1
 
 
 def test_hard_delete_removes_journey_but_preserves_suppression(

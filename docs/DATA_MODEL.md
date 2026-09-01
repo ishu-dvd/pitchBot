@@ -2,7 +2,7 @@
 
 ## Current implementation
 
-PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. PR 8 uses follow-up, schedule, proposal, execution, and artifact concepts in bounded process-local mock workflows; repositories are still not connected to HTTP action flows.
+PR 3 introduces typed domain contracts and a local SQLAlchemy/Alembic persistence boundary. PR 8 uses follow-up, schedule, proposal, execution, and artifact concepts in bounded process-local mock workflows. PR 12 adds a durable conversation journal on the existing event tables; it is not yet connected to HTTP action flows.
 
 ## Domain contracts
 
@@ -75,9 +75,22 @@ Retention cutoffs must include an explicit UTC offset or timezone. Repeated anon
 
 The repository uses generic SQLAlchemy JSON, Boolean, DateTime, string, integer, index, and uniqueness constructs. SQLite is the tested local backend. PostgreSQL execution requires a future driver/profile test, but domain and repository contracts do not expose SQLite-specific APIs.
 
-## Planned durable conversation and knowledge views
+## Durable conversation journal
 
-Durable conversation history will reuse `aggregate_records` and `event_records`; it will not add a second authoritative transcript table. Each accepted turn will have a stable operation identifier, ordered source spans, minimized text or redacted references, the resulting state transition, and policy/action decisions. Replay must restore the same bounded conversation state after restart without re-executing side effects.
+All sessions for a lead share that lead's `lead` aggregate. Every accepted turn appends one `conversation.turn-accepted.v1` event containing:
+
+- A stable operation UUID and journal-computed, session-bound HMAC-SHA-256 request fingerprint.
+- The deterministic conversation result.
+- Schema-versioned session capacities, the goal-change safety threshold, and post-turn scalar safety state.
+- Only the structured facts, evidence, and classification produced by that turn plus a session-bound HMAC-SHA-256 turn digest; raw buyer text and cumulative prior facts are not duplicated.
+
+Idempotent lookup precedes processing, so an exact retry returns the persisted event even after an ambiguous acknowledgement; reuse with different typed input fails. Processing is rolled back in memory if persistence fails. New operations require the next lead aggregate version and a live state matching durable history.
+
+Journal reads are bounded and verify aggregate type, version, and privacy state before and after loading. Purged, anonymized, hard-deleted, oversized, malformed, unsupported, or internally inconsistent histories cannot be replayed. Replay rebuilds state from per-turn transitions without executing conversation rules, model calls, or actions. Restoration refuses to overwrite a live session; explicit synchronization replaces stale state only from validated durable history. No migration or duplicate transcript/checkpoint table is introduced.
+
+Lead-level export, anonymization, and hard deletion cover every associated session. Time-based deletion of any source event makes the journal unavailable rather than retaining or silently reconstructing expired data from cumulative copies.
+
+## Planned knowledge views
 
 The planned runtime knowledge graph is a derived, rebuildable view of:
 

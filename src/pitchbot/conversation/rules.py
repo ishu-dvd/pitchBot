@@ -4,6 +4,8 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
+from hmac import new as new_hmac
 from uuid import UUID
 
 from pitchbot.conversation.models import SafetySignal
@@ -155,8 +157,34 @@ def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
     return tuple(signals)
 
 
-def is_repeated_turn(state: ConversationState, normalized_text: str) -> bool:
-    return normalized_text in state.recent_normalized_turns
+def is_repeated_turn(
+    state: ConversationState,
+    normalized_text: str,
+    *,
+    digest_key: bytes,
+    session_id: UUID,
+) -> bool:
+    return (
+        normalized_turn_digest(
+            normalized_text,
+            digest_key=digest_key,
+            session_id=session_id,
+        )
+        in state.recent_turn_digests
+    )
+
+
+def normalized_turn_digest(
+    normalized_text: str,
+    *,
+    digest_key: bytes,
+    session_id: UUID,
+) -> str:
+    return new_hmac(
+        digest_key,
+        b"pitchbot.turn.v1\0" + session_id.bytes + normalized_text.encode("utf-8"),
+        sha256,
+    ).hexdigest()
 
 
 def extract_business_signals(

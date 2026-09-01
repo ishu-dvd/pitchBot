@@ -16,10 +16,11 @@ The implemented application currently provides only:
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
 - Versioned privacy-minimized evaluation snapshots, strict gate validation, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
+- Restart-safe append-only conversation journaling with idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
 - Deny-by-default mock action policy, minimized follow-ups, fake-time callback scheduling, and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.
 
-The simulator conversation, callback, and artifact state is process-local and is not yet connected to durable storage. Model-backed extraction, concrete speech/model providers, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
+The durable conversation journal is not yet wired into simulator HTTP flows; simulator conversation, callback, and artifact state therefore remains process-local. Model-backed extraction, concrete speech/model providers, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
 
 ## Target architecture
 

@@ -24,6 +24,7 @@ All notable changes to PitchBot are documented here.
 - Deterministic multilingual conversation safety, bounded fact/revision extraction, evidence-grounded intent classification, and synthetic adversarial/persona cases.
 - Deny-by-default mock action authorization, minimized follow-ups, fake-time callback lifecycle, and six-industry structured sample-deck previews.
 - Strict evaluation-run contracts, generated JSON Schema, and dependency-free local HTML reports.
+- Restart-safe append-only conversation journaling with incremental transitions, typed-input retry reconciliation, rollback-safe persistence, optimistic concurrency, and fail-closed replay.
 
 ### Security
 

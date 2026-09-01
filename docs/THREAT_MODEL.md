@@ -32,6 +32,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 | Secret disclosure | Prompt asks for API keys or internal instructions | Secrets never enter model context; redact logs; environment/secret-store boundaries |
 | Unauthorized outreach | Model proposes a call or message | Deterministic consent, suppression, DND, hours, allowlist, quota, and operator gates |
 | Duplicate actions | Retries send repeated messages | Persisted idempotency keys, unique constraints, and replay-safe adapters |
+| Journal replay poisoning | Malformed or partial events alter restored policy state | Versioned strict payloads, contiguous versions, bounded reads, identity/sequence checks, fail-closed replay |
 | Induced denial of service | Repeated WhatsApp/artifact requests | Per-lead/global quotas, coalescing, bounded queues, timeouts, cancellation, and circuit breakers |
 | PII leakage | Phone numbers appear in logs/evals | Data minimization, structured redaction, synthetic CI fixtures, retention/deletion controls |
 | Classification harm | Accent or frustration is treated as purchase intent | Evidence-grounded dimensions; protected traits and accent excluded; review-needed state |
@@ -52,6 +53,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 - Intent classification excludes language, accent, frustration, synthetic persona labels, and protected or sensitive traits.
 - Action previews require deterministic disclosure, consent, contact-policy, opt-out, disposition, classification, and quota checks; unknown state blocks.
 - Callback policy is rechecked at dispatch, and deck generation accepts fixed industry/feature values rather than arbitrary buyer content.
+- Durable conversation replay restores validated checkpoints only; it never reruns actions, accepts unknown events, or overwrites a live session.
 
 ## Security verification gates
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
@@ -28,6 +29,13 @@ from pitchbot.storage.privacy import redact_json
 PROTECTED_RETENTION_EVENT_TYPES = frozenset({"consent.revoked", "lead.opted_out"})
 
 
+@dataclass(frozen=True, slots=True)
+class AggregateStatus:
+    aggregate_type: str
+    current_version: int
+    privacy_state: str
+
+
 class ConcurrencyConflictError(RuntimeError):
     pass
 
@@ -52,9 +60,16 @@ class EventRepository(Protocol):
         occurred_at: datetime | None = None,
     ) -> AuditEvent: ...
 
-    def read(self, aggregate_id: UUID) -> Sequence[AuditEvent]: ...
+    def read(
+        self,
+        aggregate_id: UUID,
+        *,
+        limit: int | None = None,
+    ) -> Sequence[AuditEvent]: ...
 
     def current_version(self, aggregate_id: UUID) -> int: ...
+
+    def status(self, aggregate_id: UUID) -> AggregateStatus | None: ...
 
 
 class SuppressionRepository(Protocol):
@@ -140,8 +155,30 @@ class SqlAlchemyEventRepository:
                 )
                 session.add(aggregate)
             else:
-                aggregate.current_version = event.aggregate_version
-                aggregate.updated_at = event_time
+                update_result = session.execute(
+                    update(AggregateRecord)
+                    .where(
+                        AggregateRecord.aggregate_id == str(aggregate_id),
+                        AggregateRecord.aggregate_type == aggregate_type,
+                        AggregateRecord.current_version == current_version,
+                        AggregateRecord.privacy_state == "active",
+                    )
+                    .values(
+                        current_version=event.aggregate_version,
+                        updated_at=event_time,
+                    )
+                )
+                if int(cast(CursorResult[Any], update_result).rowcount or 0) != 1:
+                    session.rollback()
+                    refreshed = self.status(aggregate_id)
+                    if refreshed is not None and refreshed.privacy_state != "active":
+                        raise AggregateClosedError(
+                            f"Aggregate {aggregate_id} is closed for privacy state "
+                            f"{refreshed.privacy_state}"
+                        )
+                    raise ConcurrencyConflictError(
+                        f"Concurrent update for aggregate {aggregate_id}"
+                    )
             session.add(
                 EventRecord(
                     event_id=str(event.event_id),
@@ -162,23 +199,45 @@ class SqlAlchemyEventRepository:
                 ) from error
             return event
 
-    def read(self, aggregate_id: UUID) -> Sequence[AuditEvent]:
+    def read(
+        self,
+        aggregate_id: UUID,
+        *,
+        limit: int | None = None,
+    ) -> Sequence[AuditEvent]:
+        if limit is not None and not 1 <= limit <= 10_000:
+            raise ValueError("event read limit must be between 1 and 10000")
         with self._session_factory() as session:
-            rows = session.scalars(
+            statement = (
                 select(EventRecord)
                 .where(EventRecord.aggregate_id == str(aggregate_id))
                 .order_by(EventRecord.aggregate_version.asc())
-            ).all()
+            )
+            if limit is not None:
+                statement = statement.limit(limit)
+            rows = session.scalars(statement).all()
             return [self._to_domain(row) for row in rows]
 
     def current_version(self, aggregate_id: UUID) -> int:
+        status = self.status(aggregate_id)
+        return status.current_version if status is not None else 0
+
+    def status(self, aggregate_id: UUID) -> AggregateStatus | None:
         with self._session_factory() as session:
-            value = session.scalar(
-                select(AggregateRecord.current_version).where(
-                    AggregateRecord.aggregate_id == str(aggregate_id)
-                )
+            row = session.execute(
+                select(
+                    AggregateRecord.aggregate_type,
+                    AggregateRecord.current_version,
+                    AggregateRecord.privacy_state,
+                ).where(AggregateRecord.aggregate_id == str(aggregate_id))
+            ).one_or_none()
+            if row is None:
+                return None
+            return AggregateStatus(
+                aggregate_type=str(row.aggregate_type),
+                current_version=int(row.current_version),
+                privacy_state=str(row.privacy_state),
             )
-            return int(value or 0)
 
     @staticmethod
     def _to_domain(row: EventRecord) -> AuditEvent:
@@ -278,15 +337,6 @@ class SqlAlchemyPrivacyRepository:
     def anonymize(self, aggregate_id: UUID) -> int:
         anonymized_at = utc_now()
         with self._session_factory() as session:
-            result = session.execute(
-                update(EventRecord)
-                .where(
-                    EventRecord.aggregate_id == str(aggregate_id),
-                    EventRecord.anonymized_at.is_(None),
-                )
-                .values(payload={"anonymized": True}, anonymized_at=anonymized_at)
-            )
-            affected = int(cast(CursorResult[Any], result).rowcount or 0)
             aggregate_result = session.execute(
                 update(AggregateRecord)
                 .where(
@@ -296,7 +346,17 @@ class SqlAlchemyPrivacyRepository:
                 .values(privacy_state="anonymized", updated_at=anonymized_at)
             )
             aggregate_count = int(cast(CursorResult[Any], aggregate_result).rowcount or 0)
-            if affected or aggregate_count:
+            affected = 0
+            if aggregate_count:
+                result = session.execute(
+                    update(EventRecord)
+                    .where(
+                        EventRecord.aggregate_id == str(aggregate_id),
+                        EventRecord.anonymized_at.is_(None),
+                    )
+                    .values(payload={"anonymized": True}, anonymized_at=anonymized_at)
+                )
+                affected = int(cast(CursorResult[Any], result).rowcount or 0)
                 session.add(
                     PrivacyOperationRecord(
                         operation_id=str(uuid4()),
@@ -312,9 +372,6 @@ class SqlAlchemyPrivacyRepository:
     def hard_delete(self, aggregate_id: UUID) -> tuple[int, int]:
         deleted_at = utc_now()
         with self._session_factory() as session:
-            event_result = session.execute(
-                delete(EventRecord).where(EventRecord.aggregate_id == str(aggregate_id))
-            )
             aggregate_result = session.execute(
                 update(AggregateRecord)
                 .where(
@@ -323,9 +380,13 @@ class SqlAlchemyPrivacyRepository:
                 )
                 .values(privacy_state="hard-deleted", updated_at=deleted_at)
             )
-            event_count = int(cast(CursorResult[Any], event_result).rowcount or 0)
             aggregate_count = int(cast(CursorResult[Any], aggregate_result).rowcount or 0)
-            if event_count or aggregate_count:
+            event_count = 0
+            if aggregate_count:
+                event_result = session.execute(
+                    delete(EventRecord).where(EventRecord.aggregate_id == str(aggregate_id))
+                )
+                event_count = int(cast(CursorResult[Any], event_result).rowcount or 0)
                 session.add(
                     PrivacyOperationRecord(
                         operation_id=str(uuid4()),
