@@ -224,11 +224,14 @@ flowchart LR
     Turn[Validated conversation turn] --> Journal[(Append-only event journal)]
     Journal --> Facts[Versioned fact projector]
     Facts --> Graph[(Temporal knowledge graph)]
-    Facts --> Lexical[BM25 index]
+    Facts --> SessionLexical[Session BM25 index]
+    Graph --> LeadLexical[Lead BM25 index]
     Facts --> Vector[Vector adapter]
-    Query[Current buyer intent] --> Lexical
+    Query[Current buyer intent] --> SessionLexical
+    Query --> LeadLexical
     Query --> Vector
-    Lexical --> Fusion[Reciprocal-rank fusion]
+    SessionLexical --> Fusion[Reciprocal-rank fusion]
+    LeadLexical --> Fusion
     Vector --> Fusion
     Graph --> Filter[Recency, consent, tenant and provenance filters]
     Fusion --> Filter
@@ -244,7 +247,7 @@ The append-only event repository remains authoritative. Derived BM25, vector, an
 
 The implemented BM25 baseline rebuilds an immutable single-session index from current facts obtained only through full journal replay. It enforces corpus, query, result, and cooperative deadline bounds, attaches aggregate-version and turn provenance, and revalidates active privacy state and unchanged aggregate version before returning results. It is not yet connected to the speech or simulator response path.
 
-The implemented temporal view fully replays every session in a lead stream, creates validity intervals and supersession edges only from explicit same-session revisions, and marks unresolved different values across sessions as conflicting. It is rebuilt without a cache and revalidates privacy/version before return. Organization/product/competitor entities, persistent graph storage, graph retrieval, and automatic conflict resolution remain planned.
+The implemented temporal view fully replays every session in a lead stream, creates validity intervals and supersession edges only from explicit same-session revisions, and marks unresolved different values across sessions as conflicting. Graph-aware BM25 rebuilds that view without a cache, indexes current and conflicting claims from one lead, excludes superseded claims, preserves claim status and provenance, and revalidates privacy/version after ranking or timeout. Organization/product/competitor entities, persistent graph storage, structural graph queries, and automatic conflict resolution remain planned.
 
 Facts are temporal and provenance-bearing: observed claims remain distinct from buyer-confirmed facts, revisions supersede rather than overwrite prior values, and every retrieval result must identify its source event. Conversation-derived improvements are aggregated offline after privacy filtering and evaluation; the running system does not rewrite its own prompts, policies, or models.
 

@@ -558,6 +558,13 @@ class ConversationJournal:
             change_message="conversation facts changed during projection",
         )
 
+    def validate_knowledge_version(self, lead_id: UUID, aggregate_version: int) -> None:
+        self._validate_active_version(
+            lead_id,
+            aggregate_version,
+            change_message="conversation facts changed during knowledge retrieval",
+        )
+
     def _validate_active_version(
         self,
         lead_id: UUID,

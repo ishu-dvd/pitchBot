@@ -140,3 +140,19 @@ class LeadKnowledgeGraph(KnowledgeModel):
         ):
             raise ValueError("knowledge graph supersession target is missing")
         return self
+
+
+class RankedKnowledgeClaim(KnowledgeModel):
+    rank: int = Field(ge=1, le=20)
+    score: float = Field(gt=0)
+    matched_terms: tuple[str, ...] = Field(min_length=1, max_length=64)
+    claim: TemporalFactClaim
+
+
+class LeadKnowledgeRetrievalResponse(KnowledgeModel):
+    lead_id: UUID
+    aggregate_version: int = Field(ge=1)
+    duration_ms: float = Field(ge=0)
+    indexed_claim_count: int = Field(ge=0, le=1_000)
+    timed_out: bool
+    results: tuple[RankedKnowledgeClaim, ...] = Field(max_length=20)

@@ -100,6 +100,8 @@ The implemented BM25 baseline projects current structured facts for one session 
 
 The implemented temporal lead view adds lead/session/fact relations, explicit supersession edges, validity versions/times, and current/superseded/conflicting status. It does not infer that the latest cross-session value is correct: different current values remain conflicting until a later reviewed confirmation mechanism exists.
 
+The graph-aware BM25 view indexes only current and conflicting claims from one lead while retaining each result's temporal status and source provenance. Superseded claims remain available in the temporal graph for audit but are excluded from retrieval. No result merges equal observations or resolves a conflict.
+
 The future expanded knowledge graph remains a derived, rebuildable view of:
 
 - Entities scoped by lead, organization, product, industry, or competitor.

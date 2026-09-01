@@ -2,7 +2,7 @@
 
 ## Implemented baseline
 
-PitchBot provides a dependency-free BM25 baseline for retrieving current structured facts from one durable conversation session. It supports Unicode letter, combining-mark, and number tokens for English, Hindi, and Hinglish without selecting a vector model or adding a network service.
+PitchBot provides dependency-free BM25 retrieval over either one durable conversation session or one lead's temporal knowledge graph. It supports Unicode letter, combining-mark, and number tokens for English, Hindi, and Hinglish without selecting a vector model or adding a network service.
 
 The runtime path is:
 
@@ -11,7 +11,11 @@ The runtime path is:
 3. `Bm25Index` validates corpus/query bounds and ranks exact lexical matches deterministically.
 4. The journal rechecks aggregate type, active privacy state, and unchanged version before any result is returned.
 
-There is no runtime cache. Every `JournalBm25Retriever.search` call rebuilds from authoritative retained events so a later anonymization, deletion, corruption, or concurrent write cannot silently reuse an older index.
+`Bm25Index` defaults to `session` scope for backward compatibility. Explicit `lead` scope allows documents from multiple sessions only when all documents belong to the same lead.
+
+`LeadKnowledgeBm25Retriever` builds the temporal lead graph, indexes only current and conflicting claims, excludes superseded claims, and returns the original temporal claim with rank, matched terms, status, and provenance. Conflicting claims remain separate results; retrieval does not choose a winner.
+
+There is no runtime cache. Every journal or lead search rebuilds from authoritative retained events so a later anonymization, deletion, corruption, or concurrent write cannot silently reuse an older index.
 
 ## Bounds and timeout behavior
 
@@ -26,7 +30,7 @@ The current synchronous journal load cannot be preempted mid-database call, so 2
 ## Safety and privacy
 
 - Retrieval cannot read storage tables directly or bypass journal replay validation.
-- Documents from different leads or sessions cannot be combined in one index.
+- Session scope rejects different leads or sessions; explicit lead scope permits multiple sessions but still rejects mixed leads.
 - Results contain structured fact values and source provenance; they do not authorize actions.
 - Raw buyer turns, prompts, operation fingerprints, repetition digests, and model-generated summaries are not indexed.
 - Missing, partial, malformed, anonymized, deleted, or changed histories fail closed.

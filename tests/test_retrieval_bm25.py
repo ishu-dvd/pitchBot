@@ -13,6 +13,7 @@ from pitchbot.retrieval import (
     FactProvenance,
     JournalBm25Retriever,
     LexicalDocument,
+    RetrievalScope,
     tokenize,
 )
 from pitchbot.storage import SqlAlchemyEventRepository, SqlAlchemyPrivacyRepository
@@ -106,6 +107,41 @@ def test_bm25_ranking_is_deterministic_and_lead_scoped() -> None:
     )
     with pytest.raises(ValueError, match="one lead and session"):
         Bm25Index((*documents, other_lead))
+
+
+def test_explicit_lead_scope_allows_only_same_lead_cross_session_documents() -> None:
+    lead_id = uuid4()
+    first = _document(
+        "business_type",
+        "books",
+        fact_id=uuid4(),
+        lead_id=lead_id,
+        session_id=uuid4(),
+    )
+    second = _document(
+        "requested_features",
+        "catalog",
+        fact_id=uuid4(),
+        lead_id=lead_id,
+        session_id=uuid4(),
+    )
+
+    with pytest.raises(ValueError, match="one lead and session"):
+        Bm25Index((first, second))
+    with pytest.raises(ValueError, match="one lead and session"):
+        Bm25Index((first, second), scope="session")
+    assert Bm25Index((first, second), scope=RetrievalScope.LEAD).document_count == 2
+    assert Bm25Index((first, second), scope="lead").document_count == 2
+    with pytest.raises(ValueError, match="scope must be session or lead"):
+        Bm25Index((first, second), scope="invalid")
+
+    other_lead = second.model_copy(
+        update={
+            "provenance": second.provenance.model_copy(update={"lead_id": uuid4()}),
+        }
+    )
+    with pytest.raises(ValueError, match="one lead and session"):
+        Bm25Index((first, other_lead), scope=RetrievalScope.LEAD)
 
 
 def test_repeated_terms_count_once_toward_document_frequency() -> None:

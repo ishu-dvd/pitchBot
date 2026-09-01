@@ -37,6 +37,12 @@ There is no runtime graph cache. Each build starts from the authoritative journa
 
 The view is derived context only. It cannot authorize outreach, resolve consent or suppression, modify requirements, or override the event journal.
 
+## Lead retrieval
+
+The graph-aware BM25 path rebuilds this view for each request and indexes only `current` and `conflicting` claims. It never indexes a `superseded` claim. Results retain the full temporal claim, including status, source session, fact/source identifiers, language, confidence, and validity provenance.
+
+The graph build and index construction count toward the same cooperative 1–200 ms deadline as scoring. Timeout returns no partial results or indexed-claim count. Privacy state and aggregate version are rechecked after scoring and on timeout.
+
 ## Deferred
 
-Automatic cross-session conflict resolution, organization/product/competitor entities, extraction-version metadata, confidence fusion, persistent graph storage, graph queries, BM25 integration, hybrid/vector retrieval, HTTP exposure, and runtime RAG remain separately reviewed milestones.
+Automatic cross-session conflict resolution, organization/product/competitor entities, extraction-version metadata, confidence fusion, persistent graph storage, structural graph queries, hybrid/vector retrieval, HTTP exposure, and runtime RAG remain separately reviewed milestones.

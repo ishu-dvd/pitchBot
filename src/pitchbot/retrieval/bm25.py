@@ -16,6 +16,7 @@ from pitchbot.retrieval.models import (
     LexicalDocument,
     RankedFact,
     RetrievalResponse,
+    RetrievalScope,
 )
 
 MAX_DOCUMENTS = 1_000
@@ -49,7 +50,7 @@ def _render_value(value: JsonValue) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _validate_search(query: str, top_k: int, deadline_ms: int) -> tuple[str, ...]:
+def validate_bm25_request(query: str, top_k: int, deadline_ms: int) -> tuple[str, ...]:
     if not 1 <= top_k <= MAX_RESULTS:
         raise ValueError(f"BM25 top_k must be between 1 and {MAX_RESULTS}")
     if not 1 <= deadline_ms <= MAX_DEADLINE_MS:
@@ -80,11 +81,16 @@ class Bm25Index:
         *,
         k1: float = 1.5,
         b: float = 0.75,
+        scope: RetrievalScope | str = RetrievalScope.SESSION,
     ) -> None:
         if not math.isfinite(k1) or k1 <= 0:
             raise ValueError("BM25 k1 must be finite and positive")
         if not math.isfinite(b) or not 0 <= b <= 1:
             raise ValueError("BM25 b must be finite and between zero and one")
+        try:
+            validated_scope = RetrievalScope(scope)
+        except ValueError:
+            raise ValueError("BM25 scope must be session or lead") from None
         materialized = tuple(documents)
         if len(materialized) > MAX_DOCUMENTS:
             raise ValueError("BM25 document capacity exceeded")
@@ -93,7 +99,9 @@ class Bm25Index:
             raise ValueError("BM25 document fact identifiers must be unique")
         lead_ids = {item.provenance.lead_id for item in materialized}
         session_ids = {item.provenance.session_id for item in materialized}
-        if len(lead_ids) > 1 or len(session_ids) > 1:
+        if len(lead_ids) > 1 or (
+            validated_scope is RetrievalScope.SESSION and len(session_ids) > 1
+        ):
             raise ValueError("BM25 documents must belong to one lead and session")
 
         indexed: list[_IndexedDocument] = []
@@ -134,7 +142,7 @@ class Bm25Index:
         deadline_ms: int = MAX_DEADLINE_MS,
         clock: Callable[[], int] = monotonic_ns,
     ) -> tuple[tuple[RankedFact, ...], float, bool]:
-        query_terms = _validate_search(query, top_k, deadline_ms)
+        query_terms = validate_bm25_request(query, top_k, deadline_ms)
 
         started = clock()
         deadline = started + deadline_ms * 1_000_000
@@ -205,7 +213,7 @@ class JournalBm25Retriever:
         top_k: int = 5,
         deadline_ms: int = MAX_DEADLINE_MS,
     ) -> RetrievalResponse:
-        _validate_search(query, top_k, deadline_ms)
+        validate_bm25_request(query, top_k, deadline_ms)
         started = self._clock()
         snapshot = self._journal.facts_for_retrieval(lead_id, session_id)
         documents = self._documents(snapshot)

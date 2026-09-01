@@ -95,6 +95,12 @@ class TemporalKnowledgeGraphBuilder:
         self._journal.validate_knowledge_source(source)
         return graph
 
+    def validate(self, graph: LeadKnowledgeGraph) -> None:
+        self._journal.validate_knowledge_version(
+            graph.lead_id,
+            graph.aggregate_version,
+        )
+
     @staticmethod
     def _claim(
         item: JournaledConversationFact,
