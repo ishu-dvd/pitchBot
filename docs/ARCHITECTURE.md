@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a process-local browser simulator, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, a restart-safe append-only conversation journal, and guarded in-memory follow-up, callback, and deck previews. The journal is not yet connected to simulator flows, and no production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a browser simulator with opt-in durable conversation turns, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, and guarded in-memory follow-up, callback, and deck previews. No production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -72,18 +72,18 @@ sequenceDiagram
     UI->>API: Authenticated turn event
     API->>Policy: Validate session and limits
     Policy-->>API: Allow or reject
+    API->>Store: Preflight operation and durable version
     API->>Conversation: Process turn
-    Conversation->>Store: Append transcript facts and evidence
     Conversation-->>API: Reply and typed action proposal
     API->>Policy: Authorize proposal
     alt Approved mock action
         Policy-->>API: Approved for preview
         API->>Mock: Execute idempotently
-        Mock-->>Store: Append outcome
+        Mock-->>API: Return idempotent preview
     else Blocked or review required
         Policy-->>API: Block reason
-        API->>Store: Append policy decision
     end
+    API->>Store: Commit minimized accepted-turn transition
     API-->>UI: Reply action status and redacted events
     UI-->>Buyer: Render or play response
 ```

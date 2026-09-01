@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -15,6 +16,7 @@ from pitchbot.conversation.models import (
     ConversationResult,
     ConversationStateCheckpoint,
 )
+from pitchbot.conversation.state import ConversationState
 from pitchbot.domain import (
     AuditEvent,
     Classification,
@@ -103,6 +105,17 @@ class ConversationReplay(BaseModel):
     last_result: ConversationResult
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationTurnPreparation:
+    lead_id: UUID
+    session_id: UUID
+    operation_id: UUID
+    operation_fingerprint: str
+    aggregate_version: int
+    rollback_state: ConversationState
+    existing: JournaledConversationTurn | None = None
+
+
 def canonical_operation_fingerprint(
     engine: ConversationEngine,
     session_id: UUID,
@@ -139,16 +152,56 @@ class ConversationJournal:
         source_span_id: UUID | None = None,
         expected_version: int | None = None,
         occurred_at: datetime | None = None,
+        operation_context: dict[str, JsonValue] | None = None,
     ) -> JournaledConversationTurn:
-        request_payload: dict[str, JsonValue] = {
-            "language": language.value,
-            "source_span_id": str(source_span_id) if source_span_id is not None else None,
-            "text": text,
-        }
-        operation_fingerprint = canonical_operation_fingerprint(
+        preparation = self.prepare_turn(
             engine,
             session_id,
-            request_payload,
+            operation_id=operation_id,
+            text=text,
+            language=language,
+            source_span_id=source_span_id,
+            expected_version=expected_version,
+            operation_context=operation_context,
+        )
+        if preparation.existing is not None:
+            return preparation.existing
+        try:
+            result = engine.process_turn(
+                session_id,
+                text=text,
+                language=language,
+                source_span_id=source_span_id,
+            )
+        except Exception:
+            engine.restore(session_id, preparation.rollback_state)
+            raise
+        return self.commit_turn(
+            engine,
+            preparation,
+            result,
+            occurred_at=occurred_at,
+        )
+
+    def prepare_turn(
+        self,
+        engine: ConversationEngine,
+        session_id: UUID,
+        *,
+        operation_id: UUID,
+        text: str,
+        language: LanguageCode,
+        source_span_id: UUID | None = None,
+        expected_version: int | None = None,
+        operation_context: dict[str, JsonValue] | None = None,
+    ) -> ConversationTurnPreparation:
+        operation_fingerprint = self._request_fingerprint(
+            engine,
+            session_id,
+            text=text,
+            language=language,
+            source_span_id=source_span_id,
+            operation_context=operation_context,
         )
         before = engine.checkpoint(session_id)
         before_checkpoint = engine.export_checkpoint(session_id)
@@ -163,7 +216,15 @@ class ConversationJournal:
         if existing is not None:
             replay = self._replay_loaded(lead_id, session_id, events, status)
             engine.replace_checkpoint(session_id, replay.checkpoint)
-            return existing
+            return ConversationTurnPreparation(
+                lead_id=lead_id,
+                session_id=session_id,
+                operation_id=operation_id,
+                operation_fingerprint=operation_fingerprint,
+                aggregate_version=existing.aggregate_version,
+                rollback_state=before,
+                existing=existing,
+            )
         session_events = [item for item in events if item.event.session_id == session_id]
         if session_events:
             durable = self._replay_loaded(lead_id, session_id, events, status)
@@ -180,62 +241,71 @@ class ConversationJournal:
             raise ConcurrencyConflictError(
                 f"Expected version {expected_version}, found {current_version}"
             )
+        return ConversationTurnPreparation(
+            lead_id=lead_id,
+            session_id=session_id,
+            operation_id=operation_id,
+            operation_fingerprint=operation_fingerprint,
+            aggregate_version=current_version,
+            rollback_state=before,
+        )
 
+    def commit_turn(
+        self,
+        engine: ConversationEngine,
+        preparation: ConversationTurnPreparation,
+        result: ConversationResult,
+        *,
+        occurred_at: datetime | None = None,
+    ) -> JournaledConversationTurn:
+        if preparation.existing is not None:
+            raise ValueError("Persisted turn preparations cannot be committed again")
         try:
-            result = engine.process_turn(
-                session_id,
-                text=text,
-                language=language,
-                source_span_id=source_span_id,
-            )
-            checkpoint = engine.export_checkpoint(session_id)
+            checkpoint = engine.export_checkpoint(preparation.session_id)
+            if checkpoint.lead_id != preparation.lead_id:
+                raise ValueError("Conversation lead changed after journal preparation")
             proposed = self._event_from_state(
-                session_id=session_id,
-                operation_id=operation_id,
-                operation_fingerprint=operation_fingerprint,
+                session_id=preparation.session_id,
+                operation_id=preparation.operation_id,
+                operation_fingerprint=preparation.operation_fingerprint,
                 checkpoint=checkpoint,
                 result=result,
             )
             persisted = self._repository.append(
-                lead_id,
+                preparation.lead_id,
                 CONVERSATION_AGGREGATE_TYPE,
                 TURN_ACCEPTED_EVENT_TYPE,
                 self._serialize_event(proposed),
-                expected_version=current_version,
+                expected_version=preparation.aggregate_version,
                 occurred_at=occurred_at,
             )
         except ConcurrencyConflictError:
-            engine.restore(session_id, before)
-            reconciled_events, reconciled_status = self._load_events(lead_id)
+            engine.restore(preparation.session_id, preparation.rollback_state)
+            reconciled_events, reconciled_status = self._load_events(preparation.lead_id)
             reconciled = self._find_operation(
                 reconciled_events,
-                session_id=session_id,
-                operation_id=operation_id,
-                operation_fingerprint=operation_fingerprint,
+                session_id=preparation.session_id,
+                operation_id=preparation.operation_id,
+                operation_fingerprint=preparation.operation_fingerprint,
             )
             if reconciled is not None:
                 replay = self._replay_loaded(
-                    lead_id,
-                    session_id,
+                    preparation.lead_id,
+                    preparation.session_id,
                     reconciled_events,
                     reconciled_status,
                 )
-                engine.replace_checkpoint(session_id, replay.checkpoint)
+                engine.replace_checkpoint(preparation.session_id, replay.checkpoint)
                 return reconciled
-            try:
-                replay = self._replay_loaded(
-                    lead_id,
-                    session_id,
-                    reconciled_events,
-                    reconciled_status,
-                )
-            except LookupError:
-                pass
-            else:
-                engine.replace_checkpoint(session_id, replay.checkpoint)
+            self._synchronize_after_conflict(
+                engine,
+                preparation,
+                reconciled_events,
+                reconciled_status,
+            )
             raise
         except Exception:
-            engine.restore(session_id, before)
+            engine.restore(preparation.session_id, preparation.rollback_state)
             raise
         return JournaledConversationTurn(
             aggregate_version=persisted.aggregate_version,
@@ -253,15 +323,15 @@ class ConversationJournal:
         text: str,
         language: LanguageCode,
         source_span_id: UUID | None = None,
+        operation_context: dict[str, JsonValue] | None = None,
     ) -> JournaledConversationTurn | None:
-        operation_fingerprint = canonical_operation_fingerprint(
+        operation_fingerprint = self._request_fingerprint(
             engine,
             session_id,
-            {
-                "language": language.value,
-                "source_span_id": str(source_span_id) if source_span_id is not None else None,
-                "text": text,
-            },
+            text=text,
+            language=language,
+            source_span_id=source_span_id,
+            operation_context=operation_context,
         )
         events, _ = self._load_events(lead_id)
         return self._find_operation(
@@ -271,9 +341,64 @@ class ConversationJournal:
             operation_fingerprint=operation_fingerprint,
         )
 
+    @staticmethod
+    def _request_fingerprint(
+        engine: ConversationEngine,
+        session_id: UUID,
+        *,
+        text: str,
+        language: LanguageCode,
+        source_span_id: UUID | None,
+        operation_context: dict[str, JsonValue] | None,
+    ) -> str:
+        request: dict[str, JsonValue] = {
+            "language": language.value,
+            "source_span_id": str(source_span_id) if source_span_id is not None else None,
+            "text": text,
+        }
+        if operation_context is not None:
+            request["context"] = operation_context
+        return canonical_operation_fingerprint(
+            engine,
+            session_id,
+            request,
+        )
+
+    def _synchronize_after_conflict(
+        self,
+        engine: ConversationEngine,
+        preparation: ConversationTurnPreparation,
+        events: list[JournaledConversationTurn],
+        status: AggregateStatus | None,
+    ) -> None:
+        try:
+            replay = self._replay_loaded(
+                preparation.lead_id,
+                preparation.session_id,
+                events,
+                status,
+            )
+        except LookupError:
+            return
+        engine.replace_checkpoint(preparation.session_id, replay.checkpoint)
+
     def replay(self, lead_id: UUID, session_id: UUID) -> ConversationReplay:
         events, status = self._load_events(lead_id)
         return self._replay_loaded(lead_id, session_id, events, status)
+
+    def read_turns(
+        self,
+        lead_id: UUID,
+        session_id: UUID,
+        *,
+        limit: int,
+    ) -> tuple[JournaledConversationTurn, ...]:
+        if limit < 1 or limit > 100:
+            raise ValueError("Conversation journal read limit must be between 1 and 100")
+        events, status = self._load_events(lead_id)
+        self._replay_loaded(lead_id, session_id, events, status)
+        session_events = [item for item in events if item.event.session_id == session_id]
+        return tuple(session_events[-limit:])
 
     def restore_session(
         self,

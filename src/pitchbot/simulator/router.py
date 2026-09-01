@@ -3,24 +3,59 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Response, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Query,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 
+from pitchbot.config import settings
+from pitchbot.conversation import ConversationEngine, ConversationJournal, ConversationJournalError
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
+    DurableHistoryResponse,
     LeadHistoryResponse,
+    ResumeSessionRequest,
     SessionResponse,
     TurnRequest,
     TurnResponse,
 )
 from pitchbot.simulator.service import (
+    DurableHistoryDisabledError,
     InjectedSimulatorError,
     SessionNotFoundError,
     SimulatorService,
 )
+from pitchbot.storage import (
+    SqlAlchemyEventRepository,
+    create_database_engine,
+    create_session_factory,
+)
 
 router = APIRouter(prefix="/api/simulator", tags=["simulator"])
-simulator_service = SimulatorService()
+
+
+def _build_service() -> SimulatorService:
+    if not settings.enable_durable_history:
+        return SimulatorService()
+    engine = ConversationEngine(
+        max_turns=settings.max_turns,
+        turn_digest_key=bytes.fromhex(settings.durable_history_digest_key),
+    )
+    database_engine = create_database_engine(settings.database_url)
+    repository = SqlAlchemyEventRepository(create_session_factory(database_engine))
+    return SimulatorService(
+        conversation_engine=engine,
+        conversation_journal=ConversationJournal(repository),
+    )
+
+
+simulator_service = _build_service()
 
 
 def is_allowed_websocket_origin(origin: str | None, host: str | None) -> bool:
@@ -45,6 +80,23 @@ def get_session(session_id: UUID) -> SessionResponse:
         return simulator_service.get_session(session_id)
     except SessionNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.post("/sessions/{session_id}/resume", response_model=SessionResponse)
+def resume_session(session_id: UUID, request: ResumeSessionRequest) -> SessionResponse:
+    try:
+        return simulator_service.resume_session(session_id, request)
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Durable session not found",
+        ) from error
+    except DurableHistoryDisabledError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ConversationJournalError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -92,6 +144,24 @@ def get_lead_history(session_id: UUID) -> LeadHistoryResponse:
         return simulator_service.get_lead_history(session_id)
     except SessionNotFoundError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+
+
+@router.get(
+    "/sessions/{session_id}/durable-history",
+    response_model=DurableHistoryResponse,
+)
+def get_durable_history(
+    session_id: UUID,
+    limit: int = Query(default=50, ge=1, le=100),
+) -> DurableHistoryResponse:
+    try:
+        return simulator_service.get_durable_history(session_id, limit=limit)
+    except SessionNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except DurableHistoryDisabledError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ConversationJournalError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @router.get("/replay/{scenario_id}")

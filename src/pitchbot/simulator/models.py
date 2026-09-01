@@ -6,8 +6,12 @@ from uuid import UUID, uuid4
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from pitchbot.actions import ActionPreviewResult, DeckIndustry
-from pitchbot.conversation import ConversationDisposition, ConversationPhase, SafetySignal
-from pitchbot.domain import ContactPolicy, LanguageCode
+from pitchbot.conversation import (
+    ConversationDisposition,
+    ConversationPhase,
+    SafetySignal,
+)
+from pitchbot.domain import ContactPolicy, JsonValue, LanguageCode, LeadTemperature
 
 
 class SimulatorModel(BaseModel):
@@ -66,6 +70,10 @@ class SessionResponse(SimulatorModel):
     events: list[SimulatorEvent]
 
 
+class ResumeSessionRequest(SimulatorModel):
+    lead_ref: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+
+
 class TurnResponse(SimulatorModel):
     session_id: UUID
     reply: str
@@ -81,6 +89,71 @@ class TurnResponse(SimulatorModel):
 class LeadHistoryResponse(SimulatorModel):
     lead_ref: str
     events: list[SimulatorEvent]
+
+
+class DurableRequirementFact(SimulatorModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: str
+    value: JsonValue
+    confidence: float
+    captured_at: AwareDatetime
+
+
+class DurableRequirementRevision(SimulatorModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: str
+    confirmed_by_customer: bool
+    reason: str
+    revised_at: AwareDatetime
+
+
+class DurableIntentEvidence(SimulatorModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    dimension: str
+    weight: float
+    reason: str
+    captured_at: AwareDatetime
+
+
+class DurableClassification(SimulatorModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    temperature: LeadTemperature
+    score: float
+    confidence: float
+    rule_version: str
+    model_version: str | None
+    classified_at: AwareDatetime
+
+
+class DurableConversationResult(SimulatorModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    reply: str
+    language: LanguageCode
+    disposition: ConversationDisposition
+    phase: ConversationPhase
+    safety_signals: tuple[SafetySignal, ...]
+    facts: tuple[DurableRequirementFact, ...]
+    revisions: tuple[DurableRequirementRevision, ...]
+    evidence: tuple[DurableIntentEvidence, ...]
+    classification: DurableClassification
+    repeated_turn: bool
+    turn_count: int
+
+
+class DurableHistoryTurn(SimulatorModel):
+    aggregate_version: int = Field(ge=1)
+    occurred_at: AwareDatetime
+    result: DurableConversationResult
+
+
+class DurableHistoryResponse(SimulatorModel):
+    session_id: UUID
+    turns: list[DurableHistoryTurn]
 
 
 class AudioMetadata(SimulatorModel):

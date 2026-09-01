@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
 
 from pitchbot.actions import (
     ActionPolicy,
@@ -20,15 +22,25 @@ from pitchbot.adapters.mocks import (
     MockTelephonyAdapter,
     MockWhatsAppAdapter,
 )
+from pitchbot.conversation import ConversationEngine, ConversationJournal
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
     PreviewAction,
+    ResumeSessionRequest,
     SimulatorEventType,
     TurnRequest,
 )
-from pitchbot.simulator.service import InjectedSimulatorError, SimulatorService
+from pitchbot.simulator.service import (
+    DurableActionReplayUnavailableError,
+    InjectedSimulatorError,
+    SimulatorService,
+)
+from pitchbot.storage import SqlAlchemyEventRepository, SqlAlchemyPrivacyRepository
+from pitchbot.storage.models import AggregateRecord, EventRecord
+
+TURN_DIGEST_KEY = b"simulator-journal-test-key-32b!!"
 
 
 def action_workflows(
@@ -112,6 +124,29 @@ def service() -> SimulatorService:
         max_sessions=3,
         max_events_per_session=5,
         max_audio_chunks_per_session=2,
+    )
+
+
+def durable_service(
+    session_factory: sessionmaker[Session],
+    *,
+    repository: SqlAlchemyEventRepository | None = None,
+    whatsapp: MockWhatsAppAdapter | None = None,
+    max_turn_operations_per_session: int = 100,
+    workflows: ActionWorkflowService | None = None,
+) -> tuple[SimulatorService, SqlAlchemyEventRepository]:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    event_repository = repository or SqlAlchemyEventRepository(session_factory)
+    engine = ConversationEngine(turn_digest_key=TURN_DIGEST_KEY)
+    return (
+        SimulatorService(
+            clock=clock,
+            conversation_engine=engine,
+            conversation_journal=ConversationJournal(event_repository),
+            action_workflows=workflows or action_workflows(clock, whatsapp=whatsapp),
+            max_turn_operations_per_session=max_turn_operations_per_session,
+        ),
+        event_repository,
     )
 
 
@@ -600,3 +635,364 @@ def test_replay_is_deterministic_and_does_not_classify(service: SimulatorService
 
     assert first == second
     assert all("intent" not in turn for turn in first)
+
+
+@pytest.mark.asyncio
+async def test_durable_turns_are_bounded_minimized_and_resume_after_restart(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="durable-restart"))
+    request = TurnRequest(
+        text="We sell apparel and need a catalog demo.",
+        language=LanguageCode.ENGLISH,
+    )
+
+    first = await first_service.process_turn(session.session_id, request)
+    await first_service.process_turn(
+        session.session_id,
+        TurnRequest(text="Please show pricing.", language=LanguageCode.ENGLISH),
+    )
+    bounded = first_service.get_durable_history(session.session_id, limit=1)
+
+    assert len(bounded.turns) == 1
+    assert bounded.turns[0].result.turn_count == 2
+    assert "lead_id" not in bounded.model_dump_json()
+    with session_factory() as database_session:
+        payloads = database_session.scalars(select(EventRecord.payload)).all()
+    assert request.text not in str(payloads)
+
+    restarted, _ = durable_service(session_factory)
+    resumed = restarted.resume_session(
+        session.session_id,
+        ResumeSessionRequest(lead_ref="durable-restart"),
+    )
+    replayed = await restarted.process_turn(session.session_id, request)
+
+    assert resumed.events == []
+    assert replayed.reply == first.reply
+    assert replayed.events == []
+    assert len(restarted.get_durable_history(session.session_id, limit=100).turns) == 2
+
+
+@pytest.mark.asyncio
+async def test_durable_journal_failure_rolls_back_and_retry_reconciles(
+    migrated_database: tuple[str, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, session_factory = migrated_database
+    whatsapp = MockWhatsAppAdapter()
+    simulator, repository = durable_service(session_factory, whatsapp=whatsapp)
+    session = simulator.create_session(
+        CreateSessionRequest(
+            lead_ref="journal-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a demo.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+    original_append = repository.append
+    attempts = 0
+
+    def append_then_fail(*args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        persisted = original_append(*args, **kwargs)  # type: ignore[arg-type]
+        if attempts == 1:
+            raise RuntimeError("journal response lost")
+        return persisted
+
+    monkeypatch.setattr(repository, "append", append_then_fail)
+    with pytest.raises(RuntimeError, match="response lost"):
+        await simulator.process_turn(session.session_id, request)
+
+    assert simulator.get_session(session.session_id).events == session.events
+    retried = await simulator.process_turn(session.session_id, request)
+    assert retried.preview is not None
+    assert len(whatsapp.actions) == 1
+    assert len(simulator.get_durable_history(session.session_id, limit=100).turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_action_does_not_create_a_durable_turn(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    whatsapp = MockWhatsAppAdapter(failures=[AdapterTimeoutError("temporary timeout"), None])
+    simulator, _ = durable_service(session_factory, whatsapp=whatsapp)
+    session = simulator.create_session(
+        CreateSessionRequest(
+            lead_ref="durable-action-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+
+    with pytest.raises(AdapterTimeoutError):
+        await simulator.process_turn(session.session_id, request)
+    with pytest.raises(LookupError):
+        simulator.get_durable_history(session.session_id, limit=100)
+
+    retried = await simulator.process_turn(session.session_id, request)
+    assert retried.preview is not None
+    assert len(simulator.get_durable_history(session.session_id, limit=100).turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_is_not_duplicated_when_journal_append_fails_before_persisting(
+    migrated_database: tuple[str, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, session_factory = migrated_database
+    whatsapp = MockWhatsAppAdapter()
+    simulator, repository = durable_service(session_factory, whatsapp=whatsapp)
+    session = simulator.create_session(
+        CreateSessionRequest(
+            lead_ref="journal-write-failure",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+    original_append = repository.append
+    failed = False
+
+    def fail_before_append(*args: object, **kwargs: object) -> object:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("journal unavailable")
+        return original_append(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(repository, "append", fail_before_append)
+    with pytest.raises(RuntimeError, match="journal unavailable"):
+        await simulator.process_turn(session.session_id, request)
+
+    retried = await simulator.process_turn(session.session_id, request)
+    assert retried.preview is not None
+    assert len(whatsapp.actions) == 1
+    assert len(simulator.get_durable_history(session.session_id, limit=100).turns) == 1
+
+
+@pytest.mark.asyncio
+async def test_action_preview_retry_after_restart_fails_closed(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(
+        CreateSessionRequest(
+            lead_ref="durable-action-recovery",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    request = TurnRequest(
+        text="Please show a sample.",
+        language=LanguageCode.ENGLISH,
+        preview_action=PreviewAction.WHATSAPP,
+    )
+    await first_service.process_turn(session.session_id, request)
+
+    restarted, _ = durable_service(session_factory)
+    restarted.resume_session(
+        session.session_id,
+        ResumeSessionRequest(lead_ref="durable-action-recovery"),
+    )
+    with pytest.raises(DurableActionReplayUnavailableError):
+        await restarted.process_turn(session.session_id, request)
+
+    with pytest.raises(DurableActionReplayUnavailableError):
+        await restarted.process_turn(
+            session.session_id,
+            TurnRequest(
+                text="Please prepare a different preview.",
+                language=LanguageCode.ENGLISH,
+                preview_action=PreviewAction.ARTIFACT,
+            ),
+        )
+
+
+def test_resume_with_a_different_digest_key_fails_closed(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="wrong-key"))
+    asyncio.run(
+        first_service.process_turn(
+            session.session_id,
+            TurnRequest(text="Please show a demo.", language=LanguageCode.ENGLISH),
+        )
+    )
+    repository = SqlAlchemyEventRepository(session_factory)
+    wrong_key_engine = ConversationEngine(turn_digest_key=b"different-simulator-journal-key!")
+    restarted = SimulatorService(
+        conversation_engine=wrong_key_engine,
+        conversation_journal=ConversationJournal(repository),
+    )
+
+    with pytest.raises(ValueError, match="different digest key"):
+        restarted.resume_session(
+            session.session_id,
+            ResumeSessionRequest(lead_ref="wrong-key"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_stale_durable_session_is_invalidated_instead_of_forking(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="stale-session"))
+    await first_service.process_turn(
+        session.session_id,
+        TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+    )
+    stale_service, _ = durable_service(session_factory)
+    stale_service.resume_session(
+        session.session_id,
+        ResumeSessionRequest(lead_ref="stale-session"),
+    )
+    await first_service.process_turn(
+        session.session_id,
+        TurnRequest(text="Please show pricing.", language=LanguageCode.ENGLISH),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match durable history"):
+        await stale_service.process_turn(
+            session.session_id,
+            TurnRequest(text="Please show a demo.", language=LanguageCode.ENGLISH),
+        )
+    with pytest.raises(LookupError):
+        stale_service.get_session(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_stale_session_cleanup_failure_does_not_mask_conflict_or_leak_capacity(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    first_service, _ = durable_service(session_factory)
+    session = first_service.create_session(CreateSessionRequest(lead_ref="stale-cleanup"))
+    await first_service.process_turn(
+        session.session_id,
+        TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+    )
+    cleanup_clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    stale_service, _ = durable_service(
+        session_factory,
+        workflows=FailOnceCleanupWorkflows(cleanup_clock),
+    )
+    stale_service.resume_session(
+        session.session_id,
+        ResumeSessionRequest(lead_ref="stale-cleanup"),
+    )
+    await first_service.process_turn(
+        session.session_id,
+        TurnRequest(text="Please show pricing.", language=LanguageCode.ENGLISH),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match durable history"):
+        await stale_service.process_turn(
+            session.session_id,
+            TurnRequest(text="Continue.", language=LanguageCode.ENGLISH),
+        )
+    with pytest.raises(LookupError):
+        stale_service.get_session(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_cross_session_operation_conflict_does_not_consume_the_operation_slot(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    simulator, _ = durable_service(session_factory, max_turn_operations_per_session=1)
+    operation_id = UUID("10000000-0000-0000-0000-000000000001")
+    first = simulator.create_session(CreateSessionRequest(lead_ref="shared-lead"))
+    await simulator.process_turn(
+        first.session_id,
+        TurnRequest(
+            operation_id=operation_id,
+            text="We sell apparel.",
+            language=LanguageCode.ENGLISH,
+        ),
+    )
+    second = simulator.create_session(CreateSessionRequest(lead_ref="shared-lead"))
+
+    with pytest.raises(RuntimeError, match="different turn input"):
+        await simulator.process_turn(
+            second.session_id,
+            TurnRequest(
+                operation_id=operation_id,
+                text="Please show a demo.",
+                language=LanguageCode.ENGLISH,
+            ),
+        )
+    accepted = await simulator.process_turn(
+        second.session_id,
+        TurnRequest(text="Please show a demo.", language=LanguageCode.ENGLISH),
+    )
+    assert accepted.reply
+
+
+@pytest.mark.asyncio
+async def test_lead_privacy_closure_blocks_durable_history_and_new_turns(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    simulator, repository = durable_service(session_factory)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="privacy-closed"))
+    await simulator.process_turn(
+        session.session_id,
+        TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+    )
+    with session_factory() as database_session:
+        aggregate_id = database_session.scalar(select(AggregateRecord.aggregate_id))
+    assert aggregate_id is not None
+    SqlAlchemyPrivacyRepository(session_factory, repository).anonymize(UUID(aggregate_id))
+
+    with pytest.raises(RuntimeError, match="anonymized"):
+        simulator.get_durable_history(session.session_id, limit=100)
+    with pytest.raises(RuntimeError, match="anonymized"):
+        await simulator.process_turn(
+            session.session_id,
+            TurnRequest(text="Continue.", language=LanguageCode.ENGLISH),
+        )
+    with pytest.raises(LookupError):
+        simulator.get_session(session.session_id)

@@ -20,6 +20,7 @@ It currently supports:
 - Session-scoped deterministic discovery, requirement revisions, repetition handling, and evidence-grounded Hot/Warm/Cold/Review outcomes.
 - Immediate opt-out stop, one neutral abuse redirection, and safe refusal of internal-information, jailbreak, and prompt-injection requests.
 - Bounded in-memory callback delay and six-industry sample-deck selection; default policy state blocks previews.
+- Default-off durable accepted-turn journaling, restart recovery, and bounded minimized replay.
 
 ## Not implemented
 
@@ -27,7 +28,7 @@ It currently supports:
 - No speech-to-text or local TTS provider integration.
 - No model-backed/free-form extraction; the current conversation rules are deterministic and intentionally bounded.
 - No PPTX renderer; sample decks are dependency-free structured previews from fixed templates.
-- No durable simulator history; state is process-local and disappears on restart.
+- No durable simulator timeline, consent/contact policy, callback/action state, audio metadata, or artifact state.
 - No authenticated public multi-user deployment. Session UUIDs are local simulator capabilities, not production authentication.
 - No measured browser-audio delivery, transcription accuracy, or latency guarantee.
 
@@ -40,6 +41,8 @@ python -m uvicorn pitchbot.main:app --reload
 Open `http://127.0.0.1:8000/simulator/`.
 
 Use synthetic data only. The browser page and API share one origin; no CORS middleware is enabled.
+
+Durable conversation turns remain disabled unless `PITCHBOT_ENABLE_DURABLE_HISTORY=true` and `PITCHBOT_DURABLE_HISTORY_DIGEST_KEY` contains a managed 32-byte hexadecimal key. Apply Alembic migrations before enabling it. Resume with `POST /api/simulator/sessions/{session_id}/resume` and the original `lead_ref`; read at most 100 minimized results from `GET /api/simulator/sessions/{session_id}/durable-history`. All action previews on recovered sessions fail closed because process-local consent, contact policy, and preview details cannot be reconstructed safely.
 
 ## Audio privacy and limits
 
@@ -69,7 +72,8 @@ The UI may use browser-native speech synthesis for audible replies. Voice availa
 - Sessions, events, lead history, audio metadata, text length, audio chunks, reconnects, and simulated latency are bounded.
 - Conversation turns, retained turn operations (including failures), facts, evidence, classification history, action records, and mock adapter histories are bounded; only high-level outcomes enter simulator metadata.
 - Turn API callers must provide and reuse `operation_id` for retries; conflicting reuse and operation-capacity exhaustion fail closed.
+- Durable reads require an active session UUID capability, validate the complete lead stream, and expose no raw buyer text, internal lead/source identifiers, operation fingerprints, or turn digests.
 
 ## Cleanup
 
-Use **Close session** to remove process-local session, callback, deck, and mock action history and stop microphone tracks/sockets. Scheduled mock callbacks are canceled before removal. A failed or canceled cleanup keeps the session closed to normal work but permits another close request to retry cleanup. Stopping the API clears all remaining simulator memory. No database record or external provider state is created.
+Use **Close session** to remove process-local session, callback, deck, and mock action history and stop microphone tracks/sockets. Scheduled mock callbacks are canceled before removal. A failed or canceled cleanup keeps the session closed to normal work but permits another close request to retry cleanup. Stopping the API clears all remaining simulator memory. When durable history is enabled, accepted minimized conversation transitions remain subject to the lead privacy lifecycle; no external provider state is created.

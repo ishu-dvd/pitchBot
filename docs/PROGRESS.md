@@ -122,9 +122,19 @@
 ## PR 12: Durable conversation journal
 
 - **Branch:** `feat/durable-conversation-journal`
-- **Status:** Implementation, adversarial corrections, and final validation complete; definitive review, commit, push, CI, and PR pending.
+- **Status:** Merged as PR 12.
 - **Base:** Merged PR 11 commit `85259a3`.
 - **Scope:** Reuse each lead's existing aggregate/event stream for idempotent accepted-turn transitions, rollback-safe processing, optimistic concurrency, ambiguous-commit recovery, and deterministic restart replay.
 - **Safety decisions:** No duplicate tables or migration; request fingerprints are journal-computed; raw buyer text and cumulative state are excluded; repetition digests require a managed key; partial/anonymized/malformed history fails closed; replay cannot rerun actions or silently fork live state.
 - **Deferred:** Simulator/API wiring, minimized transcript/source-span persistence, BM25, temporal graph storage, vector/model selection, streaming speech, binary decks, and live channels remain separate reviewed milestones.
-- **Rollback:** Revert PR 12. Existing schema remains unchanged and the journal is not yet connected to simulator flows.
+- **Rollback:** Revert PR 12. Existing schema remains unchanged.
+
+## PR 13: Durable simulator history
+
+- **Branch:** `feat/simulator-durable-history`
+- **Status:** Implementation, adversarial review, and full validation complete; PR pending.
+- **Base:** Merged PR 12 commit `75eca2d`.
+- **Scope:** Wire simulator turns to the existing conversation journal with prepare/commit semantics, managed-key configuration, restart resume, and bounded minimized durable-history API.
+- **Safety decisions:** Disabled by default; action failure precedes journal commit; persistence failure rolls back local state; stale sessions are invalidated; privacy closure and wrong keys fail closed; recovered action-preview responses are not reconstructed.
+- **Deferred:** Durable action/scheduler state, authenticated public deployment, BM25, temporal graph storage, vector/model selection, streaming speech, binary decks, and live channels.
+- **Rollback:** Disable durable history or revert PR 13. No schema migration is introduced; existing journal events remain governed by the lead privacy lifecycle.

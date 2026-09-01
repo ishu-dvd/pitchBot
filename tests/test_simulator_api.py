@@ -131,3 +131,28 @@ async def test_replay_and_missing_resources(client: AsyncClient) -> None:
     assert len(replay.json()["turns"]) == 2
     assert missing.status_code == 404
     assert missing_session.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_durable_history_routes_are_bounded_and_explicitly_disabled(
+    client: AsyncClient,
+) -> None:
+    created = await client.post(
+        "/api/simulator/sessions",
+        json={"lead_ref": "durable-disabled", "language": "en"},
+    )
+    session_id = created.json()["session_id"]
+
+    history = await client.get(f"/api/simulator/sessions/{session_id}/durable-history")
+    invalid_limit = await client.get(
+        f"/api/simulator/sessions/{session_id}/durable-history?limit=101"
+    )
+    resume = await client.post(
+        f"/api/simulator/sessions/{session_id}/resume",
+        json={"lead_ref": "durable-disabled"},
+    )
+
+    assert history.status_code == 409
+    assert "disabled" in history.json()["detail"]
+    assert invalid_limit.status_code == 422
+    assert resume.status_code == 409
