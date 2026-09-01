@@ -2,7 +2,7 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a browser simulator with opt-in durable conversation turns, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, privacy-validated BM25 fact retrieval, and guarded in-memory follow-up, callback, and deck previews. No production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a browser simulator with opt-in durable conversation turns, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, privacy-validated BM25 fact retrieval, a conservative temporal lead knowledge view, and guarded in-memory follow-up, callback, and deck previews. No production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -243,6 +243,8 @@ Raw buyer turns are not copied into events. Only session-bound HMAC-SHA-256 dige
 The append-only event repository remains authoritative. Derived BM25, vector, and graph views are rebuildable and never become the source of consent, suppression, action, or requirement truth. BM25 is the first deterministic baseline. `sqlite-vec` and HNSW remain adapter candidates; FAISS and BGE-M3 require measured scale, latency, quality, and license evidence before selection.
 
 The implemented BM25 baseline rebuilds an immutable single-session index from current facts obtained only through full journal replay. It enforces corpus, query, result, and cooperative deadline bounds, attaches aggregate-version and turn provenance, and revalidates active privacy state and unchanged aggregate version before returning results. It is not yet connected to the speech or simulator response path.
+
+The implemented temporal view fully replays every session in a lead stream, creates validity intervals and supersession edges only from explicit same-session revisions, and marks unresolved different values across sessions as conflicting. It is rebuilt without a cache and revalidates privacy/version before return. Organization/product/competitor entities, persistent graph storage, graph retrieval, and automatic conflict resolution remain planned.
 
 Facts are temporal and provenance-bearing: observed claims remain distinct from buyer-confirmed facts, revisions supersede rather than overwrite prior values, and every retrieval result must identify its source event. Conversation-derived improvements are aggregated offline after privacy filtering and evaluation; the running system does not rewrite its own prompts, policies, or models.
 

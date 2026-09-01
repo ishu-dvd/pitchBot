@@ -24,6 +24,7 @@ from pitchbot.domain import (
     JsonValue,
     LanguageCode,
     RequirementFact,
+    RequirementRevision,
 )
 from pitchbot.storage import (
     AggregateStatus,
@@ -122,6 +123,25 @@ class ConversationFactSnapshot(BaseModel):
     session_id: UUID
     aggregate_version: int = Field(ge=1)
     facts: tuple[JournaledConversationFact, ...]
+
+
+class JournaledConversationRevision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    revision: RequirementRevision
+    aggregate_version: int = Field(ge=1)
+    session_id: UUID
+    occurred_at: AwareDatetime
+
+
+class LeadKnowledgeSourceSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    lead_id: UUID
+    aggregate_version: int = Field(ge=1)
+    session_ids: tuple[UUID, ...] = Field(max_length=1_000)
+    facts: tuple[JournaledConversationFact, ...] = Field(max_length=10_000)
+    revisions: tuple[JournaledConversationRevision, ...] = Field(max_length=10_000)
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,9 +456,118 @@ class ConversationJournal:
         )
 
     def validate_fact_snapshot(self, snapshot: ConversationFactSnapshot) -> None:
-        status = self._repository.status(snapshot.lead_id)
-        if status is None or status.current_version != snapshot.aggregate_version:
-            raise ConcurrencyConflictError("conversation facts changed during retrieval")
+        self._validate_active_version(
+            snapshot.lead_id,
+            snapshot.aggregate_version,
+            change_message="conversation facts changed during retrieval",
+        )
+
+    def knowledge_source(
+        self,
+        lead_id: UUID,
+        *,
+        max_sessions: int = 1_000,
+        max_facts: int = 1_000,
+        max_revisions: int = 1_000,
+    ) -> LeadKnowledgeSourceSnapshot:
+        if min(max_sessions, max_facts, max_revisions) < 1:
+            raise ValueError("knowledge source capacities must be positive")
+        if max_sessions > 1_000 or max_facts > 10_000 or max_revisions > 10_000:
+            raise ValueError("knowledge source capacities exceed safe limits")
+        events, status = self._load_events(lead_id)
+        session_ids = tuple(sorted({item.event.session_id for item in events}, key=str))
+        if not session_ids or status is None:
+            raise LookupError("Conversation journal not found")
+        if len(session_ids) > max_sessions:
+            raise JournalHistoryUnavailableError("knowledge source session capacity reached")
+        for session_id in session_ids:
+            self._replay_loaded(lead_id, session_id, events, status)
+
+        facts: list[JournaledConversationFact] = []
+        revisions: list[JournaledConversationRevision] = []
+        facts_by_id: dict[UUID, JournaledConversationFact] = {}
+        superseded_fact_ids: set[UUID] = set()
+        revision_ids: set[UUID] = set()
+        for item in events:
+            turn_facts = {fact.fact_id: fact for fact in item.event.result.facts}
+            if len(facts) + len(item.event.result.facts) > max_facts:
+                raise JournalHistoryUnavailableError("knowledge source fact capacity reached")
+            if len(revisions) + len(item.event.result.revisions) > max_revisions:
+                raise JournalHistoryUnavailableError("knowledge source revision capacity reached")
+            for fact in item.event.result.facts:
+                if fact.fact_id in facts_by_id:
+                    raise JournalCorruptionError("knowledge source has duplicate fact identifiers")
+                source = JournaledConversationFact(
+                    fact=fact,
+                    aggregate_version=item.aggregate_version,
+                    session_id=item.event.session_id,
+                    language=item.event.result.language,
+                    occurred_at=item.occurred_at,
+                )
+                facts_by_id[fact.fact_id] = source
+                facts.append(source)
+            for revision in item.event.result.revisions:
+                if revision.revision_id in revision_ids:
+                    raise JournalCorruptionError(
+                        "knowledge source has duplicate revision identifiers"
+                    )
+                revision_ids.add(revision.revision_id)
+                replacement = turn_facts.get(revision.replacement_fact_id)
+                previous = (
+                    facts_by_id.get(revision.previous_fact_id)
+                    if revision.previous_fact_id is not None
+                    else None
+                )
+                if replacement is None or replacement.key != revision.key:
+                    raise JournalCorruptionError("knowledge revision replacement is inconsistent")
+                if (
+                    previous is None
+                    or previous.fact.fact_id == revision.replacement_fact_id
+                    or previous.fact.key != revision.key
+                    or previous.session_id != item.event.session_id
+                    or previous.aggregate_version >= item.aggregate_version
+                ):
+                    raise JournalCorruptionError("knowledge revision source is inconsistent")
+                if item.occurred_at < previous.occurred_at:
+                    raise JournalCorruptionError(
+                        "knowledge revision timestamp precedes fact timestamp"
+                    )
+                if previous.fact.fact_id in superseded_fact_ids:
+                    raise JournalCorruptionError("knowledge fact is superseded more than once")
+                superseded_fact_ids.add(previous.fact.fact_id)
+                revisions.append(
+                    JournaledConversationRevision(
+                        revision=revision,
+                        aggregate_version=item.aggregate_version,
+                        session_id=item.event.session_id,
+                        occurred_at=item.occurred_at,
+                    )
+                )
+        return LeadKnowledgeSourceSnapshot(
+            lead_id=lead_id,
+            aggregate_version=status.current_version,
+            session_ids=session_ids,
+            facts=tuple(facts),
+            revisions=tuple(revisions),
+        )
+
+    def validate_knowledge_source(self, snapshot: LeadKnowledgeSourceSnapshot) -> None:
+        self._validate_active_version(
+            snapshot.lead_id,
+            snapshot.aggregate_version,
+            change_message="conversation facts changed during projection",
+        )
+
+    def _validate_active_version(
+        self,
+        lead_id: UUID,
+        aggregate_version: int,
+        *,
+        change_message: str,
+    ) -> None:
+        status = self._repository.status(lead_id)
+        if status is None or status.current_version != aggregate_version:
+            raise ConcurrencyConflictError(change_message)
         if status.aggregate_type != CONVERSATION_AGGREGATE_TYPE:
             raise JournalCorruptionError("conversation journal aggregate type is invalid")
         if status.privacy_state != "active":
