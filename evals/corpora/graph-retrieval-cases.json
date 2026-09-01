@@ -1,0 +1,92 @@
+{
+  "suite_id": "pitchbot-graph-retrieval",
+  "version": "1",
+  "corpus_id": "synthetic-temporal-claims",
+  "corpus_version": "1",
+  "top_k": 5,
+  "deadline_ms": 200,
+  "cases": [
+    {
+      "case_id": "en-apparel-owner-conflict",
+      "language": "en",
+      "industry": "apparel",
+      "persona": "owner",
+      "query": "apparel toys business",
+      "claims": [
+        {"claim_id": "a1", "session_id": "discovery", "key": "business_type", "value": "apparel", "language": "en", "status": "conflicting"},
+        {"claim_id": "a2", "session_id": "followup", "key": "business_type", "value": "toys", "language": "en", "status": "conflicting"},
+        {"claim_id": "a3", "session_id": "followup", "key": "timeline", "value": "this month", "language": "en", "status": "current"}
+      ],
+      "relevant_claim_ids": ["a1", "a2"],
+      "tags": ["conflict", "cross-session"]
+    },
+    {
+      "case_id": "en-toys-direct-supersession",
+      "language": "en",
+      "industry": "toys",
+      "persona": "direct-buyer",
+      "query": "toys catalog apparel",
+      "claims": [
+        {"claim_id": "b1", "session_id": "discovery", "key": "business_type", "value": "apparel", "language": "en", "status": "superseded", "superseded_by_claim_id": "b2"},
+        {"claim_id": "b2", "session_id": "discovery", "key": "business_type", "value": "toys", "language": "en", "status": "current"},
+        {"claim_id": "b3", "session_id": "requirements", "key": "requested_features", "value": "catalog", "language": "en", "status": "current"}
+      ],
+      "relevant_claim_ids": ["b2", "b3"],
+      "excluded_claim_ids": ["b1"],
+      "tags": ["supersession", "exclusion"]
+    },
+    {
+      "case_id": "mixed-books-reseller-equal",
+      "language": "mixed",
+      "industry": "books",
+      "persona": "reseller",
+      "query": "books business",
+      "claims": [
+        {"claim_id": "c1", "session_id": "discovery", "key": "business_type", "value": "books", "language": "mixed", "status": "current"},
+        {"claim_id": "c2", "session_id": "followup", "key": "business_type", "value": "books", "language": "en", "status": "current"}
+      ],
+      "relevant_claim_ids": ["c1", "c2"],
+      "tags": ["equal-observation", "hinglish"]
+    },
+    {
+      "case_id": "hi-plastics-manager-conflict",
+      "language": "hi",
+      "industry": "plastics",
+      "persona": "operations-manager",
+      "query": "प्लास्टिक खिलौने व्यवसाय",
+      "claims": [
+        {"claim_id": "d1", "session_id": "hindi-call", "key": "business_type", "value": "प्लास्टिक plastics", "language": "hi", "status": "conflicting"},
+        {"claim_id": "d2", "session_id": "owner-call", "key": "business_type", "value": "खिलौने toys", "language": "hi", "status": "conflicting"}
+      ],
+      "relevant_claim_ids": ["d1", "d2"],
+      "tags": ["conflict", "hindi"]
+    },
+    {
+      "case_id": "mixed-food-wholesaler-features",
+      "language": "mixed",
+      "industry": "food",
+      "persona": "wholesaler",
+      "query": "catalog payments delivery search",
+      "claims": [
+        {"claim_id": "e1", "session_id": "sales", "key": "requested_features", "value": "catalog,search", "language": "mixed", "status": "conflicting"},
+        {"claim_id": "e2", "session_id": "technical", "key": "requested_features", "value": "payments,delivery", "language": "mixed", "status": "conflicting"}
+      ],
+      "relevant_claim_ids": ["e1", "e2"],
+      "tags": ["conflict", "hinglish"]
+    },
+    {
+      "case_id": "en-import-export-cautious",
+      "language": "en",
+      "industry": "import-export",
+      "persona": "cautious-buyer",
+      "query": "import export certificates enquiry six weeks",
+      "claims": [
+        {"claim_id": "f1", "session_id": "discovery", "key": "business_type", "value": "import-export", "language": "en", "status": "current"},
+        {"claim_id": "f2", "session_id": "requirements", "key": "requested_features", "value": "certificates,enquiry", "language": "en", "status": "current"},
+        {"claim_id": "f3", "session_id": "requirements", "key": "timeline", "value": "within 6 weeks", "language": "en", "status": "current"}
+      ],
+      "relevant_claim_ids": ["f1", "f2", "f3"],
+      "tags": ["cross-session", "workflow"]
+    }
+  ]
+}

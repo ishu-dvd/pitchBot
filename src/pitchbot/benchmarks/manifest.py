@@ -16,14 +16,28 @@ def _reject_json_constant(constant: str) -> None:
     raise ValueError(f"invalid JSON constant: {constant}")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_json(raw: bytes) -> object:
+    return json.loads(
+        raw.decode("utf-8"),
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
 def load_json_model[T: BaseModel](path: Path, model_type: type[T]) -> T:
     raw = path.read_bytes()
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError("manifest exceeds size limit")
-    value = json.loads(
-        raw.decode("utf-8"),
-        parse_constant=_reject_json_constant,
-    )
+    value = _load_json(raw)
     return model_type.model_validate(value)
 
 
@@ -74,9 +88,6 @@ def canonical_manifest_sha256(path: Path) -> str:
     raw = path.read_bytes()
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError("manifest exceeds size limit")
-    value = json.loads(
-        raw.decode("utf-8"),
-        parse_constant=_reject_json_constant,
-    )
+    value = _load_json(raw)
     canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()

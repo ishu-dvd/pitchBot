@@ -35,6 +35,7 @@ The model covers browser audio/text input, local or hosted APIs, model and speec
 | Journal replay poisoning | Malformed or partial events alter restored policy state | Versioned strict payloads, contiguous versions, bounded reads, identity/sequence checks, fail-closed replay |
 | Stale or cross-lead retrieval | Cached or mixed indexes expose invalid facts | No runtime cache; replay-validated single-lead snapshots; explicit session/lead scope; post-score and timeout privacy/version checks; bounded provenance-bearing results |
 | Knowledge conflict collapse | A newer session silently overwrites a different claim | Supersede only explicit same-session revisions; preserve differing cross-session claims as conflicts |
+| Retrieval evaluation blind spot | Quality scores pass while superseded facts are exposed | Reviewed temporal cases; explicit excluded-claim gold set; zero-tolerance exposure gate; production retriever under test |
 | Recovered action ambiguity | A restart retry recreates an unverifiable preview response | Persist conversation only after action success; reconcile only while the idempotent local result exists; otherwise fail closed |
 | Induced denial of service | Repeated WhatsApp/artifact requests | Per-lead/global quotas, coalescing, bounded queues, timeouts, cancellation, and circuit breakers |
 | PII leakage | Phone numbers appear in logs/evals | Data minimization, structured redaction, synthetic CI fixtures, retention/deletion controls |

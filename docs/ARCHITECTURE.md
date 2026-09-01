@@ -249,6 +249,8 @@ The implemented BM25 baseline rebuilds an immutable single-session index from cu
 
 The implemented temporal view fully replays every session in a lead stream, creates validity intervals and supersession edges only from explicit same-session revisions, and marks unresolved different values across sessions as conflicting. Graph-aware BM25 rebuilds that view without a cache, indexes current and conflicting claims from one lead, excludes superseded claims, preserves claim status and provenance, and revalidates privacy/version after ranking or timeout. Organization/product/competitor entities, persistent graph storage, structural graph queries, and automatic conflict resolution remain planned.
 
+The graph retrieval evaluation suite invokes that production ranking/filtering path over deterministic immutable temporal graphs. Reviewed cases gate full relevant-claim recall, rank quality, zero superseded-claim exposure, and zero timeout rate while keeping latency informational and omitting queries, claims, gold identifiers, and retrieved values from run artifacts.
+
 Facts are temporal and provenance-bearing: observed claims remain distinct from buyer-confirmed facts, revisions supersede rather than overwrite prior values, and every retrieval result must identify its source event. Conversation-derived improvements are aggregated offline after privacy filtering and evaluation; the running system does not rewrite its own prompts, policies, or models.
 
 ## Evaluation and observability

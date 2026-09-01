@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from time import monotonic_ns
+from typing import Protocol
 from uuid import UUID
 
-from pitchbot.knowledge.graph import TemporalKnowledgeGraphBuilder
 from pitchbot.knowledge.models import (
     FactClaimStatus,
     LeadKnowledgeGraph,
@@ -22,10 +22,16 @@ from pitchbot.retrieval import (
 )
 
 
+class LeadKnowledgeGraphSource(Protocol):
+    def build(self, lead_id: UUID) -> LeadKnowledgeGraph: ...
+
+    def validate(self, graph: LeadKnowledgeGraph) -> None: ...
+
+
 class LeadKnowledgeBm25Retriever:
     def __init__(
         self,
-        graph_builder: TemporalKnowledgeGraphBuilder,
+        graph_builder: LeadKnowledgeGraphSource,
         *,
         clock: Callable[[], int] = monotonic_ns,
     ) -> None:

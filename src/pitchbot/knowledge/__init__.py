@@ -9,7 +9,7 @@ from pitchbot.knowledge.models import (
     RankedKnowledgeClaim,
     TemporalFactClaim,
 )
-from pitchbot.knowledge.retrieval import LeadKnowledgeBm25Retriever
+from pitchbot.knowledge.retrieval import LeadKnowledgeBm25Retriever, LeadKnowledgeGraphSource
 
 __all__ = [
     "FactClaimStatus",
@@ -18,6 +18,7 @@ __all__ = [
     "KnowledgeRelationType",
     "LeadKnowledgeGraph",
     "LeadKnowledgeBm25Retriever",
+    "LeadKnowledgeGraphSource",
     "LeadKnowledgeRetrievalResponse",
     "RankedKnowledgeClaim",
     "TemporalFactClaim",

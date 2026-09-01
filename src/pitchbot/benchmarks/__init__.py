@@ -4,6 +4,13 @@ from pitchbot.benchmarks.evaluation import (
     validate_evaluation_run,
     write_evaluation_report,
 )
+from pitchbot.benchmarks.graph_retrieval import (
+    GraphRetrievalSuite,
+    GraphRetrievalSuiteCase,
+    GraphRetrievalSuiteClaim,
+    run_graph_retrieval_evaluation,
+    validate_graph_retrieval_suite,
+)
 from pitchbot.benchmarks.metrics import (
     Interval,
     character_error_rate,
@@ -54,6 +61,9 @@ __all__ = [
     "EvaluationRun",
     "EvaluationRunStatus",
     "HardwareProfile",
+    "GraphRetrievalSuite",
+    "GraphRetrievalSuiteCase",
+    "GraphRetrievalSuiteClaim",
     "Interval",
     "MetricDirection",
     "RetrievalSuite",
@@ -65,9 +75,11 @@ __all__ = [
     "real_time_factor",
     "relative_duration_delta",
     "render_evaluation_report",
+    "run_graph_retrieval_evaluation",
     "run_retrieval_evaluation",
     "structured_field_accuracy",
     "validate_evaluation_run",
+    "validate_graph_retrieval_suite",
     "validate_retrieval_suite",
     "vad_precision_recall_f1",
     "write_evaluation_report",

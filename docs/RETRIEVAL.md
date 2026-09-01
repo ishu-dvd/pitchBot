@@ -40,14 +40,18 @@ The current synchronous journal load cannot be preempted mid-database call, so 2
 
 `evals/corpora/retrieval-cases.json` contains six reviewed synthetic cases spanning English, Hindi, Hinglish, apparel, toys, books, food, import/export, plastics, and distinct buyer personas.
 
+`evals/corpora/graph-retrieval-cases.json` adds six lead-scoped temporal cases covering unresolved conflicts, explicit supersession, equal cross-session observations, the same language/industry/persona diversity, and a zero-tolerance superseded-claim exposure gate. It runs the production `LeadKnowledgeBm25Retriever` against deterministic immutable graphs without storage, network, or model dependencies.
+
 ```powershell
 pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json
 pitchbot-bench run-retrieval evals/corpora/retrieval-cases.json benchmark-results/bm25.json --run-id bm25-local-1 --git-revision <commit>
+pitchbot-bench validate-graph-retrieval-suite evals/corpora/graph-retrieval-cases.json
+pitchbot-bench run-graph-retrieval evals/corpora/graph-retrieval-cases.json benchmark-results/graph-bm25.json --run-id graph-bm25-local-1 --git-revision <commit>
 pitchbot-bench validate-evaluation benchmark-results/bm25.json
 pitchbot-bench render-evaluation benchmark-results/bm25.json benchmark-results/bm25.html
 ```
 
-The output reuses the versioned privacy-minimized evaluation schema. It records recall, reciprocal rank, timeout rate, hardware labels, and latency metrics but excludes queries, documents, relevant-document identifiers, and retrieved content. Quality and timeout metrics gate the artifact; latency is informational because shared CI hardware is not a benchmark target.
+The outputs reuse the versioned privacy-minimized evaluation schema. They retain allowlisted language, industry, persona, and test tags for slice analysis and record recall, reciprocal rank, timeout rate, hardware labels, latency, and—for graph retrieval—excluded-claim rate. Queries, claims/documents, opaque gold identifiers, and retrieved content are excluded. Quality, timeout, and exclusion metrics gate the artifact; latency is informational because shared CI hardware is not a benchmark target.
 
 ## Deferred
 

@@ -12,6 +12,10 @@ from pitchbot.benchmarks.evaluation import (
     write_evaluation_report,
     write_text_atomically,
 )
+from pitchbot.benchmarks.graph_retrieval import (
+    run_graph_retrieval_evaluation,
+    validate_graph_retrieval_suite,
+)
 from pitchbot.benchmarks.manifest import (
     canonical_manifest_sha256,
     validate_candidate_registry,
@@ -58,6 +62,14 @@ def build_parser() -> argparse.ArgumentParser:
     retrieval_run.add_argument("--run-id", required=True)
     retrieval_run.add_argument("--git-revision", required=True)
     retrieval_run.add_argument("--force", action="store_true")
+    graph_retrieval_suite = commands.add_parser("validate-graph-retrieval-suite")
+    graph_retrieval_suite.add_argument("path", type=Path)
+    graph_retrieval_run = commands.add_parser("run-graph-retrieval")
+    graph_retrieval_run.add_argument("path", type=Path)
+    graph_retrieval_run.add_argument("output", type=Path)
+    graph_retrieval_run.add_argument("--run-id", required=True)
+    graph_retrieval_run.add_argument("--git-revision", required=True)
+    graph_retrieval_run.add_argument("--force", action="store_true")
     commands.add_parser("environment")
     return parser
 
@@ -126,6 +138,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         gates = "pass" if run.gates_pass() else "fail"
         print(f"completed {len(run.cases)} retrieval cases; artifact-gates={gates}")
+        return 0
+    if args.command == "validate-graph-retrieval-suite":
+        graph_suite = validate_graph_retrieval_suite(args.path)
+        print(f"validated {len(graph_suite.cases)} graph retrieval cases")
+        return 0
+    if args.command == "run-graph-retrieval":
+        run = run_graph_retrieval_evaluation(
+            args.path,
+            run_id=args.run_id,
+            git_revision=args.git_revision,
+        )
+        write_text_atomically(
+            args.output,
+            f"{run.model_dump_json(indent=2)}\n",
+            overwrite=args.force,
+        )
+        gates = "pass" if run.gates_pass() else "fail"
+        print(f"completed {len(run.cases)} graph retrieval cases; artifact-gates={gates}")
         return 0
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))
