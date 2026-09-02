@@ -39,6 +39,8 @@ jobs:
         run: |
           pitchbot-bench validate-candidates benchmarks/candidates.json
           pitchbot-bench validate-corpus evals/corpora/speech-cases.json
+          pitchbot-bench validate-speech-suite evals/corpora/vad-cases.json
+          pitchbot-bench run-speech evals/corpora/vad-cases.json benchmark-results/vad.json --run-id vad-ci --git-revision ${{ github.sha }} --force
           pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json
           pitchbot-bench validate-graph-retrieval-suite evals/corpora/graph-retrieval-cases.json
       - name: Dependency audit

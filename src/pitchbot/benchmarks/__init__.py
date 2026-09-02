@@ -1,3 +1,10 @@
+from pitchbot.benchmarks.audio import (
+    ClipSpec,
+    SegmentKind,
+    SegmentSpec,
+    SyntheticClip,
+    generate_clip,
+)
 from pitchbot.benchmarks.environment import capture_hardware_profile
 from pitchbot.benchmarks.evaluation import (
     render_evaluation_report,
@@ -45,12 +52,21 @@ from pitchbot.benchmarks.retrieval import (
     run_retrieval_evaluation,
     validate_retrieval_suite,
 )
+from pitchbot.benchmarks.speech import (
+    VadSuite,
+    VadSuiteCase,
+    VadSuiteSegment,
+    run_speech_evaluation,
+    speech_gates_pass,
+    validate_speech_suite,
+)
 
 __all__ = [
     "BenchmarkKind",
     "BenchmarkResult",
     "Candidate",
     "CandidateRegistry",
+    "ClipSpec",
     "CorpusAvailability",
     "CorpusItem",
     "CorpusManifest",
@@ -69,18 +85,28 @@ __all__ = [
     "RetrievalSuite",
     "RetrievalSuiteCase",
     "RetrievalSuiteDocument",
+    "SegmentKind",
+    "SegmentSpec",
     "SourceType",
+    "SyntheticClip",
+    "VadSuite",
+    "VadSuiteCase",
+    "VadSuiteSegment",
     "capture_hardware_profile",
     "character_error_rate",
+    "generate_clip",
     "real_time_factor",
     "relative_duration_delta",
     "render_evaluation_report",
     "run_graph_retrieval_evaluation",
     "run_retrieval_evaluation",
+    "run_speech_evaluation",
+    "speech_gates_pass",
     "structured_field_accuracy",
     "validate_evaluation_run",
     "validate_graph_retrieval_suite",
     "validate_retrieval_suite",
+    "validate_speech_suite",
     "vad_precision_recall_f1",
     "write_evaluation_report",
     "word_error_rate",

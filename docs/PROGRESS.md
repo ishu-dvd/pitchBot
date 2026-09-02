@@ -452,3 +452,87 @@
 - **Rollback:** Revert PR 23. It adds no schema migration, persistent index, API surface, model,
   provider, retained buyer data, or external side effect; `normalize_text()` is unchanged, so
   turn digests and business extraction are byte-identical either way.
+
+## PR 24: Synthetic voice-activity structural benchmark
+
+- **Branch:** `bench/synthetic-vad-corpus`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 23 commit `44a0eb6`.
+- **Note:** A sibling branch also numbers its entry "PR 22"; the orchestrator may need to
+  renumber one on merge. This is the synthetic-VAD-corpus change.
+- **Scope:** ADR-0004 blocks selecting any speech provider until a reproducible measured
+  result passes, and PR 21 deferred a `run-speech` command and left all 12 `speech-cases.json`
+  items `planned`, so the repository could not produce a single measured speech number. VAD is
+  the one speech dimension measurable now, because it needs speech-vs-silence *structure*, not
+  intelligible speech. This change makes that one measurement possible and honest, and nothing
+  more.
+  1. A deterministic, dependency-free synthetic audio generator (`pitchbot.benchmarks.audio`)
+     emits, from a seed, a real 16-bit PCM WAV plus byte frames with exact ground-truth
+     speech/silence intervals. It is bit-for-bit reproducible across runs and platforms
+     (platform-independent Mersenne-Twister samples, little-endian packing), and covers clear
+     speech, leading/trailing silence, inter-word pauses, background noise, crosstalk, barge-in
+     onset, and short noise bursts that must not be classified as speech. Frame byte length
+     rises with energy so the shipped byte-size `MockVoiceActivityDetector` can be meaningfully
+     scored against it.
+  2. A VAD-scoped corpus, `evals/corpora/vad-cases.json`, commits per-case seeds, segment
+     structure, and the `audio_sha256` of the WAV each seed produces. Audio is regenerated and
+     hash-verified at run time rather than committed as a binary, keeping the repository
+     binary-free while making the ADR-0004 hash gate real and enforced. It carries `en`/`hi`/
+     `mixed` language slices, the six existing verticals, and eight structural conditions;
+     adding a slice is a pure data edit. `speech-cases.json` is untouched — all 12 STT/TTS items
+     stay `planned`.
+  3. A `run-speech` command (`pitchbot.benchmarks.speech`), shaped after `run-retrieval` /
+     `run-graph-retrieval`, runs the corpus through the existing `VoiceActivityDetector`
+     contract, computes precision/recall/F1 with `vad_precision_recall_f1`, reports per-slice
+     F1 (language, condition, vertical) plus overall mean/min, measures `real_time_factor` and
+     peak allocation, and emits an `EvaluationRun` conforming to the existing schema. `--max-rtf`
+     turns real-time factor into a gate so a candidate too heavy for a no-accelerator 8-core box
+     is rejected. Unlike the retrieval runners, `run-speech` gates **fail closed and set the exit
+     code**: a narrowly-scoped `speech_gates_pass` requires the run to match the reviewed suite
+     and to carry every required per-case and per-slice metric, then that all cases passed and
+     every gating metric met its threshold, and the CLI returns non-zero when it does not.
+  4. `validate-speech-suite` and `run-speech` are wired into CI beside the four existing
+     `validate-*` manifest gates; the former regenerates every case and verifies the committed
+     hash, and the latter exercises the deterministic scoring gate with a non-zero exit on
+     regression, so the corpus cannot silently rot and a scoring break cannot pass CI. Both are
+     fast and fully offline.
+- **Safety decisions:** STT and TTS remain blocked; no corpus item is flipped to `available`,
+  no `wer`/`cer`/naturalness metric can be emitted, and the artifact's `suite_id`/`corpus_id`
+  and metric names mark it unambiguously as a synthetic-VAD *structural* result, not a model
+  selection and not an STT/TTS measurement. A hash mismatch is a hard integrity failure that
+  raises rather than degrading to a soft gate miss, mirroring how retrieval refuses to downgrade
+  corruption. The gate fails closed: `run-speech` validates that the required VAD metrics are
+  present rather than that some metric passed, and returns a non-zero exit code on failure, so a
+  metric-stripped or regressed artifact cannot pass. Real-time-factor and resource gates are
+  informational by default and only gate under an explicit `--max-rtf`, so hardware-variable
+  numbers never flake shared CI, consistent with the existing rule that hardware-specific jobs
+  must not gate ordinary CI. A loud sustained broadband noise burst is beyond what a byte-size
+  placeholder detector can reject and would need a real acoustic model, so synthetic bursts are
+  short low-energy transients and this limit is documented rather than papered over. Per-slice F1
+  gates independently so a Hindi-only regression fails visibly instead of being averaged away. No
+  audio, seed, or segment structure is copied into run artifacts; only allowlisted case,
+  language, vertical, persona, condition, and tag labels plus metrics appear. The existing
+  `vad_precision_recall_f1` was verified against hand-worked overlap cases and found correct; no
+  metric bug was worked around.
+- **Deferred:** Selecting or benchmarking a real voice-activity model (this measures the
+  placeholder byte-size detector against synthetic structure, not a provider); all STT and TTS
+  measurement, which stays blocked pending reviewed real consented or licensed audio; acoustic
+  rejection of loud broadband bursts; measured start/end endpointing latency and false-start
+  counts, which need a real adapter; and live channels. Synthetic structural F1 is near-perfect
+  by construction because the placeholder's byte-size cue is perfectly separable — a real
+  detector on real audio will not be, so these numbers gate the harness, not a model.
+  The shared `EvaluationRun.gates_pass()` is non-suite-aware and fail-open: it flattens whatever
+  metrics are present and passes as long as one gating metric passes, so an artifact missing
+  every suite metric still "passes" (confirmed by an audit that passed a run with no case metrics
+  and one unrelated metric). Worse, `validate-evaluation`, `run-retrieval`, and
+  `run-graph-retrieval` print `artifact-gates=fail` but still `return 0`, so today they cannot
+  fail a build. `run-speech` deliberately does **not** inherit either behaviour — it adds its own
+  suite-aware `speech_gates_pass` and returns non-zero on failure rather than editing the shared
+  helper — but the HTML report generator (`render-evaluation`) still labels gate status via the
+  shared `gates_pass()`. Repairing `gates_pass()`, the three runners' exit codes, and the report
+  label is a separate reviewed change that the orchestrator will schedule; it was kept out of
+  this PR to avoid expanding the diff and conflicting with other work on the shared machinery.
+- **Rollback:** Revert PR 24. It adds no schema migration, persistent state, committed binary,
+  model, provider, retained buyer data, or external side effect; `run-speech` and
+  `validate-speech-suite` and the synthetic corpus simply disappear, and `speech-cases.json` is
+  unchanged.

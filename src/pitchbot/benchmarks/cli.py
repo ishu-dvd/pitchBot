@@ -27,6 +27,12 @@ from pitchbot.benchmarks.retrieval import (
     run_retrieval_evaluation,
     validate_retrieval_suite,
 )
+from pitchbot.benchmarks.speech import (
+    load_speech_suite,
+    run_speech_evaluation,
+    speech_gates_pass,
+    validate_speech_suite,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,6 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
     graph_retrieval_run.add_argument("--run-id", required=True)
     graph_retrieval_run.add_argument("--git-revision", required=True)
     graph_retrieval_run.add_argument("--force", action="store_true")
+    speech_suite = commands.add_parser("validate-speech-suite")
+    speech_suite.add_argument("path", type=Path)
+    speech_run = commands.add_parser("run-speech")
+    speech_run.add_argument("path", type=Path)
+    speech_run.add_argument("output", type=Path)
+    speech_run.add_argument("--run-id", required=True)
+    speech_run.add_argument("--git-revision", required=True)
+    speech_run.add_argument("--max-rtf", type=float, default=None)
+    speech_run.add_argument("--force", action="store_true")
     commands.add_parser("environment")
     return parser
 
@@ -157,6 +172,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         gates = "pass" if run.gates_pass() else "fail"
         print(f"completed {len(run.cases)} graph retrieval cases; artifact-gates={gates}")
         return 0
+    if args.command == "validate-speech-suite":
+        vad_suite = validate_speech_suite(args.path)
+        print(
+            f"validated {len(vad_suite.cases)} vad cases; "
+            f"verified {len(vad_suite.cases)} synthetic audio hashes"
+        )
+        return 0
+    if args.command == "run-speech":
+        vad_suite = load_speech_suite(args.path)
+        run = run_speech_evaluation(
+            args.path,
+            run_id=args.run_id,
+            git_revision=args.git_revision,
+            max_real_time_factor=args.max_rtf,
+        )
+        write_text_atomically(
+            args.output,
+            f"{run.model_dump_json(indent=2)}\n",
+            overwrite=args.force,
+        )
+        passed = speech_gates_pass(run, vad_suite)
+        gates = "pass" if passed else "fail"
+        print(f"completed {len(run.cases)} vad cases; artifact-gates={gates}")
+        return 0 if passed else 1
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))
         return 0
