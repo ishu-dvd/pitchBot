@@ -126,7 +126,12 @@ function renderRecall(payload) {
   }
   for (const claim of payload.claims) {
     const entry = document.createElement("li");
-    const origin = claim.from_current_session ? "this call" : "earlier call";
+    // The response carries no session identifier, by design. `prior_session_ordinal`
+    // is a position within this response, so two earlier calls stay distinguishable
+    // without the browser ever holding a capability for either of them.
+    const origin = claim.from_current_session
+      ? "this call"
+      : `earlier call ${claim.prior_session_ordinal}`;
     const confirmed = claim.confirmed_by_customer ? ", confirmed" : "";
     entry.textContent = `${claim.rank}. ${claim.key}: ${claim.value} (${claim.status}, ${origin}${confirmed})`;
     recall.appendChild(entry);

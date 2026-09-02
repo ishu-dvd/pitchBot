@@ -635,6 +635,95 @@
   new surface is `ConversationJournal.with_history_bounds` and its keyword arguments, and
   behaviour returns to PR 22's unbounded projection read.
 
+## PR 26: Remove the session capability from lead recall
+
+- **Branch:** `fix/recall-capability-leak`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 27 commit `7ee7a28`.
+- **Scope:** `RecalledClaim` promised, in its own docstring, that identifiers are "deliberately
+  omitted so the browser never receives journal provenance handles", and then declared
+  `session_id: UUID` three lines below it. `DATA_MODEL.md` states that "session UUIDs remain
+  unguessable capabilities". Both were false. Recall exists to surface claims from a lead's
+  *earlier* sessions - that is exactly what `from_current_session` distinguishes - so a
+  recalled claim carried the **earlier** session's UUID. A browser holding session B received
+  session A's capability handle: not an echo of an identifier the client already had, but a
+  capability for a session it was never granted. A test asserted the leak, locking it in.
+  1. **`session_id` is removed from `RecalledClaim` (`simulator/models.py`).** The claim's
+     originating session is now used only as a grouping key inside `_recalled_claims` and
+     never leaves the process, alongside `fact_id` and `source_span_ids`.
+  2. **Earlier calls stay distinguishable without a handle (`RecalledClaim`,
+     `SimulatorService._recalled_claims`).** `from_current_session` is unchanged, and a new
+     `prior_session_ordinal: int | None` numbers a lead's earlier calls from 1, oldest first,
+     within one response. The ordering key is `(observed_at, rank)` - values already in the
+     payload - never the UUID, so the ordinal is a position the client could derive for
+     itself and carries no bits of any session identifier. A model validator requires the
+     ordinal exactly for earlier-session claims, so an unlabelled origin is rejected rather
+     than left for the browser to guess at.
+  3. **The test that asserted the leak is inverted (`tests/test_simulator_recall.py`).**
+     `test_recall_spans_earlier_sessions_for_the_same_lead` now asserts the ordinal instead
+     of `budget.session_id == first.session_id`, and a new regression test asserts on the
+     **serialized** turn response - the surface that actually reaches the browser - that no
+     `session_id`, `fact_id`, or `source_span_ids` key appears and that neither the earlier
+     nor the current session UUID appears in any form, dashed or hex.
+  4. **The browser labels the ordinal (`apps/web/app.js`).** The recall panel already read
+     only `from_current_session` and never consumed `session_id`, so no consumer breaks; it
+     now renders "earlier call 1" / "earlier call 2" rather than a single undifferentiated
+     "earlier call".
+  5. **The docs are made true (`docs/SIMULATOR.md`, `docs/DATA_MODEL.md`).** The
+     `RecalledClaim` docstring is now accurate as written, and `DATA_MODEL.md` states the
+     rule the leak violated: no response may carry a session capability the caller does not
+     already hold, while echoing back the one supplied on the request path grants nothing.
+- **Safety decisions:** The replacement label is an ordinal rather than a shortened, hashed,
+  or otherwise encoded session UUID, because any reversible or brute-forceable function of a
+  128-bit capability is still that capability - a truncation narrows the search space and a
+  hash of a value the server can enumerate is a lookup key, so neither would have been a fix.
+  The ordinal is ordered by `observed_at` and `rank` specifically so that it adds no
+  information the response did not already contain: the only new fact it conveys is which
+  recalled claims share an earlier call, which is a statement about the lead's own history
+  and is the entire purpose of recall, not a way to address a session. Ordinals are scoped to
+  a single response and are not stable across turns, so they cannot accumulate into a
+  cross-turn identifier. The origin validator fails closed in both directions. The claim's
+  session identifier is still read inside `_recalled_claims` to compute
+  `from_current_session`, which is unchanged, so recall's cross-session reach is preserved
+  exactly: removing the leak must not remove the ability to tell an earlier claim apart.
+  Recall's existing guarantees are untouched - it still runs after the durable commit, still
+  cannot influence the reply, facts, evidence, classification, or disposition, is still
+  skipped on safety signals, non-continuing dispositions, and durable replay, and still
+  self-disables per session after `recall_failure_budget` consecutive failures.
+  A full audit of the browser-facing surface accompanied the fix. `TurnResponse.session_id`,
+  `SessionResponse.session_id`, and `DurableHistoryResponse.session_id` echo the session the
+  caller supplied on the request path and grant nothing new. `TurnRecall` carries counts, a
+  duration, and a timeout flag only. `SimulatorEvent.metadata` carries dispositions, phases,
+  temperatures, counts, and booleans at all three construction sites and no identifier.
+  `DurableConversationResult` and its nested fact, revision, evidence, and classification
+  models are `extra="forbid"` over an explicit minimized field list, so `fact_id`,
+  `source_span_ids`, `previous_fact_id`, `replacement_fact_id`, `turn_digest`, and
+  `operation_fingerprint` cannot pass. The audio socket's `ready`, `ack`, `barge-in`, and
+  `utterance` messages carry states, counts, durations, and the caller's own transcript.
+  `pitchbot.conversation` is unchanged: `TemporalFactClaim.session_id` is a legitimate
+  internal projection field and the leak was entirely at the simulator's browser boundary.
+- **Deferred:** `ActionPreviewResult.callback.request` reaches the browser carrying
+  `callback_id` (`sim-{session_id.hex}-{operation_id.hex}`), `idempotency_key`
+  (`simulator:{session_id}:callback:{operation_id}`), and a `lead_id`. These embed the
+  **current** session's UUID, which the caller supplied on the request path, and a `lead_id`
+  that is a deterministic `uuid5` of the caller's own `lead_ref`, so no value is a capability
+  the client was not already granted and none is the defect fixed here; the operation
+  identifier is also the caller's own. They are left untouched deliberately: minting
+  browser-facing action references that do not embed a capability at all is a separate
+  reviewed change on the actions surface, and folding it in here would expand the diff past
+  the leak. Audit finding C1 (raw buyer text on browser-facing timeline events) is unchanged
+  and stays deferred; it is the caller's own turn text returned to the same caller.
+  `TurnRecall.aggregate_version` is retained: it is a journal version counter, not an
+  identifier or a handle, and is already exposed on `DurableHistoryTurn`. `THREAT_MODEL.md`'s
+  recall row remains true as written and was not edited, but a later pass should record the
+  session-capability rule there beside `fact_id`/`source_span_ids`.
+- **Rollback:** Revert PR 26. It adds no schema migration, persistent state, runtime cache,
+  model, provider, retained buyer data, or external side effect. It is, however, a **breaking
+  change to the turn response**, small but real: `TurnResponse.recall.claims[].session_id` is
+  removed and `prior_session_ordinal` is added, so any consumer reading `session_id` off a
+  recalled claim breaks rather than degrading. The only in-repo consumer is the browser demo,
+  which never read it. Reverting restores the field and the leak with it.
+
 ## PR 27: Fail-closed, suite-aware evaluation gates
 
 - **Branch:** `fix/evaluation-gate-fail-closed`

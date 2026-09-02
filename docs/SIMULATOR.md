@@ -64,6 +64,13 @@ watching the demo; it has no authority over the conversation.
   on `TurnResponse.recall`, and only counts are logged. The query is never journaled, and
   `RecalledClaim` omits `fact_id` and `source_span_ids` so the browser never receives
   journal provenance handles.
+- `RecalledClaim` carries no session identifier either. Recall deliberately spans a lead's
+  earlier sessions, so returning the originating session UUID would hand this client a
+  capability for a session it was never granted, rather than echo back the one it holds.
+  `from_current_session` still separates this call from earlier ones, and
+  `prior_session_ordinal` numbers the earlier calls from 1, oldest first, within a single
+  response. That ordinal is derived only from `observed_at` and `rank`, which the response
+  already carries, so it discloses no part of any session UUID and cannot address a session.
 - Superseded claims are excluded by the retriever and filtered again at the simulator
   boundary. Recall is scoped to a single lead, so one lead's claims never reach another.
 

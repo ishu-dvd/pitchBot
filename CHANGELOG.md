@@ -42,6 +42,7 @@ All notable changes to PitchBot are documented here.
 ### Security
 
 - Added CI secret scanning.
+- Removed the originating session UUID from recalled lead claims on the simulator turn response. Recall spans a lead's earlier sessions, so `RecalledClaim.session_id` handed a browser a capability for a session it was never granted, contradicting both the model's own docstring and the documented rule that session UUIDs remain unguessable capabilities. Earlier calls stay distinguishable through a per-response `prior_session_ordinal` derived only from the observation time and rank already in the payload, so no part of any session identifier is disclosed. Breaking change to the turn response: `recall.claims[].session_id` is removed.
 - Excluded environment files, secrets, runtime data, logs, and artifacts from version control.
 - Hardened mock action retries, callback cancellation races, concurrent capacity admission, session cleanup, and paraphrased internal-instruction extraction attempts.
 - Reconciled canceled callback scheduling attempts without false approval or duplicate provider actions.

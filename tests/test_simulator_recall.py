@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -24,6 +26,7 @@ from pitchbot.knowledge import (
 from pitchbot.retrieval import MAX_DEADLINE_MS, MAX_RESULTS, RetrievalDeadlineExceededError
 from pitchbot.simulator.models import (
     CreateSessionRequest,
+    RecalledClaim,
     ResumeSessionRequest,
     SimulatorEventType,
     TurnRequest,
@@ -320,7 +323,128 @@ async def test_recall_spans_earlier_sessions_for_the_same_lead(
     assert result.recall is not None
     budget = next(claim for claim in result.recall.claims if claim.key == "budget_stated")
     assert budget.from_current_session is False
-    assert budget.session_id == first.session_id
+    # The earlier call is still distinguishable, by a position in this response rather
+    # than by a capability for a session this client was never granted.
+    assert budget.prior_session_ordinal == 1
+    assert "80000" in str(budget.value)
+
+
+@pytest.mark.asyncio
+async def test_recall_never_returns_a_session_capability_or_provenance_handle(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    """The serialized payload is the surface the browser sees, so assert on that.
+
+    An earlier session's UUID is a capability this client was never granted, and fact
+    and span identifiers are journal provenance handles, so none of the three may appear
+    anywhere in the recall payload - as a field, nested, or as a value.
+    """
+
+    _, session_factory = migrated_database
+    service = recall_service(session_factory)
+    first = service.create_session(CreateSessionRequest(lead_ref="recall-capability"))
+    await service.process_turn(
+        first.session_id,
+        TurnRequest(text=BUDGET_TURN, language=LanguageCode.ENGLISH),
+    )
+    await service.close_session(first.session_id)
+
+    second = service.create_session(CreateSessionRequest(lead_ref="recall-capability"))
+    result = await service.process_turn(
+        second.session_id,
+        TurnRequest(text=BUDGET_QUERY, language=LanguageCode.ENGLISH),
+    )
+
+    assert result.recall is not None
+    assert result.recall.claims
+    assert any(claim.from_current_session is False for claim in result.recall.claims)
+
+    payload = result.model_dump(mode="json")
+    recall_payload = payload["recall"]
+    for claim in recall_payload["claims"]:
+        assert "session_id" not in claim
+        assert "fact_id" not in claim
+        assert "source_span_ids" not in claim
+    serialized = json.dumps(recall_payload)
+    # The earlier session's UUID must not appear in any form, nor may the current one
+    # be smuggled in through recall rather than the response envelope that carries it.
+    assert str(first.session_id) not in serialized
+    assert first.session_id.hex not in serialized
+    assert str(second.session_id) not in serialized
+    assert second.session_id.hex not in serialized
+    assert "session_id" not in serialized
+    assert "fact_id" not in serialized
+    assert "source_span_ids" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_recall_numbers_earlier_calls_without_naming_them(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    """Two earlier calls stay distinguishable from each other, not just from this one."""
+
+    _, session_factory = migrated_database
+    service = recall_service(session_factory, recall_top_k=MAX_RESULTS)
+    first = service.create_session(CreateSessionRequest(lead_ref="recall-ordinals"))
+    await service.process_turn(
+        first.session_id,
+        TurnRequest(text=BUDGET_TURN, language=LanguageCode.ENGLISH),
+    )
+    await service.close_session(first.session_id)
+
+    second = service.create_session(CreateSessionRequest(lead_ref="recall-ordinals"))
+    await service.process_turn(
+        second.session_id,
+        TurnRequest(
+            text="Our timeline is 3 weeks and our budget is 90000 rupees.",
+            language=LanguageCode.ENGLISH,
+        ),
+    )
+    await service.close_session(second.session_id)
+
+    third = service.create_session(CreateSessionRequest(lead_ref="recall-ordinals"))
+    result = await service.process_turn(
+        third.session_id,
+        TurnRequest(text=BUDGET_QUERY, language=LanguageCode.ENGLISH),
+    )
+
+    assert result.recall is not None
+    prior = [claim for claim in result.recall.claims if not claim.from_current_session]
+    assert prior
+    ordinals = {claim.prior_session_ordinal for claim in prior}
+    assert None not in ordinals
+    # Ordinals are positions in this response: contiguous from 1, never a UUID.
+    assert ordinals == set(range(1, len(ordinals) + 1))
+    assert all(
+        claim.prior_session_ordinal is None
+        for claim in result.recall.claims
+        if claim.from_current_session
+    )
+
+
+def test_a_recalled_claim_must_label_its_origin_exactly_once() -> None:
+    """Fail closed on an unlabelled origin rather than letting the browser guess."""
+
+    def claim(*, from_current_session: bool, ordinal: int | None) -> RecalledClaim:
+        return RecalledClaim(
+            rank=1,
+            key="budget_stated",
+            value="80000",
+            status=FactClaimStatus.CURRENT,
+            language=LanguageCode.ENGLISH,
+            observed_at=datetime(2026, 1, 1, tzinfo=UTC),
+            confirmed_by_customer=False,
+            from_current_session=from_current_session,
+            prior_session_ordinal=ordinal,
+        )
+
+    with pytest.raises(ValidationError, match="prior_session_ordinal"):
+        claim(from_current_session=True, ordinal=1)
+    with pytest.raises(ValidationError, match="prior_session_ordinal"):
+        claim(from_current_session=False, ordinal=None)
+
+    assert claim(from_current_session=True, ordinal=None).prior_session_ordinal is None
+    assert claim(from_current_session=False, ordinal=2).prior_session_ordinal == 2
 
 
 @pytest.mark.asyncio
