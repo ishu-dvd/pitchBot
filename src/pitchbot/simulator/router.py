@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import UUID
+from time import perf_counter
+from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
@@ -13,6 +14,7 @@ from fastapi import (
     status,
 )
 
+from pitchbot.adapters import AudioChunk
 from pitchbot.config import settings
 from pitchbot.conversation import ConversationEngine, ConversationJournal, ConversationJournalError
 from pitchbot.simulator.models import (
@@ -32,7 +34,9 @@ from pitchbot.simulator.service import (
     SessionCapacityError,
     SessionNotFoundError,
     SimulatorService,
+    TurnOperationCapacityError,
 )
+from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
 from pitchbot.storage import (
     SqlAlchemyEventRepository,
     create_database_engine,
@@ -40,6 +44,8 @@ from pitchbot.storage import (
 )
 
 router = APIRouter(prefix="/api/simulator", tags=["simulator"])
+
+PLAYBACK_FINISHED = "playback-finished"
 
 
 def _build_service() -> SimulatorService:
@@ -193,6 +199,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
         return
     try:
         simulator_service.get_session(session_id)
+        pipeline = simulator_service.create_speech_pipeline(session_id)
     except SessionNotFoundError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -202,9 +209,32 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
     if len(media_type) > 100:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
+    sequence = 0
     try:
+        await websocket.send_json(
+            {
+                "type": "ready",
+                "audio_retained": False,
+                "speech_input_available": simulator_service.speech_input_available,
+                "end_silence_ms": pipeline.turn_taking.config.end_silence_ms,
+            }
+        )
         while True:
-            audio = await websocket.receive_bytes()
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            text = message.get("text")
+            if text is not None:
+                # The only accepted control frame is a fixed literal, so no untrusted
+                # payload is ever parsed on the audio socket.
+                if text != PLAYBACK_FINISHED:
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    return
+                pipeline.agent_stopped_speaking()
+                continue
+            audio = message.get("bytes")
+            if audio is None:
+                continue
             if len(audio) > 262_144:
                 await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
                 return
@@ -223,12 +253,114 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
             except RuntimeError:
                 await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
                 return
+
+            frame = await pipeline.push(
+                AudioChunk(
+                    data=audio,
+                    captured_at=datetime.now(UTC),
+                    sequence=sequence,
+                )
+            )
+            sequence += 1
             await websocket.send_json(
                 {
+                    "type": "ack",
                     "acknowledged_sequence": event.sequence,
                     "byte_count": len(audio),
                     "audio_retained": False,
+                    "state": pipeline.turn_taking.state.value,
                 }
             )
+            if frame.barge_in is not None:
+                await websocket.send_json(_barge_in_message(frame.barge_in))
+            if frame.utterance is not None:
+                if not await _handle_utterance(websocket, session_id, pipeline, frame.utterance):
+                    return
     except WebSocketDisconnect:
         return
+
+
+def _barge_in_message(barge_in: BargeIn) -> dict[str, object]:
+    return {
+        "type": "barge-in",
+        "at_sequence": barge_in.at_sequence,
+        "speech_ms": barge_in.speech_ms,
+    }
+
+
+def _utterance_message(result: UtteranceResult) -> dict[str, object]:
+    """Report an utterance using counts and durations only, never the audio."""
+
+    segment = result.segment
+    return {
+        "type": "utterance",
+        "outcome": result.outcome.value,
+        "reason": segment.reason.value,
+        "frame_count": segment.frame_count,
+        "speech_ms": segment.speech_ms,
+        "silence_ms": segment.silence_ms,
+        "dropped_frames": result.dropped_frames,
+        "transcribe_ms": round(result.transcribe_ms, 1),
+    }
+
+
+async def _handle_utterance(
+    websocket: WebSocket,
+    session_id: UUID,
+    pipeline: SpeechTurnPipeline,
+    result: UtteranceResult,
+) -> bool:
+    """Report one utterance. Returns ``False`` when the socket has been closed."""
+
+    message = _utterance_message(result)
+    if not result.is_turn or result.text is None:
+        await websocket.send_json(message)
+        return True
+
+    started = perf_counter()
+    try:
+        turn = await simulator_service.process_turn(
+            session_id,
+            TurnRequest(
+                text=result.text,
+                language=result.language or simulator_service.get_session(session_id).language,
+                operation_id=uuid4(),
+            ),
+        )
+    except SessionNotFoundError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return False
+    except InjectedSimulatorError as error:
+        # The utterance itself was understood, so its outcome stays honest; only the
+        # engine call failed, exactly as it would have for a typed turn.
+        message["error"] = str(error)
+        await websocket.send_json(message)
+        return True
+    except TurnOperationCapacityError:
+        # Distinguishable from a transient engine fault: this session can accept no
+        # further turns at all, spoken or typed, and reconnecting will not help.
+        message["error"] = "turn-capacity-reached"
+        await websocket.send_json(message)
+        return True
+    except (ConversationJournalError, RuntimeError, ValueError) as error:
+        # A spoken turn must fail as visibly and as harmlessly as a typed one.
+        message["error"] = type(error).__name__
+        await websocket.send_json(message)
+        return True
+    engine_ms = (perf_counter() - started) * 1000
+
+    message["transcript"] = result.text
+    message["reply"] = turn.reply
+    message["disposition"] = turn.disposition.value
+    message["safety_signals"] = [signal.value for signal in turn.safety_signals]
+    message["engine_ms"] = round(engine_ms, 1)
+    message["turn_latency_ms"] = round(
+        pipeline.turn_taking.config.end_silence_ms + result.transcribe_ms + engine_ms,
+        1,
+    )
+    # The agent now holds the floor, so further buyer speech is an interruption. The
+    # browser releases it again with a playback-finished control frame, and the machine
+    # reclaims it after `agent_floor_ms` if that frame never arrives.
+    pipeline.agent_started_speaking()
+    await websocket.send_json(message)
+    return True

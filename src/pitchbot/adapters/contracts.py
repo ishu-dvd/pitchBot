@@ -84,6 +84,27 @@ class ResearchResult:
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceActivity:
+    """One detector decision about a single audio frame."""
+
+    is_speech: bool
+    confidence: float
+    sequence: int
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        if self.sequence < 0:
+            raise ValueError("sequence must not be negative")
+
+
+class VoiceActivityDetector(Protocol):
+    """Classifies one frame at a time so endpointing never buffers an utterance."""
+
+    def detect(self, frame: AudioChunk) -> VoiceActivity: ...
+
+
 class SpeechToTextAdapter(Protocol):
     def transcribe(
         self,

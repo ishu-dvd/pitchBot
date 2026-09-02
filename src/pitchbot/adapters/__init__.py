@@ -15,6 +15,8 @@ from pitchbot.adapters.contracts import (
     TelephonyAdapter,
     TextToSpeechAdapter,
     TranscriptChunk,
+    VoiceActivity,
+    VoiceActivityDetector,
     WhatsAppAdapter,
 )
 from pitchbot.adapters.disabled import (
@@ -74,6 +76,8 @@ __all__ = [
     "TelephonyAdapter",
     "TextToSpeechAdapter",
     "TranscriptChunk",
+    "VoiceActivity",
+    "VoiceActivityDetector",
     "TransientAdapterError",
     "WhatsAppAdapter",
     "execute_with_circuit_breaker",

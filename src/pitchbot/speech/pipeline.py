@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from enum import StrEnum
+from time import perf_counter
+
+from pitchbot.adapters import (
+    AdapterError,
+    AudioChunk,
+    Clock,
+    SpeechToTextAdapter,
+    SystemClock,
+    TranscriptChunk,
+    VoiceActivityDetector,
+)
+from pitchbot.domain import LanguageCode
+from pitchbot.speech.models import BargeIn, SpeechFrame, SpeechSegment
+from pitchbot.speech.turn_taking import TurnTaking, TurnTakingConfig
+
+logger = logging.getLogger(__name__)
+
+MAX_UTTERANCE_BYTES = 2 * 1024 * 1024
+MAX_TRANSCRIPT_CHARS = 2_000
+MIN_TRANSCRIPT_CONFIDENCE = 0.3
+
+
+class UtteranceOutcome(StrEnum):
+    """Why an endpointed utterance did or did not become a buyer turn."""
+
+    TRANSCRIBED = "transcribed"
+    NO_SPEECH_RECOGNIZED = "no-speech-recognized"
+    LOW_CONFIDENCE = "low-confidence"
+    OVERSIZE = "oversize"
+    TRANSCRIBER_UNAVAILABLE = "transcriber-unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class UtteranceResult:
+    """A closed utterance and, when it could be understood, what was said."""
+
+    segment: SpeechSegment
+    outcome: UtteranceOutcome
+    text: str | None
+    language: LanguageCode | None
+    confidence: float | None
+    transcribe_ms: float
+    dropped_frames: int
+
+    @property
+    def is_turn(self) -> bool:
+        return self.outcome is UtteranceOutcome.TRANSCRIBED and bool(self.text)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameResult:
+    """What one received audio frame produced."""
+
+    barge_in: BargeIn | None = None
+    utterance: UtteranceResult | None = None
+
+
+class SpeechTurnPipeline:
+    """Turns a stream of audio frames into endpointed, transcribed buyer utterances.
+
+    Audio is held only for the utterance currently being spoken, is capped by
+    ``max_utterance_bytes``, and is released as soon as transcription returns or the cap
+    is hit. Nothing is written to disk, journaled, or echoed back to the browser, so the
+    server's standing ``audio_retained: false`` promise continues to hold.
+
+    The pipeline never invents buyer speech. If the transcriber returns nothing, returns
+    text below ``min_confidence``, fails, or the utterance exceeds its cap, the utterance
+    is reported with the reason and no turn is created.
+
+    ``transcriber`` may be ``None`` while no speech model has been benchmarked and selected.
+    Endpointing and barge-in still work, every utterance is reported as
+    ``transcriber-unavailable``, and no audio is buffered at all, because buffering audio
+    that can never be transcribed would be pure cost and pure retention risk.
+    """
+
+    def __init__(
+        self,
+        *,
+        detector: VoiceActivityDetector,
+        transcriber: SpeechToTextAdapter | None,
+        language: LanguageCode,
+        config: TurnTakingConfig | None = None,
+        clock: Clock | None = None,
+        frame_duration_ms: int = 250,
+        max_utterance_bytes: int = MAX_UTTERANCE_BYTES,
+        min_confidence: float = MIN_TRANSCRIPT_CONFIDENCE,
+    ) -> None:
+        if not 1 <= max_utterance_bytes <= MAX_UTTERANCE_BYTES:
+            raise ValueError(f"max_utterance_bytes must be between 1 and {MAX_UTTERANCE_BYTES}")
+        if not 0.0 <= min_confidence <= 1.0:
+            raise ValueError("min_confidence must be between 0 and 1")
+        self._detector = detector
+        self._transcriber = transcriber
+        self._language = language
+        self._turn_taking = TurnTaking(config)
+        self._clock = clock or SystemClock()
+        self._frame_duration_ms = frame_duration_ms
+        self._max_utterance_bytes = max_utterance_bytes
+        self._min_confidence = min_confidence
+        self._buffer: list[AudioChunk] = []
+        self._buffered_bytes = 0
+        self._oversize = False
+        self._dropped_frames = 0
+
+    @property
+    def turn_taking(self) -> TurnTaking:
+        return self._turn_taking
+
+    @property
+    def can_transcribe(self) -> bool:
+        return self._transcriber is not None
+
+    def agent_started_speaking(self) -> None:
+        self._turn_taking.agent_started_speaking()
+        self._release_audio()
+
+    def agent_stopped_speaking(self) -> None:
+        self._turn_taking.agent_stopped_speaking()
+
+    async def push(self, chunk: AudioChunk) -> FrameResult:
+        """Classify one frame and, when the buyer has finished, transcribe the utterance."""
+
+        try:
+            activity = self._detector.detect(chunk)
+        except AdapterError:
+            # A detector failure must not end the call. Treating the frame as silence
+            # keeps an open utterance closing on its normal silence path instead of
+            # holding the floor forever.
+            logger.warning("Voice activity detection failed for a frame", exc_info=True)
+            self._dropped_frames += 1
+            return FrameResult()
+
+        frame = SpeechFrame(
+            sequence=chunk.sequence,
+            byte_count=len(chunk.data),
+            duration_ms=self._frame_duration_ms,
+            is_speech=activity.is_speech,
+            captured_at=chunk.captured_at,
+        )
+        decision = self._turn_taking.observe(frame)
+        if decision.discarded:
+            # The machine abandoned an utterance without producing a segment, so its
+            # audio must be dropped now rather than prepended to whatever is said next.
+            self._release_audio()
+        if decision.capture:
+            # Only an open or provisional utterance is buffered. Silence before the buyer
+            # starts is never sent to the transcriber, which keeps both the work and the
+            # latency proportional to what was actually said.
+            self._buffer_audio(chunk)
+        if decision.barge_in is not None:
+            return FrameResult(barge_in=decision.barge_in)
+        if decision.segment is None:
+            return FrameResult()
+        return FrameResult(utterance=await self._transcribe(decision.segment))
+
+    async def stop(self) -> UtteranceResult | None:
+        segment = self._turn_taking.stop()
+        if segment is None:
+            self._release_audio()
+            return None
+        return await self._transcribe(segment)
+
+    def _buffer_audio(self, chunk: AudioChunk) -> None:
+        if self._oversize or self._transcriber is None:
+            return
+        if self._buffered_bytes + len(chunk.data) > self._max_utterance_bytes:
+            # Fail closed: drop the whole utterance rather than transcribe a truncated
+            # one and attribute a half sentence to the buyer.
+            self._release_audio()
+            self._oversize = True
+            return
+        self._buffer.append(chunk)
+        self._buffered_bytes += len(chunk.data)
+
+    def _release_audio(self) -> None:
+        """Drop every buffered byte and clear the oversize latch with it.
+
+        The latch is scoped to one utterance. Leaving it set across a release would let
+        one abandoned utterance permanently fail every later one.
+        """
+
+        self._buffer = []
+        self._buffered_bytes = 0
+        self._oversize = False
+
+    async def _transcribe(self, segment: SpeechSegment) -> UtteranceResult:
+        dropped = self._dropped_frames
+        self._dropped_frames = 0
+        if self._transcriber is None:
+            self._release_audio()
+            return self._result(segment, UtteranceOutcome.TRANSCRIBER_UNAVAILABLE, 0.0, dropped)
+        if self._oversize:
+            self._release_audio()
+            return self._result(segment, UtteranceOutcome.OVERSIZE, 0.0, dropped)
+
+        chunks = self._buffer
+        self._release_audio()
+        started = perf_counter()
+        try:
+            best = await self._best_transcript(chunks)
+        except (AdapterError, RuntimeError, ValueError):
+            # Transcription is best effort. A failure loses one utterance; it must never
+            # drop the call or fabricate what the buyer said.
+            logger.warning("Transcription failed for an utterance", exc_info=True)
+            elapsed = (perf_counter() - started) * 1000
+            return self._result(
+                segment,
+                UtteranceOutcome.TRANSCRIBER_UNAVAILABLE,
+                elapsed,
+                dropped,
+            )
+        elapsed = (perf_counter() - started) * 1000
+        if best is None or not best.text.strip():
+            return self._result(segment, UtteranceOutcome.NO_SPEECH_RECOGNIZED, elapsed, dropped)
+        if best.confidence < self._min_confidence:
+            return self._result(segment, UtteranceOutcome.LOW_CONFIDENCE, elapsed, dropped)
+        return UtteranceResult(
+            segment=segment,
+            outcome=UtteranceOutcome.TRANSCRIBED,
+            text=best.text.strip()[:MAX_TRANSCRIPT_CHARS],
+            language=best.language,
+            confidence=best.confidence,
+            transcribe_ms=elapsed,
+            dropped_frames=dropped,
+        )
+
+    async def _best_transcript(self, chunks: list[AudioChunk]) -> TranscriptChunk | None:
+        """Prefer the last final transcript, falling back to the last partial."""
+
+        if self._transcriber is None:  # pragma: no cover - guarded by _transcribe
+            return None
+        final: TranscriptChunk | None = None
+        partial: TranscriptChunk | None = None
+        async for transcript in self._transcriber.transcribe(_as_stream(chunks)):
+            if transcript.is_final:
+                final = transcript
+            else:
+                partial = transcript
+        return final or partial
+
+    def _result(
+        self,
+        segment: SpeechSegment,
+        outcome: UtteranceOutcome,
+        transcribe_ms: float,
+        dropped_frames: int,
+    ) -> UtteranceResult:
+        return UtteranceResult(
+            segment=segment,
+            outcome=outcome,
+            text=None,
+            language=None,
+            confidence=None,
+            transcribe_ms=transcribe_ms,
+            dropped_frames=dropped_frames,
+        )
+
+
+async def _as_stream(chunks: list[AudioChunk]) -> AsyncIterator[AudioChunk]:
+    for chunk in chunks:
+        yield chunk
+
+
+__all__ = [
+    "FrameResult",
+    "SpeechTurnPipeline",
+    "UtteranceOutcome",
+    "UtteranceResult",
+]

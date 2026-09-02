@@ -11,10 +11,80 @@ const interruptButton = document.getElementById("interrupt");
 const startAudioButton = document.getElementById("start-audio");
 const stopAudioButton = document.getElementById("stop-audio");
 const diagnostics = document.getElementById("audio-diagnostics");
+const speech = document.getElementById("speech-status");
+
+let speechGeneration = 0;
+
+function speak(text, onFinished) {
+  speechGeneration += 1;
+  const generation = speechGeneration;
+  // Only the newest utterance may report that playback finished. Cancelling an older
+  // one fires its end handler, which would otherwise hand the floor back while the
+  // reply that replaced it is still being spoken.
+  const finish = () => {
+    if (generation === speechGeneration && onFinished) onFinished();
+  };
+  if (!("speechSynthesis" in window)) {
+    finish();
+    return;
+  }
+  speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  // The server holds the floor until playback ends, so this must fire on every exit
+  // path or the buyer would be treated as interrupting for the rest of the call.
+  utterance.onend = finish;
+  utterance.onerror = finish;
+  speechSynthesis.speak(utterance);
+}
+
+function stopSpeaking() {
+  speechGeneration += 1;
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+}
+
+const OUTCOME_LABELS = {
+  "no-speech-recognized": "No speech was recognised in that utterance",
+  "low-confidence": "Transcript confidence was too low to use",
+  "oversize": "Utterance exceeded its size cap and was discarded",
+  "transcriber-unavailable": "Transcription was unavailable for this utterance",
+};
+
+function onSpeechMessage(payload) {
+  if (payload.type === "ready") {
+    speech.textContent = payload.speech_input_available
+      ? `Listening. Endpoint after ${payload.end_silence_ms} ms of silence.`
+      : `Listening for turn-taking only; no transcriber is configured. Endpoint after ${payload.end_silence_ms} ms of silence.`;
+    return;
+  }
+  if (payload.type === "ack") {
+    speech.textContent = `Turn-taking state: ${payload.state}`;
+    return;
+  }
+  if (payload.type === "barge-in") {
+    // The buyer talked over the agent, so stop playback immediately. The server has
+    // already handed the floor back, so no playback-finished frame is sent.
+    stopSpeaking();
+    speech.textContent = `Interrupted after ${payload.speech_ms} ms of speech`;
+    return;
+  }
+  if (payload.type !== "utterance") return;
+  if (payload.reply) {
+    speech.textContent = `Heard: ${payload.transcript} (${payload.turn_latency_ms} ms)`;
+    speak(payload.reply, () => audio.sendControl("playback-finished"));
+    if (sessionId) {
+      api(`/api/simulator/sessions/${sessionId}`)
+        .then((body) => renderEvents(body.events))
+        .catch(() => {});
+    }
+    return;
+  }
+  const label = OUTCOME_LABELS[payload.outcome] || payload.outcome;
+  speech.textContent = `${label} (${payload.speech_ms} ms speech, ${payload.frame_count} frames)`;
+}
 
 const audio = new AudioTransport(({ queueDepth, dropped }) => {
   diagnostics.textContent = `Queue: ${queueDepth}, dropped: ${dropped}`;
-});
+}, onSpeechMessage);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -126,16 +196,13 @@ sendButton.addEventListener("click", async () => {
     preview.textContent = body.preview ? JSON.stringify(body.preview, null, 2) : "None";
     renderRecall(body.recall);
     renderEvents(body.events);
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-      speechSynthesis.speak(new SpeechSynthesisUtterance(body.reply));
-    }
+    speak(body.reply);
   } catch (error) { setError(error); }
 });
 
 interruptButton.addEventListener("click", async () => {
   if (!sessionId) return;
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  stopSpeaking();
   try {
     const body = await api(`/api/simulator/sessions/${sessionId}/interrupt`, { method: "POST" });
     renderEvents(body.events);

@@ -119,10 +119,19 @@ Targets must be encoded in a reviewed suite manifest and measured on labeled tar
 |---|---:|---|
 | Retrieval | 50 ms target, 200 ms hard deadline | lexical, hybrid, cold/warm cache |
 | Interruption | speech playback stops within 200 ms p95 | English, Hindi, Hinglish, noise |
+| Endpointing | 700 ms end-of-speech silence, 20 s maximum utterance | English, Hindi, Hinglish, noise, crosstalk |
+| Barge-in detection | 300 ms of contiguous buyer speech | noise, crosstalk, overlap |
+| Endpoint to reply | 1000 ms target for endpoint + transcription + engine | language, hardware, warm/cold |
 | First response audio | no claim until provider benchmark | language, hardware, warm/cold |
 | Professional speech | at least 4/5 blinded rubric | clarity, brevity, tone, pronunciation |
 | Safety handling | 100% expected disposition on critical cases | abuse, opt-out, injection, extraction |
 | Grounding | 100% citations for externally sourced claims | competitor, product, deck content |
+
+The endpointing, barge-in, and endpoint-to-reply rows are the configured budgets of the
+implemented turn-taking machine. The simulator reports `transcribe_ms`, `engine_ms`, and a
+derived `turn_latency_ms` per utterance, but with no speech provider selected these are
+instrumentation of the implemented path, not measured results, and must not be published
+as benchmark claims.
 
 Latency never overrides opt-out, policy, citation, or durable-action requirements. A retrieval timeout degrades to current conversation state rather than delaying speech.
 

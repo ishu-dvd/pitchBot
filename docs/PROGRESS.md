@@ -250,3 +250,66 @@
 - **Rollback:** Revert PR 20. It adds no schema migration, persistent index, model,
   provider, retained buyer data, or external side effect; the only API change is an
   additive, nullable `recall` field on the turn response.
+
+## PR 21: Streaming speech turn-taking in the simulator
+
+- **Branch:** `feat/speech-turn-taking`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 20 commit `f0e7862`.
+- **Scope:** Close the largest customer-experience gap on the audio path. The browser already
+  spoke replies, but spoken input was dead: audio bytes were counted and discarded, no
+  voice-activity contract existed, and nothing endpointed or transcribed.
+  1. `VoiceActivityDetector` / `VoiceActivity` adapter contract plus a deterministic
+     `MockVoiceActivityDetector` so endpointing can be developed before a model is licensed.
+  2. `pitchbot.speech`: a `TurnTaking` state machine (`IDLE` / `LISTENING` /
+     `AGENT_SPEAKING`) with silence endpointing, a maximum-utterance cut-off, and contiguous
+     barge-in detection, and a `SpeechTurnPipeline` that transcribes a closed utterance.
+  3. `SimulatorService.create_speech_pipeline` gives every audio connection its own pipeline;
+     the rewritten `audio_socket` emits `ready` / `ack` / `barge-in` / `utterance` messages
+     and submits a transcribed utterance through the ordinary `process_turn` path.
+  4. The browser reports turn-taking state and outcomes, cancels playback on barge-in, and
+     speaks replies from both typed and spoken turns.
+- **Safety decisions:** A transcribed utterance is submitted through the same `process_turn`
+  path as a typed turn, so there is no speech-only entry point that could skip disclosure,
+  safety, consent, or policy checks; injection, extraction, and opt-out detection apply
+  unchanged. The pipeline never invents buyer speech: an empty transcript, a confidence below
+  the floor, an oversized utterance, or a transcriber failure yields a machine-readable
+  outcome with no text and no turn. **No speech-to-text provider is configured by default**,
+  honouring ADR-0002 and ADR-0004; the pipeline accepts `transcriber=None`, reports every
+  utterance as `transcriber-unavailable`, and buffers no audio at all in that mode, and the
+  `ready` message carries `speech_input_available` so the UI states the limitation rather
+  than implying working dictation. Audio is buffered only for the utterance in flight, capped
+  at 2 MiB, released as soon as transcription returns, and never written to disk, journaled,
+  placed in a timeline event, or echoed back, so `audio_retained=false` stays accurate. A
+  voice-activity failure counts the frame as silence, so a detector fault closes an open
+  utterance normally instead of holding the floor; a transcription failure loses one utterance,
+  never the call. Barge-in requires contiguous speech, so isolated noise cannot interrupt the
+  agent, and an oversized utterance is dropped whole rather than transcribed truncated. The
+  only accepted text frame on the socket is the literal `playback-finished`, so no untrusted
+  payload is parsed there, and any other text frame closes the connection.
+- **Self-review fixes:** The adversarial review found that abandoned utterances - a
+  sub-threshold noise burst, a broken-off interruption, or a too-short max-duration cut-off -
+  left their audio buffered. That both breached the retention statement and, by never
+  decrementing the byte counter, latched the oversize cap so every later utterance failed.
+  `TurnTakingDecision` now carries explicit `capture` and `discarded` flags, and releasing
+  the buffer clears the oversize latch with it. The review also found that the interrupting
+  run was counted but its frames were not, so the first words of every interruption were
+  dropped; the run is now accumulated from its first frame. `agent_stopped_speaking` had no
+  production caller, so the floor was held for the rest of the call: the browser now sends a
+  `playback-finished` control frame and the machine reclaims the floor after
+  `agent_floor_ms` regardless. `_handle_utterance` now reports whether it closed the socket
+  so the read loop cannot poll a closed connection, the `ready` send moved inside the
+  handler's `try`, turn-operation exhaustion raises a distinguishable
+  `TurnOperationCapacityError` surfaced as `turn-capacity-reached`, and a browser label that
+  described recognised-but-empty speech as a missing configuration was corrected.
+- **Performance:** Silence before the buyer starts speaking is never buffered, so transcription
+  work and latency stay proportional to what was actually said. The state machine keeps counters
+  only and never accumulates frames. The socket reports `transcribe_ms`, `engine_ms`, and a
+  derived `turn_latency_ms`; these instrument the implemented path and are explicitly not a
+  measured end-to-end latency claim, because no speech model has been benchmarked.
+- **Deferred:** Selecting and benchmarking a real voice-activity model and speech-to-text
+  provider, streaming TTS, recorded audio eval cases (all 12 in `speech-cases.json` remain
+  `planned`), a `run-speech` command, adaptive endpointing, and live channels.
+- **Rollback:** Revert PR 21. It adds no schema migration, persistent state, model, provider,
+  retained buyer data, or external side effect; the audio socket returns to acknowledging and
+  discarding frames.
