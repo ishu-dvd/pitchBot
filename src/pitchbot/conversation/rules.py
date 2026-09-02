@@ -33,7 +33,8 @@ _OPT_OUT_PHRASES = (
     "call mat",
     "phone mat",
     "dobara call mat",
-    "बंद करो",
+    # A bare "बंद करो" is deliberately absent: it is the ordinary Hindi way to ask for
+    # a demo, a video or a screen share to be closed, and opt-out is unrecoverable.
     "कॉल मत",
     "फोन मत",
     "दोबारा कॉल मत",
@@ -133,6 +134,16 @@ class _IntentTemplate:
     ordered: bool = False
     reject_first_person: bool = False
     reject_preceding: frozenset[str] = frozenset()
+    # A window carrying one of these tokens is refused outright, which expresses
+    # "this reading is contradicted by something else in the same clause".
+    reject_within: frozenset[str] = frozenset()
+    # Group indices that must match the token immediately after the previous group's
+    # match. Adjacency distinguishes a possessive binding to the noun it owns
+    # ("your rules") from one separated by a business scope ("your pricing policy").
+    adjacent: tuple[int, ...] = ()
+    # Tokens that may not follow the final group's match, so a trailing scope
+    # ("your policies on returns") cannot be read as a request for our own policies.
+    reject_trailing: frozenset[str] = frozenset()
     window: int = _TEMPLATE_WINDOW
 
 
@@ -178,6 +189,65 @@ _CONTACT_NOUNS = frozenset(
         "फोन",
     }
 )
+# Written channels are tracked separately from voice ones: compliance treats a
+# do-not-message request as an immediate opt-out, but the wording carries no
+# recurrence marker ("stop messaging me"), so these need their own templates.
+_MESSAGE_CHANNELS = frozenset(
+    {
+        "message",
+        "messages",
+        "messaging",
+        "msg",
+        "msgs",
+        "text",
+        "texts",
+        "texting",
+        "sms",
+        "whatsapp",
+        "wa",
+        "email",
+        "emails",
+        "mail",
+        "mails",
+        "dm",
+        "dms",
+        "sandesh",
+        "mesej",
+        "मैसेज",
+        "संदेश",
+        "सन्देश",
+        "व्हाट्सऐप",
+        "व्हाट्सएप",
+        "वॉट्सऐप",
+        "ईमेल",
+        "एसएमएस",
+        "टेक्स्ट",
+    }
+)
+# Only first-person object pronouns count as the addressee. A possessive would let
+# "don't text my number to anyone" -- a privacy instruction, not an opt-out -- close
+# the conversation for good.
+_MESSAGE_RECIPIENTS = frozenset(
+    {"me", "us", "mujhe", "hume", "humein", "hamein", "मुझे", "हमें", "हमको", "मुझको"}
+)
+# A window that also fixes a time boundary is a contact-window preference
+# ("don't message me before 9am"), which must stay recoverable.
+_TIME_QUALIFIERS = frozenset(
+    {
+        "before",
+        "after",
+        "until",
+        "till",
+        "during",
+        "between",
+        "pehle",
+        "baad",
+        "tak",
+        "पहले",
+        "बाद",
+        "तक",
+    }
+)
 _RECURRENCE_MARKERS = frozenset(
     {
         "again",
@@ -220,6 +290,7 @@ _TIME_DEFERRALS = frozenset(
 _CONTACT_RECORDS = frozenset(
     {"number", "numbers", "list", "lists", "database", "records", "contacts", "नंबर", "सूची"}
 )
+_OPT_OUT_TRIGGERS = _TERMINATION_VERBS | _NEGATORS
 _OPT_OUT_TEMPLATES = (
     # "stop calling me again", "band karo dobara call".
     _IntentTemplate(
@@ -240,6 +311,25 @@ _OPT_OUT_TEMPLATES = (
         (_REMOVAL_VERBS, _SELF_REFERENCE, _CONTACT_RECORDS),
         max_gaps=(2, 4),
         ordered=True,
+    ),
+    # "stop messaging me", "mujhe WhatsApp mat bhejna", "मुझे संदेश मत भेजो". Hindi and
+    # Hinglish are verb-final, so the negator trails the channel and order cannot be
+    # required; the addressee pronoun carries the "directed at me" reading that a
+    # recurrence marker carries for voice channels.
+    _IntentTemplate(
+        (_OPT_OUT_TRIGGERS, _MESSAGE_CHANNELS, _MESSAGE_RECIPIENTS),
+        max_gaps=(3, 2),
+        reject_preceding=_INVITATION_MARKERS,
+        reject_within=_TIME_QUALIFIERS,
+    ),
+    # "do not message me again", "dobara message mat karo". The negator-to-channel gap
+    # stays at two so a positive report ("I will never miss your message again") cannot
+    # reach across its verb, exactly as the voice template already does.
+    _IntentTemplate(
+        (_OPT_OUT_TRIGGERS, _MESSAGE_CHANNELS, _RECURRENCE_MARKERS),
+        max_gaps=(2, 4),
+        reject_preceding=_INVITATION_MARKERS,
+        reject_within=_TIME_QUALIFIERS,
     ),
 )
 
@@ -294,9 +384,20 @@ _INTERNAL_QUALIFIERS = frozenset(
         "yours",
         "apne",
         "apna",
+        "apni",
+        "aapke",
+        "aapka",
+        "aapki",
         "tumhare",
+        "tumhara",
+        "अपने",
+        "अपना",
+        "अपनी",
         "तुम्हारे",
+        "तुम्हारा",
         "आपके",
+        "आपका",
+        "आपकी",
         "system",
         "internal",
         "hidden",
@@ -309,10 +410,87 @@ _INTERNAL_QUALIFIERS = frozenset(
     }
 )
 _INTERROGATIVES = frozenset({"what", "which", "whats", "what's", "kya", "क्या"})
-_SECOND_PERSON_POSSESSIVE = frozenset({"your", "yours", "apne", "apna", "tumhare", "तुम्हारे", "आपके"})
+_SECOND_PERSON_POSSESSIVE = frozenset(
+    {
+        "your",
+        "yours",
+        "apne",
+        "apna",
+        "apni",
+        "aapke",
+        "aapka",
+        "aapki",
+        "tumhare",
+        "tumhara",
+        "अपने",
+        "अपना",
+        "अपनी",
+        "तुम्हारे",
+        "तुम्हारा",
+        "आपके",
+        "आपका",
+        "आपकी",
+    }
+)
+# Rules and policies name our operating instructions in one breath and a product's
+# business terms in the next, so they cannot join the unconditional artefact set:
+# "show your policies on returns" is an ordinary buyer question. They are matched
+# only when the possessive binds directly to them and no scope trails them.
+_GOVERNANCE_ARTEFACTS = frozenset(
+    {
+        "rule",
+        "rules",
+        "rulebook",
+        "policy",
+        "policies",
+        "guideline",
+        "guidelines",
+        "niyam",
+        "niyamo",
+        "niti",
+        "नियम",
+        "नियमों",
+        "नीति",
+        "नीतियां",
+        "नीतियों",
+    }
+)
+# A preposition after the artefact introduces the business area it governs, which
+# turns an operating-rules probe back into a product question.
+_SCOPING_PREPOSITIONS = frozenset(
+    {
+        "on",
+        "for",
+        "about",
+        "regarding",
+        "concerning",
+        "around",
+        "ke",
+        "ki",
+        "ka",
+        "के",
+        "की",
+        "का",
+        "पर",
+        "बारे",
+        "लिए",
+    }
+)
 _INTERNAL_INFO_TEMPLATES = (
     _IntentTemplate((_DISCLOSURE_VERBS, _INTERNAL_QUALIFIERS, _INTERNAL_ARTEFACTS)),
     _IntentTemplate((_INTERROGATIVES, _SECOND_PERSON_POSSESSIVE, _INTERNAL_ARTEFACTS)),
+    # "tell me your rules", "apne rules batao", "आपके नियम बताओ".
+    _IntentTemplate(
+        (_DISCLOSURE_VERBS, _INTERNAL_QUALIFIERS, _GOVERNANCE_ARTEFACTS),
+        adjacent=(2,),
+        reject_trailing=_SCOPING_PREPOSITIONS,
+    ),
+    # "what are your rules exactly?", "आपके नियम क्या हैं".
+    _IntentTemplate(
+        (_INTERROGATIVES, _SECOND_PERSON_POSSESSIVE, _GOVERNANCE_ARTEFACTS),
+        adjacent=(2,),
+        reject_trailing=_SCOPING_PREPOSITIONS,
+    ),
 )
 
 _OVERRIDE_VERBS = frozenset(
@@ -414,6 +592,95 @@ _PROMPT_INJECTION_TEMPLATES = (
     ),
 )
 
+# Homoglyph folding is scoped to code points that render as a Latin letter and that
+# an attacker can substitute into an English or romanised safety term. Devanagari and
+# ASCII Hinglish have no entry here, so a Hindi turn is returned byte-for-byte and the
+# fold cannot manufacture a signal out of ordinary Indic text. Digits are excluded on
+# purpose: leet folding would let a price or a phone number decay into a safety token.
+_CONFUSABLE_FOLD = str.maketrans(
+    {
+        "\u0430": "a",  # CYRILLIC SMALL LETTER A
+        "\u0435": "e",  # CYRILLIC SMALL LETTER IE
+        "\u043a": "k",  # CYRILLIC SMALL LETTER KA
+        "\u043e": "o",  # CYRILLIC SMALL LETTER O
+        "\u0440": "p",  # CYRILLIC SMALL LETTER ER
+        "\u0441": "c",  # CYRILLIC SMALL LETTER ES
+        "\u0443": "y",  # CYRILLIC SMALL LETTER U
+        "\u0445": "x",  # CYRILLIC SMALL LETTER HA
+        "\u0455": "s",  # CYRILLIC SMALL LETTER DZE
+        "\u0456": "i",  # CYRILLIC SMALL LETTER BYELORUSSIAN-UKRAINIAN I
+        "\u0458": "j",  # CYRILLIC SMALL LETTER JE
+        "\u04bb": "h",  # CYRILLIC SMALL LETTER SHHA
+        "\u04cf": "l",  # CYRILLIC SMALL LETTER PALOCHKA
+        "\u0501": "d",  # CYRILLIC SMALL LETTER KOMI DE
+        "\u051b": "q",  # CYRILLIC SMALL LETTER QA
+        "\u051d": "w",  # CYRILLIC SMALL LETTER WE
+        "\u03b1": "a",  # GREEK SMALL LETTER ALPHA
+        "\u03b5": "e",  # GREEK SMALL LETTER EPSILON
+        "\u03b9": "i",  # GREEK SMALL LETTER IOTA
+        "\u03ba": "k",  # GREEK SMALL LETTER KAPPA
+        "\u03bd": "v",  # GREEK SMALL LETTER NU
+        "\u03bf": "o",  # GREEK SMALL LETTER OMICRON
+        "\u03c1": "p",  # GREEK SMALL LETTER RHO
+        "\u03c7": "x",  # GREEK SMALL LETTER CHI
+        "\u0585": "o",  # ARMENIAN SMALL LETTER OH
+        "\u0578": "n",  # ARMENIAN SMALL LETTER VO
+        "\u0131": "i",  # LATIN SMALL LETTER DOTLESS I
+        "\u0269": "i",  # LATIN SMALL LETTER IOTA
+        "\u0261": "g",  # LATIN SMALL LETTER SCRIPT G
+    }
+)
+
+# Fragments this short are not ordinary words, so a run of them that spells a safety
+# token is deliberate splitting rather than prose.
+_FRAGMENT_LENGTH = 2
+_MERGE_PART_LENGTH = 4
+_MERGE_SPAN = 3
+_MERGE_MINIMUM = 4
+# Deriving the vocabulary from the templates keeps the two in step: a group extended
+# later is repaired by the same pass without a second list to maintain.
+_SAFETY_VOCABULARY = frozenset(
+    token
+    for templates in (_OPT_OUT_TEMPLATES, _INTERNAL_INFO_TEMPLATES, _PROMPT_INJECTION_TEMPLATES)
+    for template in templates
+    for group in template.groups
+    for token in group
+)
+# Ordinary short words are never treated as split fragments, so Hindi particles such
+# as "ka bhi" cannot be welded into a safety token by accident.
+_MERGE_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "at",
+        "be",
+        "bhi",
+        "by",
+        "do",
+        "he",
+        "hi",
+        "in",
+        "is",
+        "it",
+        "ka",
+        "ke",
+        "ki",
+        "ko",
+        "me",
+        "my",
+        "na",
+        "of",
+        "on",
+        "or",
+        "se",
+        "so",
+        "to",
+        "up",
+        "us",
+        "we",
+    }
+)
+
 _BUSINESS_TYPES: dict[str, tuple[str, ...]] = {
     "apparel": ("apparel", "clothing", "clothes", "garment", "कपड़े", "kapde"),
     "toys": ("toy", "toys", "खिलौने", "khilone"),
@@ -479,33 +746,39 @@ def normalize_text(text: str) -> str:
 
 
 def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
-    normalized = normalize_text(text)
+    normalized = _fold_for_safety(normalize_text(text))
     compact = normalized.replace(" ", "")
     variants = _template_token_variants(text)
+    # One token set per reading, shared by every template. Rebuilding it inside the
+    # matcher made a long adversarial turn scale with the number of templates.
+    present = tuple(frozenset(tokens) for tokens in variants)
     signals: list[SafetySignal] = []
     # Opt-out is terminal and unrecoverable, so it matches whole tokens, and the
     # space-stripped form only when the turn is visibly separator-obfuscated: a plain
     # turn must not opt out because "call mat" happens to sit inside "call matlab".
     # A separate clause asking to be contacted later contradicts the opt-out reading
     # ("do not call now, call me again after five"), and the safe resolution of a
-    # contradictory turn is to keep the conversation recoverable.
-    if (
-        _contains_phrase(normalized, _OPT_OUT_PHRASES)
-        or (
-            _is_separator_obfuscated(normalized)
-            and _contains_any_form(normalized, compact, _OPT_OUT_PHRASES)
-        )
-        or _matches_any_template(variants, _OPT_OUT_TEMPLATES)
-    ) and not any(_requests_recontact(tokens) for tokens in variants):
+    # contradictory turn is to keep the conversation recoverable. The contradiction is
+    # judged per tokenization, because a reading that had to repair a split word
+    # ("st op calling me again") is the only one whose clauses are meaningful.
+    literal_opt_out = _contains_phrase(normalized, _OPT_OUT_PHRASES) or (
+        _is_separator_obfuscated(normalized)
+        and _contains_any_form(normalized, compact, _OPT_OUT_PHRASES)
+    )
+    if any(
+        (literal_opt_out or _matches_any_template((tokens,), (seen,), _OPT_OUT_TEMPLATES))
+        and not _requests_recontact(tokens)
+        for tokens, seen in zip(variants, present, strict=True)
+    ):
         signals.append(SafetySignal.OPT_OUT)
     if _contains_any_form(normalized, compact, _ABUSE_TERMS):
         signals.append(SafetySignal.ABUSE)
     if _contains_any_form(normalized, compact, _INTERNAL_INFO_PHRASES) or _matches_any_template(
-        variants, _INTERNAL_INFO_TEMPLATES
+        variants, present, _INTERNAL_INFO_TEMPLATES
     ):
         signals.append(SafetySignal.INTERNAL_INFO)
     if _contains_any_form(normalized, compact, _PROMPT_INJECTION_PHRASES) or _matches_any_template(
-        variants, _PROMPT_INJECTION_TEMPLATES
+        variants, present, _PROMPT_INJECTION_TEMPLATES
     ):
         signals.append(SafetySignal.PROMPT_INJECTION)
     return tuple(signals)
@@ -643,16 +916,107 @@ def _template_token_variants(text: str) -> tuple[list[str], ...]:
 
     Dropping zero-width format characters defeats intra-word obfuscation
     (``ig<ZWSP>nore``) but welds neighbouring words into one token; treating them as
-    separators does the reverse. Matching both readings closes each hole.
+    separators does the reverse. Matching both readings closes each hole. A repaired
+    reading is added when the turn splits a safety word across whitespace, which the
+    single-character obfuscation check cannot see.
     """
 
     dropped = _template_tokens(text, format_replacement="")
-    spaced = _template_tokens(text, format_replacement=" ")
-    return (dropped,) if dropped == spaced else (dropped, spaced)
+    variants = [dropped]
+    if _has_format_characters(text):
+        spaced = _template_tokens(text, format_replacement=" ")
+        if spaced != dropped:
+            variants.append(spaced)
+    for tokens in tuple(variants):
+        merged = _merge_split_tokens(tokens)
+        if merged is not None and merged not in variants:
+            variants.append(merged)
+    return tuple(variants)
+
+
+def _has_format_characters(text: str) -> bool:
+    """Whether the two readings can differ at all. ASCII carries no format character."""
+
+    if text.isascii():
+        return False
+    return any(unicodedata.category(character) == "Cf" for character in text)
+
+
+def _merge_split_tokens(tokens: list[str]) -> list[str] | None:
+    """Rejoin a safety word an attacker split across spaces (``st op calling``).
+
+    Returns ``None`` when nothing was rejoined, so the caller skips a duplicate pass.
+    """
+
+    # No usable fragment means no merge is reachable, which keeps ordinary prose on a
+    # single cheap scan instead of the windowed one below.
+    if not any(
+        len(token) <= _FRAGMENT_LENGTH and token not in _MERGE_STOPWORDS for token in tokens
+    ):
+        return None
+    merged: list[str] = []
+    index = 0
+    repaired = False
+    while index < len(tokens):
+        joined = _merge_span(tokens, index)
+        if joined is None:
+            merged.append(tokens[index])
+            index += 1
+            continue
+        word, span = joined
+        merged.append(word)
+        index += span
+        repaired = True
+    return merged if repaired else None
+
+
+def _merge_span(tokens: list[str], index: int) -> tuple[str, int] | None:
+    for span in range(_MERGE_SPAN, 1, -1):
+        if index + span > len(tokens):
+            continue
+        parts = tokens[index : index + span]
+        if any(
+            len(part) > _MERGE_PART_LENGTH or part in _MERGE_STOPWORDS or part == _TEMPLATE_BARRIER
+            for part in parts
+        ):
+            continue
+        if all(len(part) > _FRAGMENT_LENGTH for part in parts):
+            continue
+        word = "".join(parts)
+        if len(word) >= _MERGE_MINIMUM and word in _SAFETY_VOCABULARY:
+            return word, span
+    return None
+
+
+def _fold_for_safety(casefolded: str) -> str:
+    """Fold Latin homoglyphs and drop marks stacked on a Latin base, for matching only.
+
+    Both passes are deliberately narrow. Only code points that render as a Latin letter
+    are folded, and a combining mark is dropped only when it sits on an ASCII base --
+    ``İ`` casefolds to ``i`` plus U+0307, which would otherwise split ``ignore``.
+    Devanagari matras are combining marks too, and stripping those would destroy every
+    Hindi term the matcher depends on, so the ASCII-base condition is load-bearing.
+    """
+
+    if casefolded.isascii():
+        return casefolded
+    folded = casefolded.translate(_CONFUSABLE_FOLD)
+    if not any(unicodedata.combining(character) for character in folded):
+        return folded
+    kept: list[str] = []
+    base = ""
+    for character in folded:
+        if unicodedata.combining(character):
+            if not ("a" <= base <= "z"):
+                kept.append(character)
+            continue
+        base = character
+        kept.append(character)
+    return "".join(kept)
 
 
 def _template_tokens(text: str, *, format_replacement: str) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", text).casefold()
+    normalized = _fold_for_safety(unicodedata.normalize("NFKC", text).casefold())
     pieces: list[str] = []
     for character in normalized:
         if unicodedata.category(character) == "Cf":
@@ -693,7 +1057,9 @@ def _requests_recontact(tokens: list[str]) -> bool:
             for token in clause
         ):
             continue
-        if any(token in _CONTACT_NOUNS for token in clause) and any(
+        # Written channels stand the conversation down for the same reason voice ones
+        # do: "don't message me now, message me tomorrow" must stay recoverable.
+        if any(token in _CONTACT_NOUNS or token in _MESSAGE_CHANNELS for token in clause) and any(
             token in _RECURRENCE_MARKERS or token in _TIME_DEFERRALS for token in clause
         ):
             return True
@@ -712,16 +1078,22 @@ def _clauses(tokens: list[str]) -> list[list[str]]:
 
 def _matches_any_template(
     variants: tuple[list[str], ...],
+    present: tuple[frozenset[str], ...],
     templates: Iterable[_IntentTemplate],
 ) -> bool:
-    return any(_matches_template(tokens, template) for template in templates for tokens in variants)
+    return any(
+        _matches_template(tokens, seen, template)
+        for template in templates
+        for tokens, seen in zip(variants, present, strict=True)
+    )
 
 
-def _matches_template(tokens: list[str], template: _IntentTemplate) -> bool:
+def _matches_template(
+    tokens: list[str], present: frozenset[str], template: _IntentTemplate
+) -> bool:
     groups = template.groups
     if len(tokens) < len(groups):
         return False
-    present = set(tokens)
     if any(present.isdisjoint(group) for group in groups):
         return False
     # Any match's lowest index belongs to the first group when ordered, and to some
@@ -739,6 +1111,8 @@ def _matches_template(tokens: list[str], template: _IntentTemplate) -> bool:
         )
         if barrier is not None:
             end = barrier
+        if any(tokens[index] in template.reject_within for index in range(start, end)):
+            continue
         if template.reject_first_person and _reports_own_words(tokens, start, end):
             continue
         if _assign_groups(tokens, start, end, template, 0, ()):
@@ -769,6 +1143,10 @@ def _assign_groups(
     chosen: tuple[int, ...],
 ) -> bool:
     if group_index == len(template.groups):
+        if template.reject_trailing and chosen:
+            after = chosen[-1] + 1
+            if after < len(tokens) and tokens[after] in template.reject_trailing:
+                return False
         return True
     group = template.groups[group_index]
     lower = start
@@ -776,6 +1154,8 @@ def _assign_groups(
         lower = chosen[-1] + 1
     for index in range(lower, end):
         if index in chosen or tokens[index] not in group:
+            continue
+        if group_index in template.adjacent and chosen and index != chosen[-1] + 1:
             continue
         if chosen and template.max_gaps is not None:
             gap = index - chosen[-1]

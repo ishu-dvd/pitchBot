@@ -32,6 +32,10 @@ All notable changes to PitchBot are documented here.
 - Non-authoritative lead recall on simulator turns: budgeted graph-aware retrieval of the lead's own prior claims, run after the durable commit, skipped on safety signals, non-continuing dispositions, and durable replay, run off the event loop with a per-session failure budget, and rendered read-only in the browser demo.
 - Streaming speech turn-taking: a `VoiceActivityDetector` contract and deterministic mock, an endpointing/barge-in state machine, and a transcription pipeline wired into the simulator audio WebSocket so a spoken utterance becomes an ordinary turn. No speech-to-text provider is selected, so utterances report `transcriber-unavailable` by default; audio is buffered only for the utterance in flight, byte-capped, and never persisted.
 
+### Fixed
+
+- Multilingual safety parity in the conversation matcher: do-not-message opt-outs ("stop messaging me", `mujhe WhatsApp mat bhejna`, `मुझे संदेश मत भेजो`) are now detected as immediate opt-outs in English, Hindi, and Hinglish; requests for our own operating rules or policies are detected while scoped product questions ("your policies on returns") stay clean; a bare Devanagari `बंद करो` no longer terminally opts a buyer out of a demo they only asked to close; and Latin homoglyphs, marks stacked on a Latin base, and safety words split across spaces no longer bypass detection.
+
 ### Security
 
 - Added CI secret scanning.
