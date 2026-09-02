@@ -313,3 +313,69 @@
 - **Rollback:** Revert PR 21. It adds no schema migration, persistent state, model, provider,
   retained buyer data, or external side effect; the audio socket returns to acknowledging and
   discarding frames.
+
+## PR 22: Speech-path liveness and durable-turn responsiveness fixes
+
+- **Branch:** `fix/speech-reliability`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 21 commit `5e572c1`.
+- **Scope:** Close four defects found by an adversarial concurrency and state-machine audit of
+  PRs 19-21. Two of them refute claims PR 21 makes about itself, and the other two are
+  liveness and reclamation gaps on the durable turn path.
+  1. **Detector faults no longer mute the buyer (`SpeechTurnPipeline.push`).** The handler
+     dropped the frame and returned before `TurnTaking.observe`, so trailing silence never
+     advanced: an already-open utterance could reach neither its `end_silence_ms` endpoint nor
+     its `max_utterance_ms` cut-off, and the machine stayed `LISTENING` for the rest of the
+     connection. The frame is now synthesised with `is_speech=False` and observed, which is
+     what the inline comment and PR 21 both already claimed. The `except` widened to
+     `(AdapterError, RuntimeError, ValueError)` to match `_transcribe`.
+  2. **Abandoned barge-in audio is released (`SpeechTurnPipeline.agent_stopped_speaking`).** A
+     sub-threshold interruption abandoned by the `playback-finished` control frame rather than
+     by a later audio frame never produced a `discarded` decision, so `TurnTaking` reset its
+     counters while the pipeline kept the bytes. The next, unrelated utterance was transcribed
+     with the stale frame prepended.
+  3. **The durable journal runs off the event loop (`SimulatorService.process_turn`).**
+     `prepare_turn` and `commit_turn` are synchronous and were awaited nowhere; the fail-closed
+     full replay ran on the loop that also serves the audio socket, so its cost was charged to
+     another buyer's endpointing and barge-in latency. Both now use `asyncio.to_thread`, the
+     pattern this file already applies to the advisory recall read.
+  4. **A failed session discard stays retryable (`SimulatorService._discard_session`).** A
+     cleanup failure was logged and swallowed, and the session removed from `_sessions`
+     regardless, stranding its callback and deck records with no `DELETE` path back to them.
+     It now calls `_abort_teardown`, mirroring `close_session`.
+- **Safety decisions:** Fix 2 releases the buffer only when the machine was actually in
+  `AGENT_SPEAKING`. The unconditional one-line form is unsafe: `playback-finished` is
+  client-controlled and may arrive while the buyer already holds the floor, where the machine
+  treats it as a no-op; releasing there would drop bytes the machine still counts and
+  transcribe a truncated utterance as a whole turn, breaking the same fail-closed rule
+  `_buffer_audio` states. In `AGENT_SPEAKING` the buffer can only hold a provisional
+  interruption run that `_release_floor` has just discarded, so releasing is correct there and
+  only there. Fix 1 leaves the frame counted in `dropped_frames` and reported on the utterance,
+  so a degraded detector stays visible rather than silently producing worse endpointing. Fix 3
+  changes no exception classification: `asyncio.to_thread` re-raises in the caller, and
+  `session.lock` is held across both calls, so no new interleaving is introduced for a session.
+  Fix 4 keeps the narrow `(AdapterError, RuntimeError, ValueError)` catch and still swallows,
+  so the caller's original `ConcurrencyConflictError` continues to propagate unmasked and the
+  client's status is unchanged; the republished session stays `closing=True` and therefore
+  keeps rejecting turns while it waits to be torn down again. As in `close_session`, the
+  conversation is not closed on the failure path, because the retry owns that.
+- **Test decisions:** The two existing tests for fixes 1 and 2 were vacuous for the invariants
+  they named and are strengthened rather than replaced.
+  `test_a_failing_detector_does_not_end_the_call` used a detector that raised on every call, so
+  the machine never left `IDLE` and its closing assertion was trivially true; the dangerous
+  case now has its own test with a detector that classifies three frames and then fails, and
+  asserts the utterance still endpoints on silence, is attributed the right frames, and
+  releases its buffer. `test_a_playback_finished_frame_hands_the_floor_back_to_the_buyer`
+  drove the real socket path but asserted only the reported state; it now completes the second
+  utterance and asserts on `MockSpeechToTextAdapter.received_audio`, so attribution is checked
+  rather than liveness alone. Fix 3 is asserted deterministically - the journal records the
+  thread each call ran on, and neither may be the loop's - rather than by a wall-clock
+  responsiveness threshold, which would be flaky. Every new test was run against the unfixed
+  source and observed to fail first.
+- **Deferred:** The remaining audit findings are out of scope for this PR and unfixed: the
+  per-connection pipeline registry and per-session socket limit, per-connection detector and
+  transcriber instances, `stop()` from `AGENT_SPEAKING` leaving the agent floor held, the
+  unreclaimed `_failed_cancellations` bookkeeping in `CallbackService`, and the unlocked
+  `get_session` language read on the audio path.
+- **Rollback:** Revert PR 22. It adds no schema migration, persistent state, model, provider,
+  retained buyer data, external side effect, or API change; behaviour returns to PR 21's.

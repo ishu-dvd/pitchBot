@@ -13,10 +13,11 @@ from pitchbot.adapters import (
     SpeechToTextAdapter,
     SystemClock,
     TranscriptChunk,
+    VoiceActivity,
     VoiceActivityDetector,
 )
 from pitchbot.domain import LanguageCode
-from pitchbot.speech.models import BargeIn, SpeechFrame, SpeechSegment
+from pitchbot.speech.models import BargeIn, SpeechFrame, SpeechSegment, TurnTakingState
 from pitchbot.speech.turn_taking import TurnTaking, TurnTakingConfig
 
 logger = logging.getLogger(__name__)
@@ -121,26 +122,35 @@ class SpeechTurnPipeline:
         self._release_audio()
 
     def agent_stopped_speaking(self) -> None:
+        # Only a floor that was actually held abandons buffered audio: anything captured
+        # during AGENT_SPEAKING belongs to an interruption run that yielding the floor
+        # discards. Outside that state the machine treats this as a no-op, so releasing
+        # would amputate the buyer's open utterance and transcribe half a sentence.
+        yielding_floor = self._turn_taking.state is TurnTakingState.AGENT_SPEAKING
         self._turn_taking.agent_stopped_speaking()
+        if yielding_floor:
+            self._release_audio()
 
     async def push(self, chunk: AudioChunk) -> FrameResult:
         """Classify one frame and, when the buyer has finished, transcribe the utterance."""
 
+        activity: VoiceActivity | None
         try:
             activity = self._detector.detect(chunk)
-        except AdapterError:
-            # A detector failure must not end the call. Treating the frame as silence
-            # keeps an open utterance closing on its normal silence path instead of
-            # holding the floor forever.
+        except (AdapterError, RuntimeError, ValueError):
+            # A detector failure must not end the call, and the frame must still reach the
+            # machine. Dropping it would stall trailing silence, so an already-open
+            # utterance would never endpoint and the buyer would hold the floor for the
+            # rest of the call. Counting it as silence closes on the normal silence path.
             logger.warning("Voice activity detection failed for a frame", exc_info=True)
             self._dropped_frames += 1
-            return FrameResult()
+            activity = None
 
         frame = SpeechFrame(
             sequence=chunk.sequence,
             byte_count=len(chunk.data),
             duration_ms=self._frame_duration_ms,
-            is_speech=activity.is_speech,
+            is_speech=activity is not None and activity.is_speech,
             captured_at=chunk.captured_at,
         )
         decision = self._turn_taking.observe(frame)
