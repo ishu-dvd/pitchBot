@@ -23,6 +23,8 @@ It currently supports:
 - Default-off durable accepted-turn journaling, restart recovery, and bounded minimized replay.
 - Non-authoritative lead recall: when durable journaling is enabled, a continuing turn also
   returns the lead's own highest-ranked prior claims from the temporal knowledge graph.
+- Streaming turn-taking on the audio socket: per-frame voice-activity classification,
+  silence endpointing, barge-in detection, and per-stage latency reporting.
 
 ## Lead recall
 
@@ -60,10 +62,65 @@ watching the demo; it has no authority over the conversation.
 - Superseded claims are excluded by the retriever and filtered again at the simulator
   boundary. Recall is scoped to a single lead, so one lead's claims never reach another.
 
+## Spoken turn-taking
+
+Each audio WebSocket connection owns one `SpeechTurnPipeline`. Every received frame is
+classified by a `VoiceActivityDetector`, fed to a `TurnTaking` state machine
+(`IDLE` / `LISTENING` / `AGENT_SPEAKING`), and acknowledged with the resulting state.
+
+- An utterance opens after `min_speech_ms` (default 200 ms) of speech and closes after
+  `end_silence_ms` (default 700 ms) of silence, at `max_utterance_ms` (default 20 s), or
+  on an explicit stop. A short noise burst that never reaches `min_speech_ms` opens no
+  utterance at all.
+- While the agent holds the floor, `barge_in_speech_ms` (default 300 ms) of *contiguous*
+  buyer speech transfers the floor and emits a `barge-in` message; the browser cancels
+  playback immediately. A single silent frame resets the counter and discards the audio
+  of the broken-off run, so isolated noise does not interrupt the agent and cannot be
+  carried into a later utterance. The interrupting run is accumulated from its *first*
+  frame, not from the frame that crossed the threshold, so the buyer's opening words are
+  not amputated.
+- The agent's floor is released when the browser sends the literal `playback-finished`
+  control frame. It is the only accepted control frame, so no untrusted payload is
+  parsed on the audio socket, and any other text frame closes the connection. If that
+  frame is never delivered, the machine reclaims the floor after `agent_floor_ms`
+  (default 30 s) of observed frames, so one lost notification cannot mute the buyer for
+  the rest of the call.
+- A closed utterance is transcribed, and a transcribed utterance is processed through the
+  same `process_turn` path as a typed turn. Spoken input therefore inherits every
+  disclosure, safety, consent, and policy control unchanged; there is no speech-only
+  shortcut into the conversation engine.
+- The pipeline never invents buyer speech. An empty transcript, a confidence below
+  `min_confidence` (default 0.3), an oversized utterance, or a transcriber failure is
+  reported as `no-speech-recognized`, `low-confidence`, `oversize`, or
+  `transcriber-unavailable` with no text and no turn.
+- A voice-activity failure counts the frame as silence and increments `dropped_frames`,
+  so a detector fault closes an open utterance normally instead of holding the floor.
+- **No speech-to-text provider is configured by default.** Endpointing and barge-in work,
+  but utterances report `transcriber-unavailable` until a benchmarked provider is
+  selected (ADR-0002/ADR-0004). The `ready` message carries `speech_input_available` so
+  the browser states this plainly rather than implying a working dictation feature. With
+  no transcriber configured, no audio is buffered at all.
+- `turn_latency_ms` is reported as `end_silence_ms + transcribe_ms + engine_ms`. It is a
+  server-side accounting of the endpoint-to-reply path only. It excludes capture,
+  network, and playback time and is not a measured end-to-end latency claim.
+
+### Socket messages
+
+| Message | Meaning |
+|---|---|
+| `ready` | Connection accepted; carries `audio_retained`, `speech_input_available`, `end_silence_ms` |
+| `ack` | One frame observed; carries sequence, byte count, `audio_retained`, turn-taking state |
+| `barge-in` | The buyer took the floor while the agent was speaking |
+| `utterance` | An utterance closed; carries the outcome, counts, durations, and any resulting turn |
+
 ## Not implemented
 
 - No PSTN, WhatsApp call, live WhatsApp message, durable callback, or binary artifact action.
-- No speech-to-text or local TTS provider integration.
+- No speech-to-text or local TTS provider integration. Turn-taking is wired end to end,
+  but the default transcriber is an explicit unavailable stub.
+- No acoustic voice-activity model. `MockVoiceActivityDetector` is a byte-size heuristic
+  that works only because Opus is variable-bitrate; it is a placeholder for developing
+  and testing endpointing, not a measured detector.
 - No model-backed/free-form extraction; the current conversation rules are deterministic and intentionally bounded.
 - No use of recalled claims in reply generation, classification, or action policy; recall is display-only.
 - No PPTX renderer; sample decks are dependency-free structured previews from fixed templates.
@@ -85,7 +142,16 @@ Durable conversation turns remain disabled unless `PITCHBOT_ENABLE_DURABLE_HISTO
 
 ## Audio privacy and limits
 
-- The server discards each audio byte message after reading it.
+- Audio is held in memory only for the utterance currently being spoken, capped at 2 MiB,
+  and released as soon as transcription returns or the cap is hit. Silence before the
+  buyer starts speaking is never buffered, and an utterance the machine abandons - a
+  sub-threshold noise burst or a broken-off interruption - releases its audio at once
+  rather than carrying it into whatever is said next.
+- Audio is never written to disk, journaled, included in a timeline event, or echoed
+  back to the browser, so `audio_retained=false` continues to describe persistence
+  accurately.
+- An utterance that exceeds the cap is dropped whole rather than transcribed truncated,
+  so half a sentence is never attributed to the buyer.
 - Only byte count, reported media type, sequence, and `audio_retained=false` metadata enter the bounded in-memory timeline.
 - Each message is limited to 256 KiB.
 - The browser queue holds at most 24 pending chunks and drops the oldest chunk under pressure to preserve recency.

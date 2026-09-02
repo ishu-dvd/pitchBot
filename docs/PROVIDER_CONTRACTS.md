@@ -19,6 +19,19 @@ The adapter boundary covers:
 
 Resource identity and operation idempotency are separate. For example, a scheduler job key identifies the job while an idempotency key identifies one schedule/cancel attempt. This permits a canceled job to be rescheduled with a new operation key. A permanently rejected cancellation enters `cancellation-required`: it remains non-dispatchable and capacity-counted, the failed operation key cannot be reused, and reconciliation requires a new key.
 
+## Voice activity
+
+`VoiceActivityDetector.detect(AudioChunk) -> VoiceActivity` is synchronous and per frame.
+It reports `is_speech`, a bounded `confidence`, and the frame `sequence`. It carries no
+audio and no transcript, so a detector cannot become a text channel. Implementations must
+be cheap enough to run on every frame on the real-time path; a failure is raised as an
+`AdapterError` and treated by callers as silence rather than as a call-ending error.
+
+`MockVoiceActivityDetector` classifies by encoded frame size, optionally following a
+scripted decision list. It exists so endpointing and barge-in can be built and tested
+before any acoustic model is licensed and benchmarked, and it must never appear in a
+benchmark claim.
+
 ## Streaming
 
 STT consumes an asynchronous stream of timestamped, sequenced audio chunks and produces an asynchronous transcript stream. TTS produces sequenced audio chunks. Provider implementations must preserve order, cancellation, and bounded buffering; those transport concerns are implemented in later milestones.

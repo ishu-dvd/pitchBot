@@ -184,7 +184,12 @@ The interfaces, disabled external adapters, deterministic mocks, retry/timeout h
 - Fail closed for policy/provider uncertainty; degrade to text or operator review where safe.
 - Do not advertise real-time latency until measured on labeled target hardware.
 
-### Planned real-time critical path
+The simulator implements the capture/VAD/endpointing stages and reports per-stage
+durations for endpointing, transcription, and the conversation engine. No speech model
+is selected, so those durations are an accounting of the implemented path, not a
+measured end-to-end latency claim.
+
+### Real-time critical path
 
 ```mermaid
 sequenceDiagram
@@ -214,6 +219,8 @@ sequenceDiagram
     Voice-->>Buyer: First audio, then stream
     Turn-->>Telemetry: Stage timings and bounded labels
 ```
+
+The audio, turn, policy, and journal legs of this path are implemented in the simulator; streaming TTS and the local telemetry sink remain planned, and the browser uses native speech synthesis for playback.
 
 Retrieval is optional on the speech path. Its initial design target is 50 ms with a 200 ms hard deadline; timeout falls back to current conversation state and must not delay first audio. These are design budgets, not measured claims. Safety policy and durable acceptance cannot be bypassed to meet latency.
 

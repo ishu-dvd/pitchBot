@@ -3,8 +3,9 @@ const MAX_BUFFERED_BYTES = 512 * 1024;
 const MAX_CHUNK_BYTES = 256 * 1024;
 
 export class AudioTransport {
-  constructor(onDiagnostics) {
+  constructor(onDiagnostics, onMessage) {
     this.onDiagnostics = onDiagnostics;
+    this.onMessage = onMessage || (() => {});
     this.queue = [];
     this.dropped = 0;
     this.socket = null;
@@ -25,7 +26,16 @@ export class AudioTransport {
       this.reconnectAttempts = 0;
       this.flush();
     };
-    this.socket.onmessage = () => this.flush();
+    this.socket.onmessage = (event) => {
+      let payload = null;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (error) {
+        payload = null;
+      }
+      if (payload) this.onMessage(payload);
+      this.flush();
+    };
     this.socket.onclose = (event) => {
       if ([1000, 1008, 1009].includes(event.code)) this.stopped = true;
       if (!this.stopped && this.reconnectAttempts < 5) {
@@ -87,6 +97,11 @@ export class AudioTransport {
     this.queue.push(blob);
     this.report();
     this.flush();
+  }
+
+  sendControl(text) {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    this.socket.send(text);
   }
 
   flush() {

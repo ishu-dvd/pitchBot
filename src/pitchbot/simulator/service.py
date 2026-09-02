@@ -17,11 +17,18 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
-from pitchbot.adapters import AdapterError, Clock, SystemClock
+from pitchbot.adapters import (
+    AdapterError,
+    Clock,
+    SpeechToTextAdapter,
+    SystemClock,
+    VoiceActivityDetector,
+)
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
     MockSchedulerAdapter,
     MockTelephonyAdapter,
+    MockVoiceActivityDetector,
     MockWhatsAppAdapter,
 )
 from pitchbot.conversation import (
@@ -63,6 +70,7 @@ from pitchbot.simulator.models import (
     TurnResponse,
 )
 from pitchbot.simulator.scenarios import SCENARIOS
+from pitchbot.speech import SpeechTurnPipeline, TurnTakingConfig
 from pitchbot.storage import AggregateClosedError, ConcurrencyConflictError
 
 logger = logging.getLogger(__name__)
@@ -97,6 +105,10 @@ class DurableActionReplayUnavailableError(RuntimeError):
 
 class SessionAdmissionConflictError(RuntimeError):
     pass
+
+
+class TurnOperationCapacityError(RuntimeError):
+    """A session has retained as many distinct turn operations as it may."""
 
 
 class SessionCapacityError(RuntimeError):
@@ -151,6 +163,9 @@ class SimulatorService:
         recall_top_k: int = 3,
         recall_deadline_ms: int = 150,
         recall_failure_budget: int = 3,
+        speech_detector: VoiceActivityDetector | None = None,
+        speech_transcriber: SpeechToTextAdapter | None = None,
+        turn_taking: TurnTakingConfig | None = None,
     ) -> None:
         if (
             min(
@@ -199,6 +214,12 @@ class SimulatorService:
         self._recall_top_k = recall_top_k
         self._recall_deadline_ms = recall_deadline_ms
         self._recall_failure_budget = recall_failure_budget
+        # A detector is always available so endpointing and barge-in work. A
+        # transcriber is not: no speech model has been benchmarked or selected yet,
+        # so spoken turns stay unavailable rather than inventing buyer words.
+        self._speech_detector = speech_detector or MockVoiceActivityDetector()
+        self._speech_transcriber = speech_transcriber
+        self._turn_taking = turn_taking or TurnTakingConfig()
         # Recall reads the same journal the turn was just committed to, so it is only
         # available when durable history is enabled and lead identifiers are stable.
         if knowledge_retriever is None and conversation_journal is not None:
@@ -282,7 +303,7 @@ class SimulatorService:
                     raise InjectedSimulatorError(operation.injected_failure)
             else:
                 if len(session.turn_operations) >= self._max_turn_operations_per_session:
-                    raise RuntimeError("Simulator turn operation capacity reached")
+                    raise TurnOperationCapacityError("Simulator turn operation capacity reached")
                 operation = _TurnOperation(fingerprint=fingerprint, started_at=self._clock.now())
                 session.turn_operations[request.operation_id] = operation
             if self._journal is None:
@@ -516,6 +537,24 @@ class SimulatorService:
             response = self._turn_response(session, outcome, preview=preview, recall=recall)
             operation.response = response
             return response
+
+    @property
+    def speech_input_available(self) -> bool:
+        """True when an endpointed utterance can actually become a buyer turn."""
+
+        return self._speech_transcriber is not None
+
+    def create_speech_pipeline(self, session_id: UUID) -> SpeechTurnPipeline:
+        """Build a per-connection pipeline. Sessions never share turn-taking state."""
+
+        session = self._get_session(session_id)
+        return SpeechTurnPipeline(
+            detector=self._speech_detector,
+            transcriber=self._speech_transcriber,
+            language=session.language,
+            config=self._turn_taking,
+            clock=self._clock,
+        )
 
     async def interrupt(self, session_id: UUID) -> SessionResponse:
         session = self._get_session(session_id)

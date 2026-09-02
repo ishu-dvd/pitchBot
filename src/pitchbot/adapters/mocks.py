@@ -22,6 +22,8 @@ from pitchbot.adapters.contracts import (
     TelephonyAdapter,
     TextToSpeechAdapter,
     TranscriptChunk,
+    VoiceActivity,
+    VoiceActivityDetector,
     WhatsAppAdapter,
 )
 from pitchbot.adapters.errors import (
@@ -51,6 +53,47 @@ class RecordedAction:
     operation: str
     idempotency_key: str
     payload: Mapping[str, JsonValue]
+
+
+class MockVoiceActivityDetector(VoiceActivityDetector):
+    """Deterministic stand-in for an acoustic detector.
+
+    Opus is variable bitrate, so a silent 20 ms frame encodes far smaller than a spoken
+    one. Classifying on encoded frame size is therefore a defensible placeholder, but it
+    is a byte-size heuristic and not an acoustic model: it is here so endpointing,
+    barge-in, and their bounds can be developed and tested before a real detector is
+    benchmarked and selected.
+    """
+
+    def __init__(
+        self,
+        *,
+        speech_threshold_bytes: int = 512,
+        decisions: list[bool] | None = None,
+        error: AdapterError | None = None,
+    ) -> None:
+        if speech_threshold_bytes < 1:
+            raise ValueError("speech_threshold_bytes must be positive")
+        self._speech_threshold_bytes = speech_threshold_bytes
+        self._decisions = deque(decisions or [])
+        self._error = error
+        self.frames_seen = 0
+
+    def detect(self, frame: AudioChunk) -> VoiceActivity:
+        if self._error is not None:
+            raise self._error
+        self.frames_seen += 1
+        if self._decisions:
+            is_speech = self._decisions.popleft()
+            confidence = 1.0
+        else:
+            is_speech = len(frame.data) >= self._speech_threshold_bytes
+            confidence = 0.5
+        return VoiceActivity(
+            is_speech=is_speech,
+            confidence=confidence,
+            sequence=frame.sequence,
+        )
 
 
 class MockSpeechToTextAdapter(SpeechToTextAdapter):
