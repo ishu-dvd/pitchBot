@@ -31,7 +31,7 @@ Hard corpus invariants — document capacity, unique fact identifiers, and singl
 
 When graph projection runs out of budget it raises a knowledge-graph deadline error carrying the source aggregate version, so the retriever can still recheck privacy state and version and answer with an honest timeout instead of a partially projected graph.
 
-The synchronous journal load happens before the first cooperative checkpoint and cannot be preempted mid-database call, so 200 ms remains a cooperative deadline rather than a hard real-time guarantee. Runtime speech integration must add an asynchronous wall-clock timeout before placing retrieval on its optional 200 ms path.
+The synchronous journal load is now checked against its own cooperative budget while it decodes events and replays sessions, and refuses a history over its configured event bound before reading a row. A repository round trip and a single event decode still cannot be interrupted once started, so 200 ms remains a cooperative deadline rather than a hard real-time guarantee. A cancellable storage read is the prerequisite for a genuine hard timeout; a caller-side timeout that abandons the worker is not one, because the worker keeps running.
 
 ## Safety and privacy
 
@@ -44,8 +44,9 @@ The synchronous journal load happens before the first cooperative checkpoint and
 - The simulator's lead recall consumes retrieval strictly as display context. It runs after
   the durable commit and off the event loop, is skipped on safety signals, non-continuing
   dispositions, and durable replay, is capped by explicit `recall_top_k`/`recall_deadline_ms`
-  budgets, self-disables per session after repeated budget expiry because the journal load is
-  not preemptible, degrades to no recall on any failure, appends no timeline event, and strips
+  budgets and a `max_history_events_per_lead` bound on the history it will project at all,
+  self-disables per session after repeated budget expiry rather than retrying a read it will
+  not finish, degrades to no recall on any failure, appends no timeline event, and strips
   `fact_id` and `source_span_ids` before the response leaves the process. See
   `docs/SIMULATOR.md`.
 
