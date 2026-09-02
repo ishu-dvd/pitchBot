@@ -452,3 +452,68 @@
 - **Rollback:** Revert PR 23. It adds no schema migration, persistent index, API surface, model,
   provider, retained buyer data, or external side effect; `normalize_text()` is unchanged, so
   turn digests and business extraction are byte-identical either way.
+
+## PR 22: Synthetic voice-activity structural benchmark
+
+- **Branch:** `bench/synthetic-vad-corpus`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 21 commit `5e572c1`.
+- **Note:** A sibling branch also numbers its entry "PR 22"; the orchestrator may need to
+  renumber one on merge. This is the synthetic-VAD-corpus change.
+- **Scope:** ADR-0004 blocks selecting any speech provider until a reproducible measured
+  result passes, and PR 21 deferred a `run-speech` command and left all 12 `speech-cases.json`
+  items `planned`, so the repository could not produce a single measured speech number. VAD is
+  the one speech dimension measurable now, because it needs speech-vs-silence *structure*, not
+  intelligible speech. This change makes that one measurement possible and honest, and nothing
+  more.
+  1. A deterministic, dependency-free synthetic audio generator (`pitchbot.benchmarks.audio`)
+     emits, from a seed, a real 16-bit PCM WAV plus byte frames with exact ground-truth
+     speech/silence intervals. It is bit-for-bit reproducible across runs and platforms
+     (platform-independent Mersenne-Twister samples, little-endian packing), and covers clear
+     speech, leading/trailing silence, inter-word pauses, background noise, crosstalk, barge-in
+     onset, and short noise bursts that must not be classified as speech. Frame byte length
+     rises with energy so the shipped byte-size `MockVoiceActivityDetector` can be meaningfully
+     scored against it.
+  2. A VAD-scoped corpus, `evals/corpora/vad-cases.json`, commits per-case seeds, segment
+     structure, and the `audio_sha256` of the WAV each seed produces. Audio is regenerated and
+     hash-verified at run time rather than committed as a binary, keeping the repository
+     binary-free while making the ADR-0004 hash gate real and enforced. It carries `en`/`hi`/
+     `mixed` language slices, the six existing verticals, and eight structural conditions;
+     adding a slice is a pure data edit. `speech-cases.json` is untouched — all 12 STT/TTS items
+     stay `planned`.
+  3. A `run-speech` command (`pitchbot.benchmarks.speech`), shaped after `run-retrieval` /
+     `run-graph-retrieval`, runs the corpus through the existing `VoiceActivityDetector`
+     contract, computes precision/recall/F1 with `vad_precision_recall_f1`, reports per-slice
+     F1 (language, condition, vertical) plus overall mean/min, measures `real_time_factor` and
+     peak allocation, and emits an `EvaluationRun` conforming to the existing schema. `--max-rtf`
+     turns real-time factor into a gate so a candidate too heavy for a no-accelerator 8-core box
+     is rejected.
+  4. `validate-speech-suite` is wired into CI beside the four existing `validate-*` manifest
+     gates; it regenerates every case and verifies the committed hash, so the corpus cannot
+     silently rot. The check is fast and fully offline.
+- **Safety decisions:** STT and TTS remain blocked; no corpus item is flipped to `available`,
+  no `wer`/`cer`/naturalness metric can be emitted, and the artifact's `suite_id`/`corpus_id`
+  and metric names mark it unambiguously as a synthetic-VAD *structural* result, not a model
+  selection and not an STT/TTS measurement. A hash mismatch is a hard integrity failure that
+  raises rather than degrading to a soft gate miss, mirroring how retrieval refuses to downgrade
+  corruption. Real-time-factor and resource gates are informational by default and only gate
+  under an explicit `--max-rtf`, so hardware-variable numbers never flake shared CI, consistent
+  with the existing rule that hardware-specific jobs must not gate ordinary CI. A loud sustained
+  broadband noise burst is beyond what a byte-size placeholder detector can reject and would need
+  a real acoustic model, so synthetic bursts are short low-energy transients and this limit is
+  documented rather than papered over. Per-slice F1 gates independently so a Hindi-only
+  regression fails visibly instead of being averaged away. No audio, seed, or segment structure
+  is copied into run artifacts; only allowlisted case, language, vertical, persona, condition,
+  and tag labels plus metrics appear. The existing `vad_precision_recall_f1` was verified against
+  hand-worked overlap cases and found correct; no metric bug was worked around.
+- **Deferred:** Selecting or benchmarking a real voice-activity model (this measures the
+  placeholder byte-size detector against synthetic structure, not a provider); all STT and TTS
+  measurement, which stays blocked pending reviewed real consented or licensed audio; acoustic
+  rejection of loud broadband bursts; measured start/end endpointing latency and false-start
+  counts, which need a real adapter; and live channels. Synthetic structural F1 is near-perfect
+  by construction because the placeholder's byte-size cue is perfectly separable — a real
+  detector on real audio will not be, so these numbers gate the harness, not a model.
+- **Rollback:** Revert PR 22. It adds no schema migration, persistent state, committed binary,
+  model, provider, retained buyer data, or external side effect; `run-speech` and
+  `validate-speech-suite` and the synthetic corpus simply disappear, and `speech-cases.json` is
+  unchanged.

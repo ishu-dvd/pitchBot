@@ -1,0 +1,138 @@
+{
+  "suite_id": "pitchbot-vad-structural",
+  "version": "1",
+  "corpus_id": "synthetic-vad-structural",
+  "corpus_version": "1",
+  "frame_ms": 20,
+  "sample_rate_hz": 16000,
+  "speech_threshold_bytes": 512,
+  "min_f1": 0.85,
+  "cases": [
+    {
+      "case_id": "en-apparel-clear",
+      "language": "en",
+      "vertical": "apparel",
+      "condition": "clear",
+      "persona": "direct-buyer",
+      "seed": 1001,
+      "audio_sha256": "533499cea6d74b7bc75b9e3335430f06e5051d2d88d6b7bee535ef51b9bac764",
+      "segments": [
+        {"kind": "silence", "duration_ms": 100},
+        {"kind": "speech", "duration_ms": 700},
+        {"kind": "silence", "duration_ms": 100}
+      ],
+      "tags": ["synthetic", "single-utterance"]
+    },
+    {
+      "case_id": "hi-toys-leading-trailing-silence",
+      "language": "hi",
+      "vertical": "toys",
+      "condition": "leading-silence",
+      "persona": "owner",
+      "seed": 1002,
+      "audio_sha256": "be39a1a4733f1a77a867fe45244bbe3b27dff78e4254dfca2e69680577deadb3",
+      "segments": [
+        {"kind": "silence", "duration_ms": 500},
+        {"kind": "speech", "duration_ms": 400},
+        {"kind": "silence", "duration_ms": 500}
+      ],
+      "tags": ["synthetic", "trailing-silence"]
+    },
+    {
+      "case_id": "mixed-books-inter-word-pause",
+      "language": "mixed",
+      "vertical": "books",
+      "condition": "inter-word-pause",
+      "persona": "reseller",
+      "seed": 1003,
+      "audio_sha256": "27f839ec34e069a9b23df40eff77d57f9bea6f9dc0a4e92d20b46d377aa309ed",
+      "segments": [
+        {"kind": "silence", "duration_ms": 80},
+        {"kind": "speech", "duration_ms": 240},
+        {"kind": "silence", "duration_ms": 120},
+        {"kind": "speech", "duration_ms": 240},
+        {"kind": "silence", "duration_ms": 120},
+        {"kind": "speech", "duration_ms": 240},
+        {"kind": "silence", "duration_ms": 80}
+      ],
+      "tags": ["synthetic", "multi-utterance"]
+    },
+    {
+      "case_id": "en-food-background-noise",
+      "language": "en",
+      "vertical": "food",
+      "condition": "background-noise",
+      "persona": "manager",
+      "seed": 1004,
+      "audio_sha256": "55199b9c904ccb0a3f36ccee793c9615ffa35220593d0cd0318f4139a3818e50",
+      "segments": [
+        {"kind": "background-noise", "duration_ms": 200},
+        {"kind": "speech", "duration_ms": 500},
+        {"kind": "background-noise", "duration_ms": 200}
+      ],
+      "tags": ["synthetic", "noise-floor"]
+    },
+    {
+      "case_id": "hi-plastics-crosstalk",
+      "language": "hi",
+      "vertical": "plastics",
+      "condition": "crosstalk",
+      "persona": "partner",
+      "seed": 1005,
+      "audio_sha256": "5ca49f85a96f96f19d2686b4b0670818d53d59754903d7d1278b5d62e1840801",
+      "segments": [
+        {"kind": "silence", "duration_ms": 100},
+        {"kind": "speech", "duration_ms": 300},
+        {"kind": "crosstalk", "duration_ms": 300},
+        {"kind": "silence", "duration_ms": 100}
+      ],
+      "tags": ["synthetic", "overlap"]
+    },
+    {
+      "case_id": "mixed-import-export-barge-in",
+      "language": "mixed",
+      "vertical": "import-export",
+      "condition": "barge-in",
+      "persona": "importer",
+      "seed": 1006,
+      "audio_sha256": "22bf152e35f1d1cdc1593d8e51024319fbd0654ae74a70e6a3f23426d0544b57",
+      "segments": [
+        {"kind": "silence", "duration_ms": 400},
+        {"kind": "speech", "duration_ms": 600}
+      ],
+      "tags": ["synthetic", "onset"]
+    },
+    {
+      "case_id": "en-toys-noise-burst",
+      "language": "en",
+      "vertical": "toys",
+      "condition": "noise-burst",
+      "persona": "shopkeeper",
+      "seed": 1007,
+      "audio_sha256": "f9c88efce2200a99bfaee00bb1a5914d8889f253c1e0ebb8bd81cb5ac321cbd5",
+      "segments": [
+        {"kind": "speech", "duration_ms": 400},
+        {"kind": "silence", "duration_ms": 100},
+        {"kind": "noise-burst", "duration_ms": 40},
+        {"kind": "silence", "duration_ms": 100},
+        {"kind": "speech", "duration_ms": 300}
+      ],
+      "tags": ["synthetic", "impulse"]
+    },
+    {
+      "case_id": "hi-apparel-long-silence",
+      "language": "hi",
+      "vertical": "apparel",
+      "condition": "long-silence",
+      "persona": "distributor",
+      "seed": 1008,
+      "audio_sha256": "f6b6d78ecbfdf89933826c8f36429e2f6a05e15d7a94efc9e008002541d24e85",
+      "segments": [
+        {"kind": "speech", "duration_ms": 200},
+        {"kind": "silence", "duration_ms": 700},
+        {"kind": "speech", "duration_ms": 200}
+      ],
+      "tags": ["synthetic", "endpointing"]
+    }
+  ]
+}

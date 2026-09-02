@@ -4,7 +4,9 @@
 
 PR 6 implements benchmark schemas, corpus/candidate validation, multilingual transcript metrics, VAD overlap metrics, structured-output accuracy, timing/resource helpers, and planned synthetic coverage. It does **not** select a production model and contains no measured speech/model result.
 
-No audio file or model weight is committed. Planned corpus entries are test requirements, not evidence.
+PR 22 adds the first measurable speech dimension: a deterministic synthetic **voice-activity (VAD) structural** benchmark. Voice-activity detection only needs speech-vs-silence structure with ground-truth intervals, which can be generated without any model. **STT and TTS remain blocked** — intelligible speech cannot be synthesised without a TTS model, and word/character error rate and TTS naturalness require reviewed real consented or licensed audio, so no STT/TTS corpus item is available and no STT/TTS result is produced (see [ADR-0004](adrs/ADR-0004-benchmark-before-model-selection.md)).
+
+No audio file or model weight is committed. Planned STT/TTS corpus entries are test requirements, not evidence; synthetic VAD audio is regenerated from a seed and hash-verified rather than committed as a binary.
 
 ## Candidate review
 
@@ -135,11 +137,31 @@ as benchmark claims.
 
 Latency never overrides opt-out, policy, citation, or durable-action requirements. A retrieval timeout degrades to current conversation state rather than delaying speech.
 
+## Synthetic VAD structural benchmark
+
+The synthetic VAD benchmark is the only speech measurement the harness can honestly produce today, because it needs speech-vs-silence *structure* rather than intelligible speech.
+
+### Generator
+
+`pitchbot.benchmarks.audio` generates, from a seed, a real 16-bit PCM WAV (stdlib `wave`) plus a stream of byte frames carrying exact ground-truth speech/silence intervals. It is dependency-free and **bit-for-bit reproducible** across runs and platforms: samples come from Python's platform-independent Mersenne-Twister PRNG and are packed little-endian, so the SHA-256 of the WAV is a real, verifiable hash. Segment kinds cover the structural conditions this document already calls for — clear speech, leading/trailing silence, inter-word pauses, background noise, crosstalk (overlapping speakers, still speech for VAD), barge-in onset timing, and short noise bursts that must **not** be classified as speech.
+
+Each emitted frame's byte length rises with its energy, mirroring a variable-bitrate codec where a silent 20 ms frame encodes far smaller than a spoken one. This is exactly the premise the shipped `MockVoiceActivityDetector` byte-size heuristic models (see [Provider contracts](PROVIDER_CONTRACTS.md)), so voiced frames encode above and non-voiced frames — including bursts — below the detector's 512-byte threshold. A loud sustained broadband burst is beyond what a byte-size placeholder can reject and would need a real acoustic model, which ADR-0004 has not authorised; synthetic bursts are therefore short low-energy transients.
+
+### Corpus
+
+`evals/corpora/vad-cases.json` is a VAD-scoped suite, separate from the STT/TTS-oriented `evals/corpora/speech-cases.json` (whose 12 items stay `planned`). Each case commits a seed, an ordered segment list, and the `audio_sha256` of the WAV that seed produces. Audio is **not** committed as a binary: `validate-speech-suite` and `run-speech` regenerate every case and verify the committed hash, keeping the repository binary-free while making the hash real and enforced. The suite carries `en` / `hi` / `mixed` language slices, the six existing verticals (apparel, toys, books, food, import-export, plastics), and eight structural conditions. Adding a new language slice or vertical is a pure data edit — append a case with its `seed`, segments, and generated hash; no code changes.
+
+### Runner and gates
+
+`pitchbot-bench run-speech` runs each case through the existing `VoiceActivityDetector` contract, computes overlap precision/recall/F1 with `vad_precision_recall_f1`, and emits an `EvaluationRun` conforming to `evals/schemas/evaluation-run-v1.json`. It reports per-slice F1 (`speech.vad_f1.lang.*`, `speech.vad_f1.cond.*`, `speech.vad_f1.vert.*`) so a regression in Hindi alone is visible and gates independently, plus overall mean/min F1. `real_time_factor` and peak Python allocation are informational by default and become gating under `--max-rtf`, so a candidate too heavy for a no-accelerator 8-core box is rejected on labeled hardware while shared CI stays free of wall-clock flakiness. The artifact records the canonical corpus hash, the generator version and detector configuration (hashed into `configuration_sha256`), and labeled hardware; its `suite_id`/`corpus_id` and metric names mark it unambiguously as a **synthetic-VAD structural** result. It is **not** a model selection and **not** an STT or TTS measurement — no `wer`, `cer`, or naturalness metric can appear.
+
 ## Commands
 
 ```powershell
 pitchbot-bench validate-candidates benchmarks/candidates.json
 pitchbot-bench validate-corpus evals/corpora/speech-cases.json
+pitchbot-bench validate-speech-suite evals/corpora/vad-cases.json
+pitchbot-bench run-speech evals/corpora/vad-cases.json benchmark-results/vad.json --run-id vad-local-1 --git-revision <commit>
 pitchbot-bench validate-retrieval-suite evals/corpora/retrieval-cases.json
 pitchbot-bench run-retrieval evals/corpora/retrieval-cases.json benchmark-results/bm25.json --run-id bm25-local-1 --git-revision <commit>
 pitchbot-bench validate-graph-retrieval-suite evals/corpora/graph-retrieval-cases.json
@@ -153,4 +175,4 @@ pitchbot-bench environment
 
 Measured results belong in an explicitly reviewed artifact/report path, not `benchmark-results/`, which is ignored by default.
 
-The session retrieval runner emits recall@k, reciprocal rank, timeout rate, and informational latency. The graph retrieval runner additionally gates superseded-claim exposure at zero over reviewed cross-session conflict, explicit supersession, and equal-observation cases. Both reuse the same evaluation schema. Their artifacts contain allowlisted case, language, industry, persona, and tag labels plus metrics; synthetic queries, claims/documents, opaque gold identifiers, and retrieved values remain in the reviewed suites and are not copied into run history.
+The session retrieval runner emits recall@k, reciprocal rank, timeout rate, and informational latency. The graph retrieval runner additionally gates superseded-claim exposure at zero over reviewed cross-session conflict, explicit supersession, and equal-observation cases. The synthetic VAD runner regenerates each seed-defined case, verifies its committed audio hash, and gates per-language/condition/vertical F1 against the suite's `min_f1`, with real-time factor gating available on labeled hardware via `--max-rtf`. All three reuse the same evaluation schema. Their artifacts contain allowlisted case, language, industry, persona, and tag labels plus metrics; synthetic queries, claims/documents, opaque gold identifiers, retrieved values, and audio seeds/segments remain in the reviewed suites and are not copied into run history.
