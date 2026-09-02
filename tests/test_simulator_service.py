@@ -4,6 +4,7 @@ import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -24,7 +25,12 @@ from pitchbot.adapters.mocks import (
     MockTelephonyAdapter,
     MockWhatsAppAdapter,
 )
-from pitchbot.conversation import ConversationEngine, ConversationJournal
+from pitchbot.conversation import (
+    ConversationEngine,
+    ConversationJournal,
+    ConversationTurnPreparation,
+    JournaledConversationTurn,
+)
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.simulator.models import (
     AudioMetadata,
@@ -121,6 +127,50 @@ class FailOnceCleanupWorkflows(BlockingCleanupWorkflows):
         await super().cleanup_session(session_id)
 
 
+class ThreadRecordingJournal(ConversationJournal):
+    """Records which thread each blocking journal call actually ran on."""
+
+    def __init__(self, repository: SqlAlchemyEventRepository) -> None:
+        super().__init__(repository)
+        self.prepare_threads: list[int] = []
+        self.commit_threads: list[int] = []
+
+    def prepare_turn(self, *args: Any, **kwargs: Any) -> ConversationTurnPreparation:
+        self.prepare_threads.append(threading.get_ident())
+        return super().prepare_turn(*args, **kwargs)
+
+    def commit_turn(self, *args: Any, **kwargs: Any) -> JournaledConversationTurn:
+        self.commit_threads.append(threading.get_ident())
+        return super().commit_turn(*args, **kwargs)
+
+
+class CleanupFailureWorkflows(ActionWorkflowService):
+    """Fails its first cleanup, then behaves normally, exposing its callback store."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        policy = ActionPolicy(clock=clock)
+        self.callbacks = CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=policy,
+            clock=clock,
+        )
+        super().__init__(
+            policy=policy,
+            callbacks=self.callbacks,
+            decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+            whatsapp=MockWhatsAppAdapter(),
+            clock=clock,
+        )
+        self.cleanup_attempts = 0
+
+    async def cleanup_session(self, session_id: UUID) -> None:
+        self.cleanup_attempts += 1
+        if self.cleanup_attempts == 1:
+            raise AdapterTimeoutError("cleanup timeout")
+        await super().cleanup_session(session_id)
+
+
 @pytest.fixture
 def service() -> SimulatorService:
     return SimulatorService(
@@ -138,6 +188,7 @@ def durable_service(
     whatsapp: MockWhatsAppAdapter | None = None,
     max_turn_operations_per_session: int = 100,
     workflows: ActionWorkflowService | None = None,
+    journal: ConversationJournal | None = None,
 ) -> tuple[SimulatorService, SqlAlchemyEventRepository]:
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
     event_repository = repository or SqlAlchemyEventRepository(session_factory)
@@ -146,7 +197,7 @@ def durable_service(
         SimulatorService(
             clock=clock,
             conversation_engine=engine,
-            conversation_journal=ConversationJournal(event_repository),
+            conversation_journal=journal or ConversationJournal(event_repository),
             action_workflows=workflows or action_workflows(clock, whatsapp=whatsapp),
             max_turn_operations_per_session=max_turn_operations_per_session,
         ),
@@ -1195,3 +1246,92 @@ def test_capacity_exhaustion_is_a_distinct_error_from_other_runtime_failures() -
     with pytest.raises(SessionCapacityError):
         service.create_session(CreateSessionRequest(lead_ref="capacity-two"))
     assert not isinstance(SessionAdmissionConflictError(""), SessionCapacityError)
+
+
+@pytest.mark.asyncio
+async def test_the_durable_journal_never_runs_on_the_event_loop(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    journal = ThreadRecordingJournal(SqlAlchemyEventRepository(session_factory))
+    simulator, _ = durable_service(session_factory, journal=journal)
+    session = simulator.create_session(CreateSessionRequest(lead_ref="journal-offloaded"))
+    loop_thread = threading.get_ident()
+
+    await simulator.process_turn(
+        session.session_id,
+        TurnRequest(text="We sell apparel.", language=LanguageCode.ENGLISH),
+    )
+
+    # prepare_turn is a fail-closed full replay whose cost grows with the lead's history,
+    # and the loop it would block also serves the audio socket, where a stall delays
+    # another buyer's endpointing and barge-in.
+    assert len(journal.prepare_threads) == 1
+    assert loop_thread not in journal.prepare_threads
+    assert len(journal.commit_threads) == 1
+    assert loop_thread not in journal.commit_threads
+
+
+@pytest.mark.asyncio
+async def test_a_failed_discard_keeps_the_session_addressable_for_a_cleanup_retry(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    _, session_factory = migrated_database
+    workflows = CleanupFailureWorkflows(FakeClock(datetime(2026, 1, 1, tzinfo=UTC)))
+    stale_service, _ = durable_service(session_factory, workflows=workflows)
+    advancing_service, _ = durable_service(session_factory)
+    session = stale_service.create_session(
+        CreateSessionRequest(
+            lead_ref="discard-retry",
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    operation_id = UUID("20000000-0000-0000-0000-000000000001")
+    scheduled = await stale_service.process_turn(
+        session.session_id,
+        TurnRequest(
+            operation_id=operation_id,
+            text="Please call back this week.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.CALLBACK,
+            callback_delay_minutes=2,
+        ),
+    )
+    assert scheduled.preview is not None
+    assert scheduled.preview.callback is not None
+    callback_id = scheduled.preview.callback.request.callback_id
+
+    # Another writer advances the lead, so the next turn here fails its version check.
+    advancing_service.resume_session(
+        session.session_id,
+        ResumeSessionRequest(lead_ref="discard-retry"),
+    )
+    await advancing_service.process_turn(
+        session.session_id,
+        TurnRequest(text="Please show pricing.", language=LanguageCode.ENGLISH),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match durable history"):
+        await stale_service.process_turn(
+            session.session_id,
+            TurnRequest(text="Continue.", language=LanguageCode.ENGLISH),
+        )
+
+    # Cleanup failed during the discard, so the callback is still holding capacity. The
+    # session must stay addressable or that capacity is lost with no way to reclaim it.
+    assert workflows.cleanup_attempts == 1
+    assert workflows.callbacks.get(callback_id).request.callback_id == callback_id
+    with pytest.raises(LookupError):
+        stale_service.get_session(session.session_id)
+
+    await stale_service.close_session(session.session_id)
+
+    assert workflows.cleanup_attempts == 2
+    with pytest.raises(LookupError):
+        workflows.callbacks.get(callback_id)

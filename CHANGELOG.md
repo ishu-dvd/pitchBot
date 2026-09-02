@@ -38,3 +38,4 @@ All notable changes to PitchBot are documented here.
 - Excluded environment files, secrets, runtime data, logs, and artifacts from version control.
 - Hardened mock action retries, callback cancellation races, concurrent capacity admission, session cleanup, and paraphrased internal-instruction extraction attempts.
 - Reconciled canceled callback scheduling attempts without false approval or duplicate provider actions.
+- Kept the speech and durable turn paths live under fault: a voice-activity failure now reaches the turn-taking machine as silence instead of pinning an open utterance in `LISTENING`, audio abandoned when the agent yields the floor is released instead of being prepended to the next utterance, the durable journal replay and commit run off the event loop that serves the audio socket, and a session whose cleanup fails during invalidation stays addressable so a delete can reclaim its callback and deck capacity.

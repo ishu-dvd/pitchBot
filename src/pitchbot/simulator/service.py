@@ -330,7 +330,12 @@ class SimulatorService:
             replaying_durable_turn = False
             if self._journal is not None:
                 try:
-                    preparation = self._journal.prepare_turn(
+                    # The journal load is a fail-closed full replay whose cost grows with
+                    # the lead's history. It runs off the event loop for the same reason
+                    # recall does: the loop also serves the latency-critical audio socket,
+                    # where a stall delays another buyer's endpointing and barge-in.
+                    preparation = await asyncio.to_thread(
+                        self._journal.prepare_turn,
                         self._conversation,
                         session_id,
                         operation_id=request.operation_id,
@@ -493,7 +498,8 @@ class SimulatorService:
                 if preparation is None:
                     raise RuntimeError("Durable journal preparation is missing")
                 try:
-                    self._journal.commit_turn(
+                    await asyncio.to_thread(
+                        self._journal.commit_turn,
                         self._conversation,
                         preparation,
                         outcome,
@@ -846,12 +852,17 @@ class SimulatorService:
         try:
             await self._actions.cleanup_session(session_id)
         except (AdapterError, RuntimeError, ValueError):
+            # Republish the session so a DELETE can re-enter cleanup, the same guarantee
+            # close_session keeps. Dropping it here would strand its callback and deck
+            # records with no path back to them, permanently consuming action capacity.
+            # It stays closing, so it rejects turns while it waits to be torn down again.
             logger.exception("Failed to clean up invalidated simulator session")
+            self._abort_teardown(session_id, session)
+            return
+        try:
+            self._conversation.close_session(session_id)
         finally:
-            try:
-                self._conversation.close_session(session_id)
-            finally:
-                self._release_admission(session_id)
+            self._release_admission(session_id)
 
     def _get_session(self, session_id: UUID, *, allow_closing: bool = False) -> _Session:
         try:

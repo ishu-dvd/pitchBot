@@ -11,6 +11,7 @@ from pitchbot.adapters.mocks import MockSpeechToTextAdapter, MockVoiceActivityDe
 from pitchbot.domain import LanguageCode
 from pitchbot.main import app
 from pitchbot.simulator import router as router_module
+from pitchbot.simulator.router import PLAYBACK_FINISHED
 
 SPEECH = b"x" * 1_024
 SILENCE = b"x" * 16
@@ -276,7 +277,8 @@ def test_a_playback_finished_frame_hands_the_floor_back_to_the_buyer(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("We sell toys.")]))
+    transcriber = MockSpeechToTextAdapter(transcripts=[transcript("We sell toys.")])
+    use_transcriber(monkeypatch, transcriber)
     session_id = new_session(client, "audio-floor")
 
     with client.websocket_connect(
@@ -287,16 +289,24 @@ def test_a_playback_finished_frame_hands_the_floor_back_to_the_buyer(
         spoken = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
         assert spoken["outcome"] == "transcribed"
 
-        # The agent holds the floor until the browser says playback finished.
+        # The agent holds the floor until the browser says playback finished. This frame
+        # is a sub-threshold interruption: captured, but too short to be a barge-in.
         socket.send_bytes(SPEECH)
         held = socket.receive_json()
         assert held["state"] == "agent-speaking"
 
-        socket.send_text("playback-finished")
+        socket.send_text(PLAYBACK_FINISHED)
         socket.send_bytes(SPEECH)
         released = socket.receive_json()
+        assert released["state"] == "listening"
+
+        second = utterance_after(socket, [SILENCE, SILENCE, SILENCE])
 
     assert released["state"] == "listening"
+    assert second["outcome"] == "transcribed"
+    # Sequence 4 was spoken over the agent and abandoned when the floor was handed back.
+    # Carrying it forward would attribute it to this later, unrelated turn.
+    assert [sequence for sequence, _ in transcriber.received_audio] == [0, 1, 2, 3, 5, 6, 7, 8]
 
 
 def test_an_unknown_control_frame_closes_the_socket(

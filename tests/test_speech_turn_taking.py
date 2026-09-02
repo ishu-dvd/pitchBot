@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from pitchbot.adapters import AudioChunk, TranscriptChunk
+from pitchbot.adapters import AudioChunk, TranscriptChunk, VoiceActivity
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.adapters.mocks import MockSpeechToTextAdapter, MockVoiceActivityDetector
 from pitchbot.domain import LanguageCode
@@ -192,6 +192,26 @@ class _RecordingTranscriber(MockSpeechToTextAdapter):
         yield  # pragma: no cover - unreachable, keeps this an async generator
 
 
+class _FailingAfterDetector(MockVoiceActivityDetector):
+    """Classifies ``healthy_frames`` normally, then fails the way a real model can.
+
+    A wrapper around an acoustic model breaks partway through a call — the device is
+    lost, the model is unloaded, a frame is malformed — so the dangerous case is a fault
+    that starts while an utterance is already open, not one that is failing from the
+    first frame.
+    """
+
+    def __init__(self, *, decisions: list[bool], healthy_frames: int, error: Exception) -> None:
+        super().__init__(decisions=decisions)
+        self._healthy_frames = healthy_frames
+        self._failure = error
+
+    def detect(self, frame: AudioChunk) -> VoiceActivity:
+        if self.frames_seen >= self._healthy_frames:
+            raise self._failure
+        return super().detect(frame)
+
+
 def chunk(index: int, *, size: int = 1_024) -> AudioChunk:
     return AudioChunk(
         data=b"x" * size,
@@ -351,6 +371,68 @@ async def test_a_failing_detector_does_not_end_the_call() -> None:
 
     assert all(result.utterance is None for result in results)  # type: ignore[attr-defined]
     assert all(result.barge_in is None for result in results)  # type: ignore[attr-defined]
+    assert engine.turn_taking.state is TurnTakingState.IDLE
+
+
+@pytest.mark.asyncio
+async def test_a_detector_that_fails_mid_utterance_still_yields_the_floor() -> None:
+    transcriber = _RecordingTranscriber()
+    engine = SpeechTurnPipeline(
+        detector=_FailingAfterDetector(
+            decisions=[True] * 3,
+            healthy_frames=3,
+            error=PermanentAdapterError("detector unloaded"),
+        ),
+        transcriber=transcriber,
+        language=LanguageCode.ENGLISH,
+        config=config(end_silence_ms=300),
+        frame_duration_ms=FRAME_MS,
+    )
+
+    results = [await engine.push(chunk(index)) for index in range(3)]
+    assert state_of(engine.turn_taking) is TurnTakingState.LISTENING
+
+    # The detector now fails for every remaining frame. A dropped frame never reaches the
+    # machine, so trailing silence would stall and the buyer would hold the floor for the
+    # rest of the call with their audio pinned in memory.
+    results += [await engine.push(chunk(index)) for index in range(3, 23)]
+
+    utterances = [result.utterance for result in results if result.utterance]
+    assert len(utterances) == 1
+    assert utterances[0].segment.reason is EndpointReason.SILENCE
+    assert utterances[0].dropped_frames == 3
+    assert state_of(engine.turn_taking) is TurnTakingState.IDLE
+    assert transcriber.sequences == [0, 1, 2, 3, 4, 5]
+    assert engine._buffer == []
+    assert engine._buffered_bytes == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("device lost"), ValueError("bad frame size")],
+)
+async def test_a_detector_raising_outside_the_adapter_hierarchy_does_not_kill_the_call(
+    failure: Exception,
+) -> None:
+    engine = SpeechTurnPipeline(
+        detector=_FailingAfterDetector(
+            decisions=[True] * 2,
+            healthy_frames=2,
+            error=failure,
+        ),
+        transcriber=_ScriptedTranscriber([]),
+        language=LanguageCode.ENGLISH,
+        config=config(end_silence_ms=300),
+        frame_duration_ms=FRAME_MS,
+    )
+
+    # A model wrapper is not obliged to raise AdapterError. Letting one escape here would
+    # unwind the audio socket, which only handles a disconnect, and drop the call.
+    results = await run(engine, 8)
+
+    utterances = [result.utterance for result in results if result.utterance]  # type: ignore[attr-defined]
+    assert len(utterances) == 1
     assert engine.turn_taking.state is TurnTakingState.IDLE
 
 
@@ -546,3 +628,51 @@ async def test_repeated_noise_bursts_do_not_latch_the_oversize_cap() -> None:
     assert len(utterances) == 1
     # Leaked burst audio used to fill the cap and fail every later utterance closed.
     assert utterances[0].outcome is UtteranceOutcome.TRANSCRIBED
+
+
+@pytest.mark.asyncio
+async def test_a_control_frame_abandon_drops_the_barge_in_audio() -> None:
+    transcriber = _RecordingTranscriber()
+    engine = pipeline(
+        decisions=[True] + [True] * 3 + [False] * 3,
+        transcriber=transcriber,
+    )
+    engine.agent_started_speaking()
+
+    # One sub-threshold interruption, abandoned by the browser reporting that playback
+    # finished rather than by a later frame. Nothing else can discard it: the machine
+    # never sees another frame in AGENT_SPEAKING, so no discarded decision is produced.
+    await engine.push(chunk(0))
+    assert engine._buffered_bytes > 0
+    engine.agent_stopped_speaking()
+
+    assert engine.turn_taking.state is TurnTakingState.IDLE
+    assert engine._buffer == []
+    assert engine._buffered_bytes == 0
+
+    for index in range(1, 7):
+        await engine.push(chunk(index))
+
+    # Sequence 0 was spoken over the agent and abandoned. Carrying it forward attributes
+    # it to a later, unrelated turn.
+    assert transcriber.sequences == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.asyncio
+async def test_a_stray_playback_report_does_not_truncate_an_open_utterance() -> None:
+    transcriber = _RecordingTranscriber()
+    engine = pipeline(decisions=[True] * 3 + [False] * 3, transcriber=transcriber)
+
+    await engine.push(chunk(0))
+    assert engine.turn_taking.state is TurnTakingState.LISTENING
+
+    # The browser may report playback finished at any time, including while the buyer
+    # already holds the floor. The machine treats that as a no-op, so the buffer must
+    # survive it; dropping it would transcribe half a sentence as the whole turn.
+    engine.agent_stopped_speaking()
+    assert engine._buffered_bytes > 0
+
+    for index in range(1, 6):
+        await engine.push(chunk(index))
+
+    assert transcriber.sequences == [0, 1, 2, 3, 4, 5]
