@@ -11,6 +11,15 @@ from pitchbot.benchmarks.evaluation import (
     validate_evaluation_run,
     write_evaluation_report,
 )
+from pitchbot.benchmarks.gates import (
+    AggregateKind,
+    EvaluationGateReport,
+    EvaluationGateSpec,
+    FailureRateRule,
+    MetricFoldRule,
+    evaluate_gates,
+    gates_pass,
+)
 from pitchbot.benchmarks.graph_retrieval import (
     GraphRetrievalSuite,
     GraphRetrievalSuiteCase,
@@ -62,6 +71,7 @@ from pitchbot.benchmarks.speech import (
 )
 
 __all__ = [
+    "AggregateKind",
     "BenchmarkKind",
     "BenchmarkResult",
     "Candidate",
@@ -72,16 +82,20 @@ __all__ = [
     "CorpusManifest",
     "EvaluationCaseResult",
     "EvaluationCaseStatus",
+    "EvaluationGateReport",
+    "EvaluationGateSpec",
     "EvaluationHardwareProfile",
     "EvaluationMetric",
     "EvaluationRun",
     "EvaluationRunStatus",
+    "FailureRateRule",
     "HardwareProfile",
     "GraphRetrievalSuite",
     "GraphRetrievalSuiteCase",
     "GraphRetrievalSuiteClaim",
     "Interval",
     "MetricDirection",
+    "MetricFoldRule",
     "RetrievalSuite",
     "RetrievalSuiteCase",
     "RetrievalSuiteDocument",
@@ -94,6 +108,8 @@ __all__ = [
     "VadSuiteSegment",
     "capture_hardware_profile",
     "character_error_rate",
+    "evaluate_gates",
+    "gates_pass",
     "generate_clip",
     "real_time_factor",
     "relative_duration_delta",

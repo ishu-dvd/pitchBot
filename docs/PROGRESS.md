@@ -522,17 +522,17 @@
   counts, which need a real adapter; and live channels. Synthetic structural F1 is near-perfect
   by construction because the placeholder's byte-size cue is perfectly separable — a real
   detector on real audio will not be, so these numbers gate the harness, not a model.
-  The shared `EvaluationRun.gates_pass()` is non-suite-aware and fail-open: it flattens whatever
-  metrics are present and passes as long as one gating metric passes, so an artifact missing
-  every suite metric still "passes" (confirmed by an audit that passed a run with no case metrics
-  and one unrelated metric). Worse, `validate-evaluation`, `run-retrieval`, and
-  `run-graph-retrieval` print `artifact-gates=fail` but still `return 0`, so today they cannot
-  fail a build. `run-speech` deliberately does **not** inherit either behaviour — it adds its own
-  suite-aware `speech_gates_pass` and returns non-zero on failure rather than editing the shared
-  helper — but the HTML report generator (`render-evaluation`) still labels gate status via the
-  shared `gates_pass()`. Repairing `gates_pass()`, the three runners' exit codes, and the report
-  label is a separate reviewed change that the orchestrator will schedule; it was kept out of
-  this PR to avoid expanding the diff and conflicting with other work on the shared machinery.
+  The shared `EvaluationRun.gates_pass()` was non-suite-aware and fail-open: it flattened
+  whatever metrics were present and passed as long as one gating metric passed, so an artifact
+  missing every suite metric still "passed" (confirmed by an audit that passed a run with no case
+  metrics and one unrelated metric). Worse, `validate-evaluation`, `run-retrieval`, and
+  `run-graph-retrieval` printed `artifact-gates=fail` but still `return 0`, so they could not
+  fail a build. `run-speech` deliberately did **not** inherit either behaviour — it added its own
+  suite-aware `speech_gates_pass` and returned non-zero on failure rather than editing the shared
+  helper — but the HTML report generator (`render-evaluation`) still labelled gate status via the
+  shared `gates_pass()`. **Resolved by PR 27**, which made the shared gate suite-aware and
+  fail-closed, gave the three runners non-zero exit codes, fixed the report label, and collapsed
+  this PR's forked threshold fold back onto the shared helper.
 - **Rollback:** Revert PR 24. It adds no schema migration, persistent state, committed binary,
   model, provider, retained buyer data, or external side effect; `run-speech` and
   `validate-speech-suite` and the synthetic corpus simply disappear, and `speech-cases.json` is
@@ -634,6 +634,95 @@
   model, provider, retained buyer data, external side effect, or HTTP API change; the only
   new surface is `ConversationJournal.with_history_bounds` and its keyword arguments, and
   behaviour returns to PR 22's unbounded projection read.
+
+## PR 27: Fail-closed, suite-aware evaluation gates
+
+- **Branch:** `fix/evaluation-gate-fail-closed`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 28 commit `090478f`.
+- **Scope:** Close audit finding B1. `README.md` advertised "strict gate validation" and
+  `docs/BENCHMARKS.md` claimed authoritative "gate-consistency checks"; both were false, in two
+  independent ways, and PR 24 recorded both in its `Deferred` section rather than fixing them.
+  1. **The shared gate is suite-aware and fail-closed.** `EvaluationRun.gates_pass()` flattened
+     whatever metrics happened to be present and required only that *some* gating metric passed,
+     validating neither required metric names nor aggregate consistency: an auditor passed a
+     completed run with one passed case, **no case metrics at all**, and a single unrelated
+     `unrelated.pass` metric. The model can no longer answer that question at all - it is a
+     transport contract and cannot know what its suite measures, so the method is gone and
+     `pitchbot/benchmarks/gates.py` now evaluates a run against an `EvaluationGateSpec` that the
+     suite declares: the run and per-case metric names a complete artifact contains, plus which
+     run-level aggregates are folds (mean/min/max/nearest-rank p95) of which per-case metric and
+     which are per-case failure-code rates. Presence is checked before any threshold, and every
+     aggregate is recomputed from the cases and compared within float tolerance, so a run-level
+     number the cases do not support is rejected even when it clears its own threshold.
+  2. **The CLI fails the build.** `validate-evaluation`, `run-retrieval`, and
+     `run-graph-retrieval` printed `artifact-gates=fail` and still `return 0`, so CI could not
+     detect a failing gate at all. All three now return a non-zero exit code and print bounded
+     machine-readable reasons (`missing-run-metric:`, `aggregate-inconsistent:`, `case-not-passed:`,
+     `gate-below-threshold:`, `unknown-suite:`). `run-retrieval` and `run-graph-retrieval` are
+     wired into CI beside PR 24's `run-speech`, together with `validate-evaluation` over each
+     emitted artifact, because an exit code nothing runs still cannot fail a build.
+  3. **`render-evaluation` reports the corrected result.** Its "Artifact gates" card derived from
+     the same defective helper and would have rendered a misleading "pass"; it now labels from
+     `evaluate_gates()` and lists the escaped, bounded reasons. It still exits `0` - rendering a
+     report of a failing run is not itself a failure.
+  4. **PR 24's deliberate duplication is collapsed.** `speech_gates_pass` is now
+     `gates_pass(run, suite.gate_spec())`; its hand-rolled threshold fold and its private
+     `_REQUIRED_CASE_METRICS`/`_REQUIRED_RUN_METRICS`/`_required_run_metric_names` are gone.
+     Nothing was given up - `VadSuite.gate_spec()` narrows the reviewed speech spec with the
+     suite's identity, corpus, exact case set, and one per-slice mean-F1 gate per language,
+     condition, and vertical the corpus declares, which is data, not code.
+- **Safety decisions:** An artifact whose `suite_id` has no reviewed spec **fails closed**: there
+  is nothing to check it against, so it cannot report a pass, and `validate-evaluation` exits
+  non-zero on it. This is the house rule for unknown state, and the alternative - reporting
+  "pass" for something nobody verified - is exactly the defect being removed. Adding a suite
+  therefore means registering its spec; a test runs every shipped suite and asserts the emitted
+  artifact satisfies its own registered spec, so a renamed or dropped metric breaks the build
+  rather than silently ceasing to be gated. The gate is strictly stronger than what it replaces
+  in every dimension and was loosened nowhere: aggregate agreement uses `math.isclose` at
+  `rel_tol=1e-9`/`abs_tol=1e-12`, which admits only the reordering noise between a runner summing
+  case values in case order and the gate re-summing them, not a substantive disagreement.
+  Per-slice folds are scoped to their own slice, so a Hindi-only forgery cannot hide behind the
+  overall mean. Failure reasons are bounded allowlisted labels plus identifiers already present in
+  the artifact, so no raw content reaches a terminal or an HTML card, and the report escapes them.
+  Every reviewed suite was run under the corrected gate before this was called done: retrieval,
+  graph retrieval, speech, and `validate-evaluation` over all three artifacts each exit `0`, and
+  the full simulated CI benchmark step exits `0`, so nothing green was turned red and no gate was
+  relaxed to keep it green.
+- **Test decisions:** The auditor's exact artifact is the headline regression test and is driven
+  through the CLI, so it fails on the real defect - the exit code - rather than on an internal
+  helper. Every behavioural test in `tests/test_evaluation_gate_enforcement.py` was run against the
+  unfixed source and observed to fail first: the auditor's artifact printed `artifact-gates=pass`
+  and returned `0`, a forged informational aggregate printed `artifact-gates=pass`, and both
+  failing runners printed `artifact-gates=fail` and returned `0`. Four existing tests asserted the
+  fail-open behaviour and were updated rather than deleted, each keeping its original intent:
+  `test_speech_gate_is_suite_aware_unlike_the_shared_fail_open_gate` asserted `stripped.gates_pass()
+  is True` for a metric-stripped run and now asserts the shared gate rejects it for the same reason
+  `run-speech` does; the `test_evaluation_reports.py` fixture was an artifact for an invented
+  `realtime-conversation` suite with a case carrying no metrics, and is now a complete
+  `pitchbot-bm25-baseline` artifact, because a fixture from a suite nobody declared would only ever
+  exercise the unknown-suite branch; `test_run_speech_cli_exit_code_reflects_the_gate` asserted
+  `validate-evaluation` returns `0` on a gate-failing artifact and now asserts `1` while separately
+  asserting the artifact still parses and is `completed`, preserving the "structurally valid"
+  claim it was making; and the speech tests that called `run.gates_pass()` on ad-hoc fixture suites
+  now call `speech_gates_pass(run, suite)`, which is the gate those tests were always about and is
+  strictly stronger. The speech retention test additionally pins a property the PR 24 gate could
+  not see - a forged `speech.vad_min_f1` of `0.9` that still clears its `0.85` threshold - which
+  returned `True` under the unfixed `speech_gates_pass` and returns `False` now.
+- **Deferred:** `render-evaluation` still exits `0` on a failing artifact by design; if a build
+  should fail on report generation, that is a separate decision. No spec is registered for the
+  `conversation-cases.json` corpus because no runner emits an artifact for it, so no artifact can
+  claim that suite; registering an unbacked spec would be inventing a contract. Aggregates that no
+  per-case metric can reconstruct are not folded (`speech.peak_python_kib` is a process
+  measurement, not a fold), so they are checked for presence and threshold only. The gate still
+  cannot detect a suite that is honestly measured but too weak to be worth gating - a corpus whose
+  cases are trivially passable will pass every check here - which is a corpus-review question, not
+  a gate question.
+- **Rollback:** Revert PR 27. It adds no schema migration, persistent state, committed binary,
+  model, provider, retained buyer data, or external side effect. The emitted artifact format is
+  unchanged and every existing artifact stays valid; reverting restores the previous exit codes
+  and the fail-open helper, and the CI benchmark step returns to not running the retrieval
+  runners.
 
 ## PR 28: Token-aware safety phrase matching
 

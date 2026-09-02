@@ -12,6 +12,7 @@ from pitchbot.benchmarks.evaluation import (
     write_evaluation_report,
     write_text_atomically,
 )
+from pitchbot.benchmarks.gates import EvaluationGateReport, evaluate_gates
 from pitchbot.benchmarks.graph_retrieval import (
     run_graph_retrieval_evaluation,
     validate_graph_retrieval_suite,
@@ -30,9 +31,16 @@ from pitchbot.benchmarks.retrieval import (
 from pitchbot.benchmarks.speech import (
     load_speech_suite,
     run_speech_evaluation,
-    speech_gates_pass,
     validate_speech_suite,
 )
+
+
+def _gate_line(report: EvaluationGateReport) -> str:
+    """One bounded, machine-greppable status token, with reasons only when it fails."""
+
+    if report.passed:
+        return "artifact-gates=pass"
+    return f"artifact-gates=fail; reasons={report.summary()}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -115,9 +123,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "validate-evaluation":
         run = validate_evaluation_run(args.path)
-        gates = "pass" if run.gates_pass() else "fail-or-incomplete"
-        print(f"validated {len(run.cases)} cases; artifact-gates={gates}")
-        return 0
+        report = evaluate_gates(run)
+        print(f"validated {len(run.cases)} cases; {_gate_line(report)}")
+        return 0 if report.passed else 1
     if args.command == "render-evaluation":
         run = validate_evaluation_run(args.path)
         ensure_distinct_files(args.path, args.output)
@@ -141,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"validated {len(suite.cases)} retrieval cases")
         return 0
     if args.command == "run-retrieval":
+        retrieval_suite_model = validate_retrieval_suite(args.path)
         run = run_retrieval_evaluation(
             args.path,
             run_id=args.run_id,
@@ -151,14 +160,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{run.model_dump_json(indent=2)}\n",
             overwrite=args.force,
         )
-        gates = "pass" if run.gates_pass() else "fail"
-        print(f"completed {len(run.cases)} retrieval cases; artifact-gates={gates}")
-        return 0
+        report = evaluate_gates(run, retrieval_suite_model.gate_spec())
+        print(f"completed {len(run.cases)} retrieval cases; {_gate_line(report)}")
+        return 0 if report.passed else 1
     if args.command == "validate-graph-retrieval-suite":
         graph_suite = validate_graph_retrieval_suite(args.path)
         print(f"validated {len(graph_suite.cases)} graph retrieval cases")
         return 0
     if args.command == "run-graph-retrieval":
+        graph_suite_model = validate_graph_retrieval_suite(args.path)
         run = run_graph_retrieval_evaluation(
             args.path,
             run_id=args.run_id,
@@ -169,9 +179,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{run.model_dump_json(indent=2)}\n",
             overwrite=args.force,
         )
-        gates = "pass" if run.gates_pass() else "fail"
-        print(f"completed {len(run.cases)} graph retrieval cases; artifact-gates={gates}")
-        return 0
+        report = evaluate_gates(run, graph_suite_model.gate_spec())
+        print(f"completed {len(run.cases)} graph retrieval cases; {_gate_line(report)}")
+        return 0 if report.passed else 1
     if args.command == "validate-speech-suite":
         vad_suite = validate_speech_suite(args.path)
         print(
@@ -192,10 +202,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{run.model_dump_json(indent=2)}\n",
             overwrite=args.force,
         )
-        passed = speech_gates_pass(run, vad_suite)
-        gates = "pass" if passed else "fail"
-        print(f"completed {len(run.cases)} vad cases; artifact-gates={gates}")
-        return 0 if passed else 1
+        report = evaluate_gates(run, vad_suite.gate_spec())
+        print(f"completed {len(run.cases)} vad cases; {_gate_line(report)}")
+        return 0 if report.passed else 1
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))
         return 0

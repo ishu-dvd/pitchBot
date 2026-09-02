@@ -13,6 +13,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pitchbot.benchmarks.gates import RETRIEVAL_GATE_SPEC, EvaluationGateSpec
 from pitchbot.benchmarks.manifest import canonical_manifest_sha256, load_json_model
 from pitchbot.benchmarks.models import (
     EvaluationCaseResult,
@@ -80,6 +81,15 @@ class RetrievalSuite(RetrievalSuiteModel):
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("retrieval case identifiers must be unique")
         return self
+
+    def gate_spec(self) -> EvaluationGateSpec:
+        """The reviewed retrieval gate narrowed to this suite's identity and case set."""
+
+        return RETRIEVAL_GATE_SPEC.for_suite(
+            suite_id=self.suite_id,
+            corpus_id=self.corpus_id,
+            case_ids=frozenset(item.case_id for item in self.cases),
+        )
 
 
 def validate_retrieval_suite(path: Path) -> RetrievalSuite:

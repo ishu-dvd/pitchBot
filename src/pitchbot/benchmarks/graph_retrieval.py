@@ -14,6 +14,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pitchbot.benchmarks.gates import GRAPH_RETRIEVAL_GATE_SPEC, EvaluationGateSpec
 from pitchbot.benchmarks.manifest import canonical_manifest_sha256, load_json_model
 from pitchbot.benchmarks.models import (
     EvaluationCaseResult,
@@ -185,6 +186,15 @@ class GraphRetrievalSuite(GraphRetrievalSuiteModel):
         if not any(item.excluded_claim_ids for item in self.cases):
             raise ValueError("graph retrieval suites must exercise superseded claim exclusion")
         return self
+
+    def gate_spec(self) -> EvaluationGateSpec:
+        """The reviewed graph gate narrowed to this suite's identity and case set."""
+
+        return GRAPH_RETRIEVAL_GATE_SPEC.for_suite(
+            suite_id=self.suite_id,
+            corpus_id=self.corpus_id,
+            case_ids=frozenset(item.case_id for item in self.cases),
+        )
 
 
 class _StaticKnowledgeSource:

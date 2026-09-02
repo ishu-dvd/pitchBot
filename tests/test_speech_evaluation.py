@@ -21,10 +21,13 @@ from pitchbot.benchmarks.audio import (
     is_speech_kind,
 )
 from pitchbot.benchmarks.cli import main
+from pitchbot.benchmarks.evaluation import validate_evaluation_run
+from pitchbot.benchmarks.gates import evaluate_gates, gates_pass
 from pitchbot.benchmarks.metrics import Interval, vad_precision_recall_f1
-from pitchbot.benchmarks.models import EvaluationMetric, MetricDirection
+from pitchbot.benchmarks.models import EvaluationMetric, EvaluationRunStatus, MetricDirection
 from pitchbot.benchmarks.speech import (
     VadSuite,
+    load_speech_suite,
     run_speech_evaluation,
     speech_gates_pass,
     validate_speech_suite,
@@ -183,7 +186,7 @@ def test_validate_speech_suite_verifies_regenerated_hashes(tmp_path: Path) -> No
 def test_run_speech_scores_the_reviewed_corpus_and_gates_pass() -> None:
     run = run_speech_evaluation(SUITE_PATH, run_id="vad-test", git_revision="abcdef1")
 
-    assert run.gates_pass() is True
+    assert speech_gates_pass(run, load_speech_suite(SUITE_PATH)) is True
     assert len(run.cases) == 8
     assert all(case.status.value == "passed" for case in run.cases)
     metric_names = {metric.name for metric in run.metrics}
@@ -223,13 +226,13 @@ def test_bad_detector_fails_the_gate() -> None:
         detector_factory=lambda: _ConstantDetector(False),
     )
 
-    assert run.gates_pass() is False
+    assert speech_gates_pass(run, load_speech_suite(SUITE_PATH)) is False
     assert all(case.status.value == "failed" for case in run.cases)
     assert all(_metric(case.metrics, "speech.vad_f1") == 0.0 for case in run.cases)
     assert all("vad-f1-below-threshold" in case.failure_codes for case in run.cases)
 
 
-def test_speech_gate_is_suite_aware_unlike_the_shared_fail_open_gate() -> None:
+def test_speech_gate_is_suite_aware_and_shares_the_repaired_shared_gate() -> None:
     suite = validate_speech_suite(SUITE_PATH)
     run = run_speech_evaluation(SUITE_PATH, run_id="vad-gate", git_revision="abcdef1")
 
@@ -251,10 +254,14 @@ def test_speech_gate_is_suite_aware_unlike_the_shared_fail_open_gate() -> None:
         }
     )
 
-    # The shared, non-suite-aware gate is fail-open: it passes on an unrelated metric.
-    assert stripped.gates_pass() is True
-    # run-speech's suite-aware gate fails closed because the required VAD metrics are absent.
+    # This artifact used to pass the shared gate, which is what PR 24 forked away from. The
+    # shared gate is now suite-aware, so it rejects it for the same reason run-speech does:
+    # the metrics the reviewed suite exists to measure are simply absent.
+    assert gates_pass(stripped) is False
     assert speech_gates_pass(stripped, suite) is False
+    reasons = evaluate_gates(stripped).failures
+    assert "missing-run-metric:speech.vad_mean_f1" in reasons
+    assert "missing-case-metric:en-apparel-clear.speech.vad_f1" in reasons
 
 
 def test_speech_gate_rejects_a_failed_case_and_a_foreign_run() -> None:
@@ -298,7 +305,7 @@ def test_always_speech_detector_fails_cases_that_contain_silence(tmp_path: Path)
         detector_factory=lambda: _ConstantDetector(True),
     )
 
-    assert run.gates_pass() is False
+    assert speech_gates_pass(run, load_speech_suite(path)) is False
     assert run.cases[0].status.value == "failed"
     assert _metric(run.cases[0].metrics, "speech.vad_recall") == pytest.approx(1.0)
     assert _metric(run.cases[0].metrics, "speech.vad_precision") < 0.85
@@ -347,7 +354,7 @@ def test_per_slice_metric_isolates_a_single_language_regression(tmp_path: Path) 
         path, run_id="vad-slice", git_revision="abcdef1", detector_factory=factory
     )
 
-    assert run.gates_pass() is False
+    assert speech_gates_pass(run, load_speech_suite(path)) is False
     assert _metric(run.metrics, "speech.vad_f1.lang.hi") == 0.0
     assert _metric(run.metrics, "speech.vad_f1.lang.en") == pytest.approx(1.0)
     statuses = {case.case_id: case.status.value for case in run.cases}
@@ -379,7 +386,7 @@ def test_real_time_factor_gate_rejects_a_too_heavy_candidate(tmp_path: Path) -> 
         max_real_time_factor=1.0,
     )
 
-    assert run.gates_pass() is False
+    assert speech_gates_pass(run, load_speech_suite(path)) is False
     mean_rtf = next(m for m in run.metrics if m.name == "speech.mean_real_time_factor")
     assert mean_rtf.direction.value == "at-most"
     assert mean_rtf.value > 1.0
@@ -409,7 +416,7 @@ def test_light_detector_passes_a_generous_real_time_factor_gate(tmp_path: Path) 
         max_real_time_factor=1.0,
     )
 
-    assert run.gates_pass() is True
+    assert speech_gates_pass(run, load_speech_suite(path)) is True
     assert _metric(run.metrics, "speech.mean_real_time_factor") == 0.0
 
 
@@ -430,7 +437,7 @@ def test_degenerate_all_silence_case_scores_as_correct_silence(tmp_path: Path) -
     )
     run = run_speech_evaluation(path, run_id="vad-silence", git_revision="abcdef1")
 
-    assert run.gates_pass() is True
+    assert speech_gates_pass(run, load_speech_suite(path)) is True
     assert run.cases[0].status.value == "passed"
     assert _metric(run.cases[0].metrics, "speech.vad_f1") == 1.0
 
@@ -457,7 +464,7 @@ def test_detector_error_marks_the_case_as_error(tmp_path: Path) -> None:
         detector_factory=_ErrorDetector,
     )
 
-    assert run.gates_pass() is False
+    assert speech_gates_pass(run, load_speech_suite(path)) is False
     assert run.cases[0].status.value == "error"
     assert "vad-detector-error" in run.cases[0].failure_codes
 
@@ -480,7 +487,7 @@ def test_adding_a_vertical_slice_is_a_data_only_edit(tmp_path: Path) -> None:
 
     run = run_speech_evaluation(path, run_id="vad-extended", git_revision="abcdef1")
 
-    assert run.gates_pass() is True
+    assert speech_gates_pass(run, load_speech_suite(path)) is True
     assert _metric(run.metrics, "speech.vad_f1.vert.electronics") == pytest.approx(1.0)
     assert any(case.case_id == "en-electronics-clear" for case in run.cases)
 
@@ -639,5 +646,8 @@ def test_run_speech_cli_exit_code_reflects_the_gate(
         == 1
     )
     assert "artifact-gates=fail" in capsys.readouterr().out
-    # The failing run is still a well-formed, completed artifact.
-    assert main(["validate-evaluation", str(failing_artifact)]) == 0
+    # The failing run is still a well-formed, completed artifact: it parses and validates
+    # structurally. validate-evaluation nevertheless exits non-zero, because since PR 27 that
+    # command is a build gate and not only a schema check.
+    assert validate_evaluation_run(failing_artifact).status is EvaluationRunStatus.COMPLETED
+    assert main(["validate-evaluation", str(failing_artifact)]) == 1
