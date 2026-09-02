@@ -47,13 +47,18 @@ watching the demo; it has no authority over the conversation.
   and `recall_deadline_ms` (default 150, bounded by the retrieval `MAX_DEADLINE_MS`). Any
   failure at all degrades to no recall; the `except` is deliberately broad because the turn
   is already committed and no history-read failure may surface as a turn failure.
-- The budget is not a wall-clock guarantee. It covers graph projection, indexing, and
-  scoring, but the journal load that precedes them is a fail-closed full replay whose cost
-  grows with the lead's history and cannot be preempted. Recall therefore runs off the event
-  loop on a worker thread, so a slow history read stalls only the session that asked for it.
+- The budget is not a hard wall-clock guarantee, but the history read is now bounded on its
+  own terms rather than left to grow with the lead. The projection refuses outright for a
+  lead over `max_history_events_per_lead` (default 500) before it reads a single row, and
+  checks a wall-clock budget before every event decode and while grouping and replaying, so
+  the load stops itself instead of running to completion. That budget overlaps the retrieval
+  budget rather than following it, so the ceiling is one `recall_deadline_ms` window plus the
+  steps that cannot be interrupted once started: one repository round trip, one event decode,
+  and the version recheck after projection. Recall still runs off the event loop on a worker
+  thread, so a slow history read stalls only the session that asked for it.
 - Recall self-disables for a session after `recall_failure_budget` consecutive failures or
   budget expiries (default 3), so a lead whose history has outgrown the budget degrades to
-  no recall instead of paying an unbounded cost on every turn that never returns anything.
+  no recall instead of retrying a read it will not finish on every turn.
 - Recall appends no timeline event. Advisory data must not compete with the transcript for
   the bounded per-session event window; the counts, duration, and timeout flag are already
   on `TurnResponse.recall`, and only counts are logged. The query is never journaled, and

@@ -38,6 +38,7 @@ from pitchbot.conversation import (
     ConversationResult,
     ConversationState,
     JournalCorruptionError,
+    JournalHistoryDeadlineExceededError,
     JournalHistoryUnavailableError,
     JournalOperationConflictError,
 )
@@ -189,6 +190,7 @@ class SimulatorService:
         self._clock = clock or SystemClock()
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
+        self._max_history_events_per_lead = max_history_events_per_lead
         self._max_audio_chunks_per_session = max_audio_chunks_per_session
         self._max_turn_operations_per_session = max_turn_operations_per_session
         self._conversation = conversation_engine or ConversationEngine()
@@ -221,10 +223,17 @@ class SimulatorService:
         self._speech_transcriber = speech_transcriber
         self._turn_taking = turn_taking or TurnTakingConfig()
         # Recall reads the same journal the turn was just committed to, so it is only
-        # available when durable history is enabled and lead identifiers are stable.
+        # available when durable history is enabled and lead identifiers are stable. The
+        # projection reads through a separately bounded view of that journal: the turn
+        # path must stay usable for a lead whose history has outgrown the recall bounds.
         if knowledge_retriever is None and conversation_journal is not None:
             knowledge_retriever = LeadKnowledgeBm25Retriever(
-                TemporalKnowledgeGraphBuilder(conversation_journal)
+                TemporalKnowledgeGraphBuilder(
+                    conversation_journal.with_history_bounds(
+                        max_history_events=max_history_events_per_lead,
+                        history_deadline_ms=recall_deadline_ms,
+                    )
+                )
             )
         self._recall = knowledge_retriever if conversation_journal is not None else None
         self._sessions: dict[UUID, _Session] = {}
@@ -751,12 +760,15 @@ class SimulatorService:
         a committed turn. It is skipped whenever the conversation is not a plain
         continuation, because a refusal or a close must not trigger a history read.
 
-        The retrieval budget covers projection, indexing, and scoring, but the journal
-        load that precedes them is a fail-closed full replay whose cost grows with the
-        lead's history and cannot be preempted. Recall therefore runs off the event loop
-        and self-disables for a session once it has exhausted its failure budget, so a
-        long history degrades to no recall instead of a per-turn stall that never
-        returns anything.
+        The projection read is bounded on its own terms, not by the retrieval budget it
+        precedes: it refuses outright for a lead over `max_history_events_per_lead`, and
+        it checks a wall-clock budget while decoding and replaying, so a long history is
+        detected while it is being paid for. Both bounds stop the worker thread itself
+        rather than abandoning it, so nothing keeps running behind a returned turn.
+        Recall still runs off the event loop, which also serves the latency-critical
+        audio socket, and still self-disables for a session once it has exhausted its
+        failure budget, so a lead whose history has outgrown the budget degrades to no
+        recall instead of retrying a read it will not finish.
         """
 
         if self._recall is None or replaying_durable_turn:
@@ -804,7 +816,9 @@ class SimulatorService:
                 top_k=self._recall_top_k,
                 deadline_ms=self._recall_deadline_ms,
             )
-        except RetrievalDeadlineExceededError:
+        except (RetrievalDeadlineExceededError, JournalHistoryDeadlineExceededError):
+            # An exhausted budget is the designed outcome for a long history, not a
+            # fault, so it stays at debug while genuine failures stay at warning.
             logger.debug("Lead recall exceeded its budget", exc_info=True)
             return None
         return TurnRecall(

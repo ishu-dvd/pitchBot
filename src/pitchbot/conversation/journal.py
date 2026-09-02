@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic_ns
 from typing import Literal
 from uuid import UUID
 
@@ -36,6 +38,10 @@ CONVERSATION_AGGREGATE_TYPE = "lead"
 TURN_ACCEPTED_EVENT_TYPE = "conversation.turn-accepted.v1"
 MAX_FINGERPRINT_INPUT_BYTES = 64 * 1024
 MAX_EVENT_PAYLOAD_BYTES = 2 * 1024 * 1024
+# Grouping and replay touch one small object per step, so a check every 32 keeps the
+# clock reads negligible. Decoding is checked per event instead, because a single event
+# payload may reach MAX_EVENT_PAYLOAD_BYTES and is the largest step that cannot be split.
+HISTORY_CHECK_INTERVAL = 32
 
 
 class ConversationJournalError(RuntimeError):
@@ -50,8 +56,32 @@ class JournalHistoryUnavailableError(ConversationJournalError):
     pass
 
 
+class JournalHistoryDeadlineExceededError(ConversationJournalError):
+    """A projection read exhausted its own wall-clock budget while it was being paid for."""
+
+
 class JournalCorruptionError(ConversationJournalError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryBudget:
+    """A wall-clock budget for one projection read, checked inside the calling thread.
+
+    The conversation layer carries its own budget rather than reusing
+    ``pitchbot.retrieval.RetrievalDeadline``: ``pitchbot.retrieval`` already imports
+    ``pitchbot.conversation``, so the reverse edge would be an import cycle.
+    """
+
+    started_ns: int
+    limit_ns: int
+    clock: Callable[[], int]
+
+    def check(self) -> None:
+        if self.clock() - self.started_ns >= self.limit_ns:
+            raise JournalHistoryDeadlineExceededError(
+                "conversation journal projection deadline exceeded"
+            )
 
 
 class ConversationTurnEvent(BaseModel):
@@ -171,14 +201,47 @@ class ConversationJournal:
         *,
         max_events: int = 1_000,
         load_attempts: int = 3,
+        max_history_events: int | None = None,
+        history_deadline_ms: int | None = None,
+        clock: Callable[[], int] = monotonic_ns,
     ) -> None:
         if not 1 <= max_events <= 9_999:
             raise ValueError("journal event capacity must be between 1 and 9999")
         if not 1 <= load_attempts <= 10:
             raise ValueError("journal load attempts must be between 1 and 10")
+        if max_history_events is not None and not 1 <= max_history_events <= 9_999:
+            raise ValueError("journal history bound must be between 1 and 9999")
+        if history_deadline_ms is not None and history_deadline_ms < 1:
+            raise ValueError("journal history deadline must be at least one millisecond")
         self._repository = repository
         self._max_events = max_events
         self._load_attempts = load_attempts
+        self._max_history_events = max_history_events
+        self._history_deadline_ms = history_deadline_ms
+        self._clock = clock
+
+    def with_history_bounds(
+        self,
+        *,
+        max_history_events: int,
+        history_deadline_ms: int | None = None,
+    ) -> ConversationJournal:
+        """Return a journal reading the same repository under tighter projection bounds.
+
+        The bounds govern ``knowledge_source`` only. Applying them to the turn path would
+        stop a lead whose history outgrew the bound from conversing at all, which is a
+        functional regression on an authoritative path; refusing a non-authoritative
+        projection costs only that projection.
+        """
+
+        return ConversationJournal(
+            self._repository,
+            max_events=self._max_events,
+            load_attempts=self._load_attempts,
+            max_history_events=max_history_events,
+            history_deadline_ms=history_deadline_ms,
+            clock=self._clock,
+        )
 
     def process_turn(
         self,
@@ -474,21 +537,37 @@ class ConversationJournal:
             raise ValueError("knowledge source capacities must be positive")
         if max_sessions > 1_000 or max_facts > 10_000 or max_revisions > 10_000:
             raise ValueError("knowledge source capacities exceed safe limits")
-        events, status = self._load_events(lead_id)
-        session_ids = tuple(sorted({item.event.session_id for item in events}, key=str))
+        budget = self._start_history_budget()
+        events, status = self._load_events(
+            lead_id,
+            max_events=self._max_history_events,
+            budget=budget,
+        )
+        # One grouping pass replaces one full scan of the lead's events per session, so
+        # replay is linear in the number of events rather than sessions times events.
+        grouped = self._group_by_session(events, budget)
+        session_ids = tuple(sorted(grouped, key=str))
         if not session_ids or status is None:
             raise LookupError("Conversation journal not found")
         if len(session_ids) > max_sessions:
             raise JournalHistoryUnavailableError("knowledge source session capacity reached")
         for session_id in session_ids:
-            self._replay_loaded(lead_id, session_id, events, status)
+            self._replay_session_events(
+                lead_id,
+                session_id,
+                grouped[session_id],
+                status,
+                budget=budget,
+            )
 
         facts: list[JournaledConversationFact] = []
         revisions: list[JournaledConversationRevision] = []
         facts_by_id: dict[UUID, JournaledConversationFact] = {}
         superseded_fact_ids: set[UUID] = set()
         revision_ids: set[UUID] = set()
-        for item in events:
+        for position, item in enumerate(events):
+            if budget is not None and position % HISTORY_CHECK_INTERVAL == 0:
+                budget.check()
             turn_facts = {fact.fact_id: fact for fact in item.event.result.facts}
             if len(facts) + len(item.event.result.facts) > max_facts:
                 raise JournalHistoryUnavailableError("knowledge source fact capacity reached")
@@ -617,10 +696,28 @@ class ConversationJournal:
     def _load_events(
         self,
         lead_id: UUID,
+        *,
+        max_events: int | None = None,
+        budget: _HistoryBudget | None = None,
     ) -> tuple[list[JournaledConversationTurn], AggregateStatus | None]:
+        limit = self._max_events if max_events is None else min(self._max_events, max_events)
+        over_limit_message = (
+            "conversation journal exceeds configured event capacity"
+            if limit >= self._max_events
+            else "conversation journal exceeds configured history bound"
+        )
         for _ in range(self._load_attempts):
+            # A contended aggregate can force up to `load_attempts` round trips before the
+            # decode loop is reached, so each attempt is gated too.
+            if budget is not None:
+                budget.check()
             status_before = self._repository.status(lead_id)
-            raw_events = self._repository.read(lead_id, limit=self._max_events + 1)
+            # Refuse a read that is already known to exceed the bound before paying for a
+            # single row. A history over its bound is a refusal, never a truncated view:
+            # a partial projection would be indistinguishable from a complete one.
+            if status_before is not None and status_before.current_version > limit:
+                raise JournalHistoryUnavailableError(over_limit_message)
+            raw_events = self._repository.read(lead_id, limit=limit + 1)
             status_after = self._repository.status(lead_id)
             if status_before != status_after:
                 continue
@@ -637,10 +734,8 @@ class ConversationJournal:
                     )
             elif raw_events:
                 continue
-            if len(raw_events) > self._max_events:
-                raise JournalHistoryUnavailableError(
-                    "conversation journal exceeds configured event capacity"
-                )
+            if len(raw_events) > limit:
+                raise JournalHistoryUnavailableError(over_limit_message)
             for expected_version, event in enumerate(raw_events, start=1):
                 if event.aggregate_version != expected_version:
                     raise JournalCorruptionError(
@@ -649,6 +744,10 @@ class ConversationJournal:
 
             parsed: list[JournaledConversationTurn] = []
             for event in raw_events:
+                # Decoding validates and canonicalizes a payload that may reach 2 MiB, so
+                # the budget is checked before every event rather than every batch.
+                if budget is not None:
+                    budget.check()
                 if event.event_type == TURN_ACCEPTED_EVENT_TYPE:
                     parsed.append(self._parse_event(event, lead_id))
                 elif event.event_type.startswith("conversation."):
@@ -661,6 +760,27 @@ class ConversationJournal:
             return parsed, status_after
         raise ConcurrencyConflictError("Conversation journal changed while loading")
 
+    def _start_history_budget(self) -> _HistoryBudget | None:
+        if self._history_deadline_ms is None:
+            return None
+        return _HistoryBudget(
+            started_ns=self._clock(),
+            limit_ns=self._history_deadline_ms * 1_000_000,
+            clock=self._clock,
+        )
+
+    @staticmethod
+    def _group_by_session(
+        events: list[JournaledConversationTurn],
+        budget: _HistoryBudget | None,
+    ) -> dict[UUID, list[JournaledConversationTurn]]:
+        grouped: dict[UUID, list[JournaledConversationTurn]] = {}
+        for position, item in enumerate(events):
+            if budget is not None and position % HISTORY_CHECK_INTERVAL == 0:
+                budget.check()
+            grouped.setdefault(item.event.session_id, []).append(item)
+        return grouped
+
     def _replay_loaded(
         self,
         lead_id: UUID,
@@ -669,6 +789,17 @@ class ConversationJournal:
         status: AggregateStatus | None,
     ) -> ConversationReplay:
         session_events = [item for item in events if item.event.session_id == session_id]
+        return self._replay_session_events(lead_id, session_id, session_events, status)
+
+    def _replay_session_events(
+        self,
+        lead_id: UUID,
+        session_id: UUID,
+        session_events: list[JournaledConversationTurn],
+        status: AggregateStatus | None,
+        *,
+        budget: _HistoryBudget | None = None,
+    ) -> ConversationReplay:
         if not session_events or status is None:
             raise LookupError("Conversation journal not found")
         first = session_events[0].event
@@ -679,6 +810,8 @@ class ConversationJournal:
         previous: ConversationTurnEvent | None = None
 
         for expected_turn, item in enumerate(session_events, start=1):
+            if budget is not None and (expected_turn - 1) % HISTORY_CHECK_INTERVAL == 0:
+                budget.check()
             event = item.event
             self._validate_replay_event(
                 event,
@@ -796,8 +929,7 @@ class ConversationJournal:
             result=result,
         )
 
-    @staticmethod
-    def _parse_event(event: AuditEvent, lead_id: UUID) -> JournaledConversationTurn:
+    def _parse_event(self, event: AuditEvent, lead_id: UUID) -> JournaledConversationTurn:
         if event.aggregate_type != CONVERSATION_AGGREGATE_TYPE:
             raise JournalCorruptionError("conversation journal aggregate type is invalid")
         _validate_event_size(event.payload)

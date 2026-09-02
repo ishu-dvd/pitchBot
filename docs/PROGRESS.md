@@ -536,3 +536,100 @@
   model, provider, retained buyer data, or external side effect; `run-speech` and
   `validate-speech-suite` and the synthetic corpus simply disappear, and `speech-cases.json` is
   unchanged.
+
+## PR 25: Bounded lead-recall history reads
+
+- **Branch:** `perf/recall-history-bounds`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 24 commit `a511d26`.
+- **Scope:** Make the recall budget PRs 19-20 advertise mean something. PR 22 moved the
+  durable journal off the event loop, so the loop is no longer the problem; the wall-clock
+  cost of a projection read, and its unboundedness in the lead's history, are.
+  1. **The projection replay is linear (`ConversationJournal.knowledge_source`).**
+     `_replay_loaded` was invoked once per session and each invocation filtered the whole
+     event list, so a lead cost sessions x events comparisons before projection, indexing,
+     or scoring began - 1,000,000 at the shipped defaults. Events are now grouped by
+     session in one pass and each group is replayed by a new `_replay_session_events`,
+     which is the body `_replay_loaded` now delegates to after filtering. Ordering,
+     supersession, and provenance are unchanged: grouping preserves aggregate-version
+     order within a session, and `session_ids` is still the sorted key set.
+  2. **The advertised history cap is wired (`ConversationJournal.with_history_bounds`,
+     `SimulatorService.__init__`).** `max_history_events_per_lead=500` was validated by
+     `SimulatorService` and then discarded. The simulator now derives a bounded view of
+     the journal for the auto-wired retriever, and the journal enforces the bound in
+     `_load_events` against the aggregate status *before* it reads any row.
+  3. **The budget is checked while it is being spent (`_load_events`,
+     `_replay_session_events`, `knowledge_source`).** A projection read starts its own
+     `_HistoryBudget` and checks it before every event decode, and every 32 items while
+     grouping, replaying, and projecting - not once after the load has already been paid
+     for.
+  4. **The worker bounds itself rather than being abandoned (`_process_recall`,
+     `_search_recall`).** Both bounds are enforced inside the thread that is doing the
+     work, so it returns on its own.
+  5. The `_process_recall` docstring no longer claims the load "cannot be preempted", and
+     `JournalHistoryDeadlineExceededError` joins `RetrievalDeadlineExceededError` on the
+     quiet degradation path.
+- **Safety decisions:** An over-bound history is **refused, never truncated**. A silently
+  shortened history would feed recall a partial view indistinguishable from a complete one,
+  which is worse than no recall at all; recall is explicitly non-authoritative, so refusing
+  it costs only that projection. The refusal is raised from the aggregate status before any
+  row is read, so an oversized lead cannot even materialize its rows. The bounds govern
+  `knowledge_source` only, and the simulator keeps the unbounded journal for `prepare_turn`
+  and `commit_turn`: applying a 500-event projection bound to the turn path would stop a
+  lead between the bound and the 1,000-event write capacity from conversing at all, which
+  is a functional regression on an authoritative path. Privacy state, aggregate type,
+  version agreement, and version contiguity are all validated before the first budget check
+  and before any grouping, so no fast path skips them, and `validate_knowledge_source` still
+  revalidates the version after projection. Nothing is cached: the read is made cheaper, not
+  remembered. The budget is a *journal* budget rather than the retrieval one because
+  `pitchbot.retrieval` already imports `pitchbot.conversation`, so reusing
+  `RetrievalDeadline` here would be an import cycle; `JournalHistoryDeadlineExceededError`
+  is therefore caught explicitly alongside `RetrievalDeadlineExceededError` in
+  `_search_recall`, which keeps an exhausted budget at `debug` while genuine faults stay at
+  `warning`. Recall's existing degradation is untouched: it still runs after the durable
+  commit, still cannot influence the reply, facts, evidence, classification, or disposition,
+  still cannot fail a committed turn, and still self-disables per session after
+  `recall_failure_budget` consecutive failures. `_parse_event` became an instance method so
+  the decode step is observable from a subclass; it is otherwise unchanged.
+- **Performance:** What is now bounded, plainly. A projection read costs O(E) in the lead's
+  events instead of O(sessions x E): on a 20-session, 100-event lead the deterministic
+  replay counter falls from 2,100 to 100, on a 12-session, 48-event lead from 624 to 48,
+  and at the shipped defaults the worst case falls from 1,000,000 event comparisons to
+  1,000. Rows read are capped at `max_history_events_per_lead + 1` instead of
+  `max_events + 1`, and a lead already over the bound reads **zero** rows. The budget is
+  checked before every load attempt, before every event decode, and every 32 items while
+  grouping, replaying, and projecting, so a long history is detected while it is being
+  paid for rather than after.
+  What is **not** bounded, and must not be read as if it were. `recall_deadline_ms` is
+  still not a hard caller-visible latency bound, and the number is not a promise. The
+  journal budget and the retrieval budget start within microseconds of each other -
+  `LeadKnowledgeBm25Retriever.search` starts `RetrievalDeadline` and immediately calls
+  `knowledge_source`, which starts its own - so the two windows **overlap rather than
+  compose**: the caller-visible ceiling is one `recall_deadline_ms` window plus the steps
+  that cannot be interrupted, not two. Those steps are the repository round trips
+  (`status`/`read`: bounded in rows and therefore in bytes, but not in time - a slow or
+  locked database is not preempted), one event decode (a `model_validate` plus a
+  canonicalizing `json.dumps` of a payload up to `MAX_EVENT_PAYLOAD_BYTES`, 2 MiB), and the
+  `status` revalidation that runs after projection. Because the checks bracket those steps,
+  at most one of each can still be in flight when the budget expires.
+  There is deliberately **no hard timeout**. `asyncio.wait_for(asyncio.to_thread(...))` was
+  rejected: it abandons the coroutine while the worker runs to completion, so under load it
+  accumulates runaway threads - exactly the failure it appears to fix. Cooperative
+  self-bounding was chosen instead. It costs a clock read per event and per 32 replayed
+  items, and it cannot cut a step short once that step has started; what it buys is that
+  the worker always stops itself, so no thread outlives the turn that started it and the
+  pool cannot grow one abandoned worker per over-budget recall. A true hard timeout needs a
+  cancellable storage read, which is a larger redesign than this change.
+  One honest cost: a projection budget can report a deadline where a complete decode would
+  have reported corruption. The turn path carries no budget, so corruption is still
+  surfaced authoritatively there; only the advisory read can end early.
+- **Deferred:** A genuinely preemptible storage read and therefore a real hard timeout;
+  bounding the turn path's own full-history load, which is unbounded in the same way and is
+  the next thing to fix now that recall is not; a bound on `facts_for_retrieval` and
+  `read_turns`, which still load the whole history; per-tenant or adaptive budgets;
+  persistent indexes. The unrelated PR 22 deferrals stand, as do audit findings B3-B5,
+  which are out of scope here.
+- **Rollback:** Revert PR 25. It adds no schema migration, persistent state, runtime cache,
+  model, provider, retained buyer data, external side effect, or HTTP API change; the only
+  new surface is `ConversationJournal.with_history_bounds` and its keyword arguments, and
+  behaviour returns to PR 22's unbounded projection read.
