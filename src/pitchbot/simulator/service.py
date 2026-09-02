@@ -35,6 +35,16 @@ from pitchbot.conversation import (
     JournalOperationConflictError,
 )
 from pitchbot.domain import ContactPolicy, LanguageCode
+from pitchbot.knowledge import (
+    FactClaimStatus,
+    LeadKnowledgeBm25Retriever,
+    TemporalKnowledgeGraphBuilder,
+)
+from pitchbot.retrieval import (
+    MAX_DEADLINE_MS,
+    MAX_RESULTS,
+    RetrievalDeadlineExceededError,
+)
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
@@ -43,10 +53,12 @@ from pitchbot.simulator.models import (
     DurableHistoryTurn,
     LeadHistoryResponse,
     PreviewAction,
+    RecalledClaim,
     ResumeSessionRequest,
     SessionResponse,
     SimulatorEvent,
     SimulatorEventType,
+    TurnRecall,
     TurnRequest,
     TurnResponse,
 )
@@ -117,6 +129,7 @@ class _Session:
     approved_preview_count: int = 0
     closing: bool = False
     recovered: bool = False
+    recall_failures: int = 0
     turn_operations: dict[UUID, _TurnOperation] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -134,6 +147,10 @@ class SimulatorService:
         conversation_engine: ConversationEngine | None = None,
         conversation_journal: ConversationJournal | None = None,
         action_workflows: ActionWorkflowService | None = None,
+        knowledge_retriever: LeadKnowledgeBm25Retriever | None = None,
+        recall_top_k: int = 3,
+        recall_deadline_ms: int = 150,
+        recall_failure_budget: int = 3,
     ) -> None:
         if (
             min(
@@ -146,6 +163,14 @@ class SimulatorService:
             < 1
         ):
             raise ValueError("Simulator capacities must be positive")
+        if not 1 <= recall_top_k <= MAX_RESULTS:
+            raise ValueError(f"Simulator recall_top_k must be between 1 and {MAX_RESULTS}")
+        if not 1 <= recall_deadline_ms <= MAX_DEADLINE_MS:
+            raise ValueError(
+                f"Simulator recall_deadline_ms must be between 1 and {MAX_DEADLINE_MS}"
+            )
+        if recall_failure_budget < 1:
+            raise ValueError("Simulator recall_failure_budget must be positive")
         self._clock = clock or SystemClock()
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
@@ -171,6 +196,16 @@ class SimulatorService:
                 clock=self._clock,
             )
         self._actions = action_workflows
+        self._recall_top_k = recall_top_k
+        self._recall_deadline_ms = recall_deadline_ms
+        self._recall_failure_budget = recall_failure_budget
+        # Recall reads the same journal the turn was just committed to, so it is only
+        # available when durable history is enabled and lead identifiers are stable.
+        if knowledge_retriever is None and conversation_journal is not None:
+            knowledge_retriever = LeadKnowledgeBm25Retriever(
+                TemporalKnowledgeGraphBuilder(conversation_journal)
+            )
+        self._recall = knowledge_retriever if conversation_journal is not None else None
         self._sessions: dict[UUID, _Session] = {}
         self._registry_lock = threading.Lock()
         self._admitting: set[UUID] = set()
@@ -472,7 +507,13 @@ class SimulatorService:
                         approved_preview_checkpoint,
                     )
                     raise
-            response = self._turn_response(session, outcome, preview=preview)
+            recall = await self._recall_context(
+                session,
+                request,
+                outcome,
+                replaying_durable_turn=replaying_durable_turn,
+            )
+            response = self._turn_response(session, outcome, preview=preview, recall=recall)
             operation.response = response
             return response
 
@@ -635,8 +676,10 @@ class SimulatorService:
         outcome: ConversationResult,
         *,
         preview: ActionPreviewResult | None,
+        recall: TurnRecall | None = None,
     ) -> TurnResponse:
         return TurnResponse(
+            recall=recall,
             session_id=session.session_id,
             reply=outcome.reply,
             preview=preview,
@@ -646,6 +689,99 @@ class SimulatorService:
             safety_signals=list(outcome.safety_signals),
             repeated_turn=outcome.repeated_turn,
             events=list(session.events),
+        )
+
+    async def _recall_context(
+        self,
+        session: _Session,
+        request: TurnRequest,
+        outcome: ConversationResult,
+        *,
+        replaying_durable_turn: bool,
+    ) -> TurnRecall | None:
+        """Surface what this lead said before, without any authority over this turn.
+
+        Recall runs after the durable commit, so it can never influence the reply, the
+        extracted facts, or the classification, and a recall failure can never roll back
+        a committed turn. It is skipped whenever the conversation is not a plain
+        continuation, because a refusal or a close must not trigger a history read.
+
+        The retrieval budget covers projection, indexing, and scoring, but the journal
+        load that precedes them is a fail-closed full replay whose cost grows with the
+        lead's history and cannot be preempted. Recall therefore runs off the event loop
+        and self-disables for a session once it has exhausted its failure budget, so a
+        long history degrades to no recall instead of a per-turn stall that never
+        returns anything.
+        """
+
+        if self._recall is None or replaying_durable_turn:
+            return None
+        if session.recall_failures >= self._recall_failure_budget:
+            return None
+        if outcome.safety_signals or outcome.disposition is not ConversationDisposition.CONTINUE:
+            return None
+        try:
+            recall = await asyncio.to_thread(
+                self._search_recall,
+                session.session_id,
+                session.lead_id,
+                request.text,
+            )
+        except Exception:
+            # Recall is advisory. Any history-read failure degrades to no recall rather
+            # than failing a turn that is already durably committed.
+            session.recall_failures += 1
+            logger.warning("Lead recall was unavailable for this turn", exc_info=True)
+            return None
+        if recall is None or recall.timed_out:
+            session.recall_failures += 1
+        else:
+            session.recall_failures = 0
+        # The query is the raw buyer turn, so only counts are ever recorded.
+        logger.debug(
+            "Lead recall completed: claims=%s indexed=%s timed_out=%s duration_ms=%s",
+            0 if recall is None else len(recall.claims),
+            0 if recall is None else recall.indexed_claim_count,
+            None if recall is None else recall.timed_out,
+            None if recall is None else round(recall.duration_ms),
+        )
+        return recall
+
+    def _search_recall(self, session_id: UUID, lead_id: UUID, query: str) -> TurnRecall | None:
+        """Run the bounded retrieval on a worker thread. Never called on the event loop."""
+
+        if self._recall is None:
+            return None
+        try:
+            response = self._recall.search(
+                lead_id,
+                query,
+                top_k=self._recall_top_k,
+                deadline_ms=self._recall_deadline_ms,
+            )
+        except RetrievalDeadlineExceededError:
+            logger.debug("Lead recall exceeded its budget", exc_info=True)
+            return None
+        return TurnRecall(
+            aggregate_version=response.aggregate_version,
+            duration_ms=response.duration_ms,
+            indexed_claim_count=response.indexed_claim_count,
+            timed_out=response.timed_out,
+            claims=[
+                RecalledClaim(
+                    rank=item.rank,
+                    key=item.claim.fact.key,
+                    value=item.claim.fact.value,
+                    status=item.claim.status,
+                    language=item.claim.language,
+                    session_id=item.claim.session_id,
+                    observed_at=item.claim.valid_from,
+                    confirmed_by_customer=item.claim.confirmed_by_customer,
+                    from_current_session=item.claim.session_id == session_id,
+                )
+                for item in response.results
+                if item.claim.status is not FactClaimStatus.SUPERSEDED
+            ],
         )
 
     def _restore_turn(

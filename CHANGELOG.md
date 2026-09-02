@@ -29,6 +29,7 @@ All notable changes to PitchBot are documented here.
 - Customer-confirmation provenance on temporal fact claims, retained across supersession and derived only from confirmed journal revisions.
 - Graph retrieval evaluation now projects reviewed corpora through the production temporal builder and gates on projection fidelity.
 - Paraphrase-resistant safety detection for opt-out, internal-instruction extraction, and prompt injection using bounded-window intent templates.
+- Non-authoritative lead recall on simulator turns: budgeted graph-aware retrieval of the lead's own prior claims, run after the durable commit, skipped on safety signals, non-continuing dispositions, and durable replay, run off the event loop with a per-session failure budget, and rendered read-only in the browser demo.
 
 ### Security
 

@@ -12,6 +12,7 @@ from pitchbot.conversation import (
     SafetySignal,
 )
 from pitchbot.domain import ContactPolicy, JsonValue, LanguageCode, LeadTemperature
+from pitchbot.knowledge import FactClaimStatus
 
 
 class SimulatorModel(BaseModel):
@@ -74,6 +75,35 @@ class ResumeSessionRequest(SimulatorModel):
     lead_ref: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
+class RecalledClaim(SimulatorModel):
+    """A prior claim about this lead, surfaced for context only.
+
+    Recall is never authoritative: it cannot change the reply, the extracted facts,
+    or the classification. Fact and span identifiers are deliberately omitted so the
+    browser never receives journal provenance handles.
+    """
+
+    rank: int = Field(ge=1)
+    key: str = Field(min_length=1, max_length=100)
+    value: JsonValue
+    status: FactClaimStatus
+    language: LanguageCode
+    session_id: UUID
+    observed_at: AwareDatetime
+    confirmed_by_customer: bool
+    from_current_session: bool
+
+
+class TurnRecall(SimulatorModel):
+    """Best-effort recall of what this lead said before, under its own budget."""
+
+    aggregate_version: int = Field(ge=1)
+    duration_ms: float = Field(ge=0)
+    indexed_claim_count: int = Field(ge=0)
+    timed_out: bool
+    claims: list[RecalledClaim] = Field(default_factory=list)
+
+
 class TurnResponse(SimulatorModel):
     session_id: UUID
     reply: str
@@ -83,6 +113,9 @@ class TurnResponse(SimulatorModel):
     temperature: str
     safety_signals: list[SafetySignal] = Field(default_factory=list)
     repeated_turn: bool = False
+    # ``None`` means recall was not attempted for this turn (safety signal, closed
+    # conversation, durable replay, or no durable journal), not that nothing matched.
+    recall: TurnRecall | None = None
     events: list[SimulatorEvent]
 
 

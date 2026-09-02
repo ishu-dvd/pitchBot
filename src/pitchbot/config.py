@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     require_dnd_check: bool = True
     require_calling_hours: bool = True
 
+    lead_recall_top_k: int = 3
+    lead_recall_deadline_ms: int = 150
+    lead_recall_failure_budget: int = 3
+
     timezone: str = "Asia/Kolkata"
     max_call_minutes: int = 12
     max_turns: int = 80

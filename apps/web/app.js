@@ -3,6 +3,7 @@ import { AudioTransport } from "/simulator/audio-transport.js";
 let sessionId = null;
 const timeline = document.getElementById("timeline");
 const preview = document.getElementById("action-preview");
+const recall = document.getElementById("lead-recall");
 const status = document.getElementById("connection-status");
 const closeButton = document.getElementById("close-session");
 const sendButton = document.getElementById("send-turn");
@@ -35,6 +36,33 @@ function renderEvents(events) {
   }
 }
 
+function renderRecall(payload) {
+  recall.replaceChildren();
+  const item = document.createElement("li");
+  if (!payload) {
+    item.textContent = "Not attempted for this turn";
+    recall.appendChild(item);
+    return;
+  }
+  if (payload.timed_out) {
+    item.textContent = "Recall exceeded its budget; no results";
+    recall.appendChild(item);
+    return;
+  }
+  if (!payload.claims.length) {
+    item.textContent = `Nothing recalled from ${payload.indexed_claim_count} known claims`;
+    recall.appendChild(item);
+    return;
+  }
+  for (const claim of payload.claims) {
+    const entry = document.createElement("li");
+    const origin = claim.from_current_session ? "this call" : "earlier call";
+    const confirmed = claim.confirmed_by_customer ? ", confirmed" : "";
+    entry.textContent = `${claim.rank}. ${claim.key}: ${claim.value} (${claim.status}, ${origin}${confirmed})`;
+    recall.appendChild(entry);
+  }
+}
+
 function setError(error) {
   status.textContent = error instanceof Error ? error.message : String(error);
   status.className = "error";
@@ -61,6 +89,7 @@ document.getElementById("create-session").addEventListener("click", async () => 
     status.textContent = `Connected: ${sessionId}`;
     status.className = "";
     [closeButton, sendButton, interruptButton, startAudioButton].forEach((button) => { button.disabled = false; });
+    renderRecall(null);
     renderEvents(body.events);
   } catch (error) { setError(error); }
 });
@@ -73,6 +102,7 @@ closeButton.addEventListener("click", async () => {
     audio.stop();
     sessionId = null;
     status.textContent = "Session closed";
+    renderRecall(null);
     [closeButton, sendButton, interruptButton, startAudioButton, stopAudioButton].forEach((button) => { button.disabled = true; });
   } catch (error) { setError(error); }
 });
@@ -94,6 +124,7 @@ sendButton.addEventListener("click", async () => {
       }),
     });
     preview.textContent = body.preview ? JSON.stringify(body.preview, null, 2) : "None";
+    renderRecall(body.recall);
     renderEvents(body.events);
     if ("speechSynthesis" in window) {
       speechSynthesis.cancel();

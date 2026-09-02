@@ -54,6 +54,9 @@ def _build_service() -> SimulatorService:
     return SimulatorService(
         conversation_engine=engine,
         conversation_journal=ConversationJournal(repository),
+        recall_top_k=settings.lead_recall_top_k,
+        recall_deadline_ms=settings.lead_recall_deadline_ms,
+        recall_failure_budget=settings.lead_recall_failure_budget,
     )
 
 

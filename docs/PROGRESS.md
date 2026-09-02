@@ -203,3 +203,50 @@
 - **Safety decisions:** Timeouts still return no partial results and no indexed count; graph-projection expiry carries the source aggregate version so privacy state and version are rechecked exactly once; BM25 corpus invariants are evaluated before the deadline so corruption is never downgraded to a retryable timeout. Registry critical sections hold only in-memory dictionary operations and never span `await` or blocking journal I/O; failed resume releases its reservation in the same critical section that publishes the session. Confirmation is retained on superseded claims because it is a historical fact, and the model rejects confirmation without complete provenance or dated before the claim's validity. Safety templates never span a clause boundary, suppress only reported first-person speech rather than any first-person token, require both a contact noun and a recurrence marker before a bare negator counts as an opt-out, refuse a negator preceded by an invitation marker ("why not call me again?"), and stand down entirely when another clause asks to be contacted later, because opt-out is terminal and a contradictory turn must stay recoverable. Literal opt-out phrases match whole tokens and consult the space-stripped form only for visibly separator-obfuscated turns. Templates are evaluated over both the format-character-dropped and format-character-separated tokenizations, and short-circuit on absent groups so adversarial long turns stay sub-millisecond. The simulator holds its admission reservation across action cleanup as well as conversation teardown, and republishes the session if cleanup fails so closing stays retryable.
 - **Deferred:** Asynchronous hard timeouts, preempting the synchronous journal load, persistent indexes, simulator/speech response wiring, durable simulator session registry, learned or model-based safety classification, and live channels. `graph_retrieval.projection_fidelity` compares claims, fact payloads, and relations, but it is a regression gate on `TemporalKnowledgeGraphBuilder`, not an independent gate on the corpus: the suite validator derives each claim's expected status from the same supersession fields the builder reads. Turning it into a corpus gate requires `status` to become a separately reviewed label the validator does not synthesise, which is deferred to a later reviewed corpus revision.
 - **Rollback:** Revert PR 19. It adds no schema migration, persistent index, API surface, model, provider, retained buyer data, or external side effect.
+
+## PR 20: Non-authoritative lead recall in the simulator turn path
+
+- **Branch:** `feat/simulator-lead-recall`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 19 commit `828eed4`.
+- **Scope:** Wire the graph-aware lead retrieval built in PRs 14-17 into the simulator so a
+  turn can surface what this lead already said, as context only.
+  1. `SimulatorService` accepts an optional `LeadKnowledgeBm25Retriever` and auto-wires one
+     over the durable conversation journal when durable history is enabled, under explicit
+     `recall_top_k` and `recall_deadline_ms` budgets validated against the retrieval limits.
+  2. `TurnResponse.recall` carries a bounded `TurnRecall` of ranked `RecalledClaim` entries
+     (rank, key, value, status, language, session, observation time, confirmation, and
+     whether the claim came from the current session).
+  3. The browser demo renders a dedicated read-only recall panel that states recall has no
+     authority over the reply, and resets it whenever the session changes.
+- **Safety decisions:** Recall runs strictly after the durable journal commit, so it can
+  never influence the reply, extracted facts, revisions, evidence, classification, or
+  disposition, and a recall failure can never roll back a committed turn. It is skipped
+  whenever the turn carries any safety signal or the disposition is not `CONTINUE`, because
+  a refusal or a close must not trigger a history read. It is skipped on durable replay, so
+  a session recovered after restart reports `recall=None` rather than fabricating history;
+  an idempotent retry of the same `operation_id` returns the identical cached recall and
+  emits no second event. `None` means recall was not attempted, which is deliberately
+  distinct from an empty claim list. The query is the raw buyer turn, so the `lead-recall`
+  event records counts and a rounded duration only and is never journaled. `RecalledClaim`
+  omits `fact_id` and `source_span_ids` so the browser never receives journal provenance
+  handles. Superseded claims are filtered again at the simulator boundary even though the
+  retriever already excludes them, and that boundary filter is tested directly against a
+  retriever stub that leaks one. The `except` around recall is deliberately broad: the turn
+  is already durably committed, so no history-read failure - including a driver error such as
+  `OperationalError`, which is not a `RuntimeError` - may surface as a turn failure. Recall
+  appends no timeline event, because advisory data must not evict transcript events from the
+  bounded per-session window.
+- **Performance:** the retrieval budget covers projection, indexing, and scoring, but the
+  journal load that precedes them is a fail-closed full replay whose cost grows with the
+  lead's history and cannot be preempted. Recall therefore runs on a worker thread rather
+  than the event loop, and self-disables for a session after `recall_failure_budget`
+  consecutive failures or budget expiries, so a lead whose history has outgrown the budget
+  degrades to no recall instead of stalling every later turn for nothing. Making the load
+  itself preemptible or bounding it independently of history length is deferred.
+- **Deferred:** Using recall in reply generation or classification (it stays advisory),
+  asynchronous hard timeouts, persistent indexes, speech response wiring, durable simulator
+  session registry, and live channels.
+- **Rollback:** Revert PR 20. It adds no schema migration, persistent index, model,
+  provider, retained buyer data, or external side effect; the only API change is an
+  additive, nullable `recall` field on the turn response.
