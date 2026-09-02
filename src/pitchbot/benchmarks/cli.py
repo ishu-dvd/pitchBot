@@ -28,7 +28,9 @@ from pitchbot.benchmarks.retrieval import (
     validate_retrieval_suite,
 )
 from pitchbot.benchmarks.speech import (
+    load_speech_suite,
     run_speech_evaluation,
+    speech_gates_pass,
     validate_speech_suite,
 )
 
@@ -178,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "run-speech":
+        vad_suite = load_speech_suite(args.path)
         run = run_speech_evaluation(
             args.path,
             run_id=args.run_id,
@@ -189,9 +192,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{run.model_dump_json(indent=2)}\n",
             overwrite=args.force,
         )
-        gates = "pass" if run.gates_pass() else "fail"
+        passed = speech_gates_pass(run, vad_suite)
+        gates = "pass" if passed else "fail"
         print(f"completed {len(run.cases)} vad cases; artifact-gates={gates}")
-        return 0
+        return 0 if passed else 1
     if args.command == "environment":
         print(capture_hardware_profile().model_dump_json(indent=2))
         return 0

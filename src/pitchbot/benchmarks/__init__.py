@@ -57,6 +57,7 @@ from pitchbot.benchmarks.speech import (
     VadSuiteCase,
     VadSuiteSegment,
     run_speech_evaluation,
+    speech_gates_pass,
     validate_speech_suite,
 )
 
@@ -100,6 +101,7 @@ __all__ = [
     "run_graph_retrieval_evaluation",
     "run_retrieval_evaluation",
     "run_speech_evaluation",
+    "speech_gates_pass",
     "structured_field_accuracy",
     "validate_evaluation_run",
     "validate_graph_retrieval_suite",

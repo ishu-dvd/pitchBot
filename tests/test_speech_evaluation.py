@@ -22,10 +22,11 @@ from pitchbot.benchmarks.audio import (
 )
 from pitchbot.benchmarks.cli import main
 from pitchbot.benchmarks.metrics import Interval, vad_precision_recall_f1
-from pitchbot.benchmarks.models import EvaluationMetric
+from pitchbot.benchmarks.models import EvaluationMetric, MetricDirection
 from pitchbot.benchmarks.speech import (
     VadSuite,
     run_speech_evaluation,
+    speech_gates_pass,
     validate_speech_suite,
 )
 
@@ -87,6 +88,7 @@ def _write_suite(
     *,
     frame_ms: int = 20,
     sample_rate_hz: int = 16_000,
+    speech_threshold_bytes: int = 512,
     min_f1: float = 0.85,
     fill_hashes: bool = True,
 ) -> Path:
@@ -103,7 +105,7 @@ def _write_suite(
         "corpus_version": "1",
         "frame_ms": frame_ms,
         "sample_rate_hz": sample_rate_hz,
-        "speech_threshold_bytes": 512,
+        "speech_threshold_bytes": speech_threshold_bytes,
         "min_f1": min_f1,
         "cases": prepared,
     }
@@ -225,6 +227,49 @@ def test_bad_detector_fails_the_gate() -> None:
     assert all(case.status.value == "failed" for case in run.cases)
     assert all(_metric(case.metrics, "speech.vad_f1") == 0.0 for case in run.cases)
     assert all("vad-f1-below-threshold" in case.failure_codes for case in run.cases)
+
+
+def test_speech_gate_is_suite_aware_unlike_the_shared_fail_open_gate() -> None:
+    suite = validate_speech_suite(SUITE_PATH)
+    run = run_speech_evaluation(SUITE_PATH, run_id="vad-gate", git_revision="abcdef1")
+
+    assert speech_gates_pass(run, suite) is True
+
+    # Strip the run down to a single unrelated passing metric and drop every case metric.
+    stripped = run.model_copy(
+        update={
+            "metrics": (
+                EvaluationMetric(
+                    name="unrelated.pass",
+                    value=1.0,
+                    unit="ratio",
+                    direction=MetricDirection.AT_LEAST,
+                    threshold=0.0,
+                ),
+            ),
+            "cases": tuple(case.model_copy(update={"metrics": ()}) for case in run.cases),
+        }
+    )
+
+    # The shared, non-suite-aware gate is fail-open: it passes on an unrelated metric.
+    assert stripped.gates_pass() is True
+    # run-speech's suite-aware gate fails closed because the required VAD metrics are absent.
+    assert speech_gates_pass(stripped, suite) is False
+
+
+def test_speech_gate_rejects_a_failed_case_and_a_foreign_run() -> None:
+    suite = validate_speech_suite(SUITE_PATH)
+    run = run_speech_evaluation(
+        SUITE_PATH,
+        run_id="vad-bad",
+        git_revision="abcdef1",
+        detector_factory=lambda: _ConstantDetector(False),
+    )
+    assert speech_gates_pass(run, suite) is False
+
+    good = run_speech_evaluation(SUITE_PATH, run_id="vad-ok", git_revision="abcdef1")
+    foreign = good.model_copy(update={"suite_id": "someone-elses-suite"})
+    assert speech_gates_pass(foreign, suite) is False
 
 
 def test_always_speech_detector_fails_cases_that_contain_silence(tmp_path: Path) -> None:
@@ -541,3 +586,58 @@ def test_speech_cli_rejects_a_corrupted_corpus(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="checksum mismatch"):
         main(["validate-speech-suite", str(path)])
+
+
+def test_run_speech_cli_exit_code_reflects_the_gate(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    case = _case(
+        case_id="en-apparel-clear",
+        language="en",
+        vertical="apparel",
+        condition="clear",
+        persona="buyer",
+        seed=1,
+        pairs=_clear(),
+    )
+    passing = _write_suite(tmp_path, [dict(case)])
+    passing_artifact = tmp_path / "vad-pass.json"
+    assert (
+        main(
+            [
+                "run-speech",
+                str(passing),
+                str(passing_artifact),
+                "--run-id",
+                "vad-pass",
+                "--git-revision",
+                "abcdef1",
+            ]
+        )
+        == 0
+    )
+    assert "artifact-gates=pass" in capsys.readouterr().out
+
+    # A mis-tuned threshold above the 600-byte voiced frame size: the mock never detects
+    # speech, so the gate must fail and the process must exit non-zero - not print "fail"
+    # and return 0 like the shared runners currently do.
+    failing = _write_suite(tmp_path, [dict(case)], speech_threshold_bytes=1000)
+    failing_artifact = tmp_path / "vad-fail.json"
+    assert (
+        main(
+            [
+                "run-speech",
+                str(failing),
+                str(failing_artifact),
+                "--run-id",
+                "vad-fail",
+                "--git-revision",
+                "abcdef1",
+            ]
+        )
+        == 1
+    )
+    assert "artifact-gates=fail" in capsys.readouterr().out
+    # The failing run is still a well-formed, completed artifact.
+    assert main(["validate-evaluation", str(failing_artifact)]) == 0

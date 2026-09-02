@@ -54,6 +54,27 @@ from pitchbot.domain import LanguageCode
 
 _CAPTURE_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
+# Metrics every honest VAD artifact must carry. run-speech gates on the *presence* of these
+# names, not merely on some metric passing, so an artifact stripped of its VAD metrics fails
+# closed instead of sneaking through the shared, non-suite-aware EvaluationRun.gates_pass().
+_REQUIRED_CASE_METRICS = frozenset(
+    {
+        "speech.vad_f1",
+        "speech.vad_precision",
+        "speech.vad_recall",
+        "speech.real_time_factor",
+    }
+)
+_REQUIRED_RUN_METRICS = frozenset(
+    {
+        "speech.vad_mean_f1",
+        "speech.vad_min_f1",
+        "speech.mean_real_time_factor",
+        "speech.p95_real_time_factor",
+        "speech.peak_python_kib",
+    }
+)
+
 
 class SpeechSuiteModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -418,6 +439,44 @@ def run_speech_evaluation(
     )
 
 
+def _required_run_metric_names(suite: VadSuite) -> set[str]:
+    names = set(_REQUIRED_RUN_METRICS)
+    for case in suite.cases:
+        names.add(f"speech.vad_f1.lang.{case.language.value}")
+        names.add(f"speech.vad_f1.cond.{case.condition}")
+        names.add(f"speech.vad_f1.vert.{case.vertical}")
+    return names
+
+
+def speech_gates_pass(run: EvaluationRun, suite: VadSuite) -> bool:
+    """Suite-aware, fail-closed gate for a VAD run.
+
+    The shared ``EvaluationRun.gates_pass()`` is non-suite-aware: it flattens whatever
+    metrics happen to be present and passes as long as at least one gating metric passes, so
+    an artifact missing every VAD metric can still "pass". run-speech does not inherit that.
+    This gate additionally requires that the run corresponds to the reviewed suite, that
+    every case and every required run metric is present, and only then that all cases passed
+    and every gating metric met its threshold. Any missing required metric fails closed.
+    """
+
+    if run.status is not EvaluationRunStatus.COMPLETED or not run.cases:
+        return False
+    if run.suite_id != suite.suite_id or run.corpus_id != suite.corpus_id:
+        return False
+    if {case.case_id for case in run.cases} != {case.case_id for case in suite.cases}:
+        return False
+    if not _required_run_metric_names(suite) <= {metric.name for metric in run.metrics}:
+        return False
+    for case in run.cases:
+        if case.status is not EvaluationCaseStatus.PASSED:
+            return False
+        if not _REQUIRED_CASE_METRICS <= {metric.name for metric in case.metrics}:
+            return False
+    all_metrics = (*run.metrics, *(metric for case in run.cases for metric in case.metrics))
+    gating = [result for metric in all_metrics if (result := metric.meets_threshold()) is not None]
+    return bool(gating) and all(gating)
+
+
 def _hardware_label(
     value: str,
     *,
@@ -437,6 +496,7 @@ __all__ = [
     "build_case_clip",
     "load_speech_suite",
     "run_speech_evaluation",
+    "speech_gates_pass",
     "validate_speech_suite",
     "verify_and_build_clips",
 ]
