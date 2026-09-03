@@ -10,6 +10,8 @@ PR 30 runs the first **real** speech provider — `py-webrtcvad` — through tha
 
 PR 33 adds the first provider that **produces speech**: an opt-in Piper text-to-speech adapter. It satisfies the gate this document set for Piper — *"Distribution review + each voice license required"* — and the review returned a **blocking finding**: **no published Piper Hindi voice is cleared for commercial use**, and the widely used `en_US-amy-low` is not either. See [Piper distribution and voice license review](#piper-distribution-and-voice-license-review-2026-09-03). **No TTS provider is selected**, no TTS quality is claimed, and no voice is bundled; the adapter refuses a non-commercial voice unless a caller explicitly opts in for local evaluation.
 
+PR 34 adds the first provider that **recognises speech**: an opt-in `faster-whisper` adapter. Its licences are clean (see [faster-whisper license review](#faster-whisper-license-review-2026-09-03)), but measuring it produced a finding that changes how speech recognition must be integrated: **real-time factor is a misleading metric for Whisper**, because cost is essentially constant per padded 30-second window rather than proportional to audio. The number that matters is *latency after end-of-speech*, and it is roughly **2.1 s**. See [Measured result: faster-whisper](#measured-result-faster-whisper-cpu-int8). **No STT provider is selected** and no word-error-rate claim is made: the only speech available is synthesised, and round-trip measurement cannot separate recognition quality from synthesis quality.
+
 No audio file or model weight is committed. Planned STT/TTS corpus entries are test requirements, not evidence; synthetic VAD audio is regenerated from a seed and hash-verified rather than committed as a binary.
 
 ## Candidate review
@@ -18,7 +20,7 @@ Repository metadata was checked on 2026-08-31 using the GitHub API:
 
 | Candidate | Kind | Repository license reported | Gate |
 |---|---|---:|---|
-| faster-whisper | STT | MIT | Model license + measured benchmark required |
+| faster-whisper | STT | MIT | **Reviewed 2026-09-03 (below). Adapter landed opt-in; no provider selected.** |
 | whisper.cpp | STT | MIT | Model license + measured benchmark required |
 | Silero VAD | VAD | MIT | Model artifact license + benchmark required |
 | py-webrtcvad | VAD | NOASSERTION | **License reviewed 2026-09-03 (below). Measured 2026-09-03; not selected.** |
@@ -146,6 +148,102 @@ separately.
 **Consequence for the VAD corpus.** [What the corpus would need to select a VAD](#what-the-corpus-would-need-to-select-a-vad) asks for spectrally speech-like audio, which the
 byte-size synthetic generator cannot produce. Piper output *is* speech-like and can now be
 made byte-reproducible, so it can generate that corpus. That work is not in this PR.
+
+### faster-whisper license review (2026-09-03)
+
+This table required *"Model license + measured benchmark required"*. Unlike the Piper voice
+review, nothing here is restricted — but it was checked rather than assumed, because PR 33
+found a non-commercial license hiding behind a finetune.
+
+| Artifact | License | Commercial |
+|---|---|---|
+| `faster-whisper` (SYSTRAN) | MIT | yes |
+| CTranslate2 | MIT | yes |
+| `Systran/faster-whisper-*` weights | **MIT** | yes |
+| upstream `openai/whisper-*` | **Apache-2.0** | yes |
+
+The weights are chased to their upstream model, which is the lesson PR 33 paid for: a
+model's license follows the artifact it was derived from. Recorded in
+`KNOWN_MODEL_LICENSES` (`pitchbot.adapters.faster_whisper_stt`), and an unreviewed model
+identifier is refused at construction rather than run.
+
+**Weights are never downloaded by PitchBot.** `WhisperModel` fetches from Hugging Face on
+first use by default; the adapter inverts that and passes `local_files_only=True` unless a
+caller explicitly opts in, so a missing model is an error naming how to pre-fetch it rather
+than a silent multi-hundred-megabyte download mid-call or in CI.
+
+### Measured result: faster-whisper (CPU, int8)
+
+- **Measurement source:** measured (not planned, not placeholder).
+- **Package:** `faster-whisper==1.2.1`, model `small`, `compute_type=int8`, `device=cpu`,
+  `beam_size=1`.
+- **Hardware:** Windows 11, Python 3.12, CPU only, **no accelerator**.
+- **Audio:** Piper-synthesised speech. **Not human speech**, and therefore a floor rather
+  than a quality claim — see the limitation below.
+
+#### The finding: real-time factor is the wrong metric for Whisper
+
+Whisper always encodes a **padded 30-second mel window**, so cost is essentially constant
+per call rather than proportional to the audio:
+
+| audio | inference | RTF |
+|---:|---:|---:|
+| 3.58 s | 2.09 s | 0.584 |
+| 7.15 s | 2.15 s | 0.301 |
+| 14.30 s | 2.10 s | 0.147 |
+| 28.61 s | 2.09 s | 0.073 |
+| 42.91 s | **3.93 s** | 0.092 |
+
+**Twelve times the audio for 1.9x the time** — and that 1.9x appears only at 42.91 s, where
+the clip crosses into a *second* window and costs almost exactly twice as much. Cost
+**quantises per 30-second window**.
+
+RTF therefore looks alarming on a short clip and excellent on a long one while the model
+does identical work. An earlier reading of "RTF 1.06" on a 1.7 s Hindi clip was an artifact
+of dividing a fixed ~2.1 s cost by a short duration, not a throughput limit.
+
+**The number that matters is latency after end-of-speech: ~2.1 s, roughly constant.** That
+is what a caller waits through, and it is long — natural conversational turn gaps are around
+200 ms. It is recorded here as this model's floor on this hardware rather than hidden behind
+a flattering RTF.
+
+Three design consequences are implemented in the adapter:
+
+1. **Chopping audio into small streaming chunks would be pathological**, because every chunk
+   pays a full window pass. The adapter consumes one endpointed utterance and transcribes it
+   once; `SpeechTurnPipeline` already buffers exactly that way.
+2. **Partials are real, not fabricated.** Whisper emits segments as it decodes and never
+   revises them, so each is yielded as a non-final chunk carrying the transcript so far.
+3. **Exactly one final chunk carries the complete text**, because
+   `SpeechTurnPipeline._best_transcript` keeps the *last* final transcript — a per-segment
+   final would silently discard everything before the last segment.
+
+#### Model size is a correctness constraint, not a speed preference
+
+Round-trip measurement across sizes (synthesised speech, CPU/int8):
+
+| model | EN WER | HI WER | Hindi output |
+|---|---:|---:|---|
+| `tiny` | 23.4% | **105%** | romanised Latin |
+| `base` | 9.1% | **100%** | **Urdu / Arabic script** |
+| `small` | 0.0-11% | 22-50% | correct Devanagari |
+
+`tiny` and `base` are **disqualified for this product**. They do not merely score badly on
+Hindi — they emit the wrong *script* entirely, which no threshold tuning fixes. Speed cannot
+be bought by going smaller, so `small` is the default and a test pins that.
+
+#### Limitation that prevents this being a provider selection
+
+**Round-trip WER cannot separate recognition quality from synthesis quality.** The audio was
+produced by Piper, whose Hindi voice is itself of unmeasured quality and non-commercially
+licensed. A high Hindi WER here may be measuring bad synthesis rather than bad recognition —
+the same class of problem as the VAD corpus measuring itself, below. These numbers are a
+**floor, not a WER claim about real buyers**.
+
+[TTS and audio similarity](#tts-and-audio-similarity) already requires ASR bias to be
+disclosed when round-trip ASR is used; this is that disclosure. **No STT provider is
+selected**, and ADR-0004's gate is not satisfied, because that requires reviewed consented
+or licensed human audio which does not yet exist in this repository.
 
 ### VAD candidate comparison, measured 2026-09-03
 

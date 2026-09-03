@@ -50,6 +50,17 @@ webrtc-vad = ["webrtcvad-wheels>=2.0.14,<3"]
 # carries its own separate license, and most published Piper voices are non-commercial --
 # see `KNOWN_VOICE_LICENSES` in `pitchbot.adapters.piper_tts` and `docs/BENCHMARKS.md`.
 piper-tts = ["piper-tts>=1.7.0,<2"]
+# Optional speech-to-text provider. Never a runtime requirement: pitchbot imports, and the
+# whole test suite passes, with this absent.
+#
+# `faster-whisper` and CTranslate2 are MIT; the `Systran/faster-whisper-*` weights are MIT
+# and the upstream `openai/whisper-*` models they convert are Apache-2.0. All permissive --
+# unlike the Piper *voices* above, which are mostly non-commercial.
+#
+# Model weights are NOT installed by this extra. The adapter passes `local_files_only=True`
+# unless a caller explicitly opts in, so a missing model is a clear error rather than a
+# silent multi-hundred-megabyte download mid-call or in CI.
+faster-whisper = ["faster-whisper>=1.0.0,<2"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
