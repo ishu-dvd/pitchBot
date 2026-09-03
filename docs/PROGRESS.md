@@ -1880,3 +1880,78 @@
   `evaluation-run-v1` schema gains one enum value (`te`); reverting removes it, which is
   backward-compatible for readers. Reverting restores the substring vocabulary matching,
   which is a correctness regression, and removes Telugu entirely.
+
+
+## PR 41: Hear the buyer, and actually sell
+
+- **Base:** `95a9abe` (PR 40 merged).
+- **Change:** A complete local **voice loop** -- microphone in, spoken reply out, in English,
+  Hindi and Telugu -- and a reply planner that **sells** instead of only qualifying: it
+  answers objections, pitches the buyer's vertical, and closes on agreement. The sales
+  vocabulary that was duplicated across three modules is now defined once.
+- **Why:** Two things the product claimed and could not do. It had a detector, an
+  endpointer, a transcriber and a synthesiser, and no way to capture a voice -- every
+  utterance it had ever heard was one it had been handed by a test or a socket. And it
+  answered a buyer who said "that is too expensive" with the next form field.
+- **Findings, in the order they were found:**
+  1. **`Intent` was dead in two independent places.** It was computed by the planner and
+     handed to a renderer that never read it, *and* it was produced only by the optional
+     language model -- so the default configuration, which is what the entire test suite
+     runs in, could not observe an objection or an agreement at all. Either defect alone
+     would have made objection handling inert; both were present. Stance detection now
+     lives in the rules and needs no dependency, and a model still wins when installed.
+  2. **The sales vocabulary existed in three copies.** `rules.py` matched against one,
+     `actions/policy.py` allowlisted a second, `actions/decks.py` a third. Nothing linked
+     them, so adding a vertical to the extractor produced facts the policy silently
+     discarded and the deck builder silently dropped -- with every test passing, because
+     each copy was internally consistent. One catalogue now, in `pitchbot.domain.catalog`.
+  3. **A hedge word broke budget extraction.** `"Our budget is around 150000 rupees"` filled
+     no slot: the pattern required digits immediately after the cue. The buyer answered, the
+     answer was discarded, the agent asked again, hit `MAX_ASKS_PER_SLOT` and closed without
+     a budget -- the symptom PR 39 bounded, with its cause still live one layer down. Found
+     by running the sales script this PR ships, not by reading the pattern.
+  4. **Agreeing produced the same sentence twice.** "Okay, let's start." returned the
+     identical "would a demo or a proposal help?" the buyer had just answered. Reading as
+     not-listening at the single most valuable moment in the conversation. A `confirm`
+     phrase now commits to the next step instead.
+- **Measurements:** PortAudio opens 16 kHz mono int16 **directly** (verified for 16/44.1/48
+  kHz), so the capture path needs no resampler and no repacker -- frames are produced at
+  exactly the 30 ms the WebRTC detector accepts. Device open costs **~844 ms**, longer than
+  many utterances, so the stream is opened once and gated with pause/resume rather than
+  reopened. Stance detection scored **15/15** across four stances plus a no-stance control
+  in three languages. `sounddevice` is **MIT** and bundles PortAudio, also MIT.
+- **Design decisions worth stating:**
+  - **Half duplex, deliberately.** There is no acoustic echo cancellation, so the microphone
+    is paused for the whole reply. The pipeline supports barge-in; enabling it here would
+    fire on the agent's own voice. The cost -- the buyer cannot interrupt -- is documented
+    rather than hidden.
+  - **Back-pressure discards the oldest frame.** Dropping the newest is easier and wrong:
+    stale audio pushed into an endpointer reports silence that has already been broken, so
+    the turn closes in the wrong place. A bounded queue is also the only version that cannot
+    retain unbounded call audio while the agent is busy.
+  - **An objection is answered *and* the conversation still moves.** Answering then falling
+    silent trades one failure for another.
+  - **A commitment outranks a concern in the same breath.** `"It is expensive but let's
+    start."` closes. Making a decided buyer wait is the expensive mistake.
+  - **Budget hedges are a closed list, not a permissive gap.** A gap would read `"budget is
+    not decided, we sold 500 units"` as a budget of 500. A missed budget costs a question;
+    an invented one shapes a proposal.
+  - **The pitch is indexed by a catalogue key, never by extracted text.** `business_type` is
+    a closed token from our own vocabulary, so the safety property that no buyer text
+    reaches a reply survives intact. `budget_stated` and `timeline` do carry buyer text and
+    are therefore never rendered.
+- **Tests:** 730 -> 797 passing. New: the microphone (framing, drop-oldest back-pressure,
+  pause/resume, unavailable hardware, licence provenance) tested against a fake PortAudio
+  stream so CI needs no sound card; the voice loop end to end from captured frames to a
+  reply that pitches the vertical; the catalogue asserted to be the single source the policy
+  and deck allowlists agree with; selling coverage driven from `supported_languages()` and
+  `business_types()`, so a new language or vertical that cannot object, pitch or close fails
+  immediately.
+- **Deferred:** No language detection still -- the caller declares it, which the voice loop
+  makes more visible, not less. Transliterated Telugu transcripts are still only logged.
+  Vocabulary is still six verticals and five features. Barge-in needs echo cancellation.
+  The voice loop is CLI-only; the server still speaks only for spoken turns. No model is
+  selected and ADR-0004's gate still needs the extraction corpus.
+- **Rollback:** Revert PR 41. No schema migration and no persistent state; the `microphone`
+  extra is additive and absent by default. Reverting restores the duplicated vocabulary and
+  the dead `Intent`, both correctness regressions, and removes voice input entirely.

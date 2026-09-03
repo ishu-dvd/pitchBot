@@ -30,11 +30,12 @@ import sys
 import tempfile
 import time
 import wave
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from pitchbot.adapters.contracts import AudioChunk
 from pitchbot.conversation import ConversationEngine
 from pitchbot.conversation.models import ConversationResult
 from pitchbot.conversation.planning import Slot, supported_languages
@@ -42,6 +43,7 @@ from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
+VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
 
 LANGUAGE_NAMES = {
     LanguageCode.ENGLISH: "English",
@@ -233,6 +235,100 @@ async def build_understanding(model_dir: Path, model_id: str | None) -> tuple[An
     return ModelTurnUnderstanding(adapter), note
 
 
+class Listener:
+    """Turns live microphone audio into finished buyer turns.
+
+    The pipeline is the same :class:`~pitchbot.speech.pipeline.SpeechTurnPipeline` the
+    server runs, so what is heard here is what would be heard on a call. Only the source
+    differs, and that is the point: everything downstream of the microphone was already
+    tested and had simply never been given a live voice.
+
+    Turn-taking is **half duplex**. There is no acoustic echo cancellation, so a microphone
+    left open while the agent speaks hears the agent and endpoints on it. Capture is paused
+    for the duration of each reply instead. The cost is that a buyer cannot interrupt, which
+    the pipeline is otherwise capable of; that is a real limitation and is stated rather
+    than papered over with a barge-in that would trigger on our own voice.
+    """
+
+    def __init__(self, microphone: Any, pipeline: Any) -> None:
+        self._microphone = microphone
+        self._pipeline = pipeline
+        self._frames: AsyncIterator[AudioChunk] | None = None
+
+    async def next_turn(self, *, on_skip: Callable[[str], None] | None = None) -> str | None:
+        """Wait until the buyer finishes a sentence and return it.
+
+        Returns ``None`` only when the microphone closes, which is how the conversation
+        ends. Utterances that endpoint but cannot be understood are reported through
+        ``on_skip`` and waited past rather than returned: handing an empty turn to the
+        engine would spend a reply on silence, and staying quiet about it would look like
+        the program had hung.
+        """
+
+        if self._frames is None:
+            self._frames = self._microphone.frames()
+        async for chunk in self._frames:
+            outcome = await self._pipeline.push(chunk)
+            utterance = outcome.utterance
+            if utterance is None:
+                continue
+            if utterance.is_turn and utterance.text:
+                return str(utterance.text)
+            if on_skip is not None:
+                on_skip(utterance.outcome.value)
+        return None
+
+    def agent_started_speaking(self) -> None:
+        self._microphone.pause()
+        self._pipeline.agent_started_speaking()
+
+    def agent_stopped_speaking(self) -> None:
+        self._pipeline.agent_stopped_speaking()
+        self._microphone.resume()
+
+    async def close(self) -> None:
+        """Release the device. Ending the conversation must not leave a mic open."""
+
+        await self._microphone.stop()
+
+
+def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Listener | None, str]:
+    """A microphone-backed listener for this language, or the reason there is not one."""
+
+    from pitchbot.adapters.faster_whisper_stt import (
+        FASTER_WHISPER_AVAILABLE,
+        FasterWhisperSpeechToTextAdapter,
+    )
+    from pitchbot.adapters.faster_whisper_stt import INSTALL_HINT as STT_HINT
+    from pitchbot.adapters.webrtc_vad import INSTALL_HINT as VAD_HINT
+    from pitchbot.adapters.webrtc_vad import WEBRTC_VAD_AVAILABLE, WebRtcVoiceActivityDetector
+    from pitchbot.speech.microphone import FRAME_MS, SAMPLE_RATE_HZ, Microphone, is_available
+    from pitchbot.speech.pipeline import SpeechTurnPipeline
+
+    if not is_available():
+        return None, "sounddevice is not installed: pip install 'pitchbot[microphone]'"
+    if not WEBRTC_VAD_AVAILABLE:
+        return None, f"no voice-activity detector. Install it with: {VAD_HINT}"
+    if not FASTER_WHISPER_AVAILABLE:
+        return None, f"no transcriber. Install it with: {STT_HINT}"
+
+    microphone = Microphone(device=args.input_device, sample_rate_hz=SAMPLE_RATE_HZ)
+    pipeline = SpeechTurnPipeline(
+        detector=WebRtcVoiceActivityDetector(mode=args.vad_mode, sample_rate_hz=SAMPLE_RATE_HZ),
+        transcriber=FasterWhisperSpeechToTextAdapter(
+            model_size=args.whisper_model, language=language
+        ),
+        language=language,
+        # Must match what the microphone actually produces. The default assumes 250 ms
+        # frames, and a mismatch here does not fail loudly - it silently misreports every
+        # duration the endpointer reasons about, so silence is measured eight times too
+        # long and the buyer never gets to finish a sentence.
+        frame_duration_ms=FRAME_MS,
+    )
+    listener = Listener(microphone, pipeline)
+    return listener, f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model}"
+
+
 def scripted_turns(path: Path | None) -> list[str] | None:
     """Buyer turns read from a file, so a demo can be replayed exactly.
 
@@ -253,9 +349,19 @@ async def run(args: argparse.Namespace) -> int:
         return 2
 
     speaker: Speaker | None = None
-    if args.speak:
+    if args.speak or args.listen:
+        # Listening without speaking is a conversation the buyer can only lose, so --listen
+        # implies --speak. A voice loop that answers in text is a demo of the microphone,
+        # not of the product.
         speaker, note = build_speaker(language, Path(args.voices_dir))
         print(f"  voice     : {note}")
+
+    listener: Listener | None = None
+    if args.listen:
+        listener, note = build_listener(language, args)
+        print(f"  listening : {note}")
+        if listener is None:
+            return 2
 
     understanding: Any | None = None
     if args.understand:
@@ -266,19 +372,27 @@ async def run(args: argparse.Namespace) -> int:
     session_id = uuid4()
     engine.create_session(session_id)
 
-    print(BANNER)
+    print(BANNER if listener is None else VOICE_BANNER)
     print(f"  language  : {LANGUAGE_NAMES.get(language, language.value)}")
     print()
     opener = OPENERS[language]
     print(f"  bot  \u203a {opener}")
-    if speaker is not None:
-        await speaker.say(opener)
+    await speak(opener, speaker, listener)
 
     script = scripted_turns(Path(args.script) if args.script else None)
     index = 0
 
     while True:
-        if script is not None:
+        if listener is not None:
+            print("\n  listening...", flush=True)
+            heard = await listener.next_turn(
+                on_skip=lambda reason: print(f"       ! ignored: {reason}", flush=True)
+            )
+            if heard is None:
+                break
+            text = heard
+            print(f"  you  \u203a {text}")
+        elif script is not None:
             if index >= len(script):
                 break
             text = script[index]
@@ -304,12 +418,15 @@ async def run(args: argparse.Namespace) -> int:
         print(render_turn(result, known, elapsed_ms, verbose=not args.quiet))
 
         if speaker is not None:
-            problem = await speaker.say(result.reply)
+            problem = await speak(result.reply, speaker, listener)
             if problem is not None:
                 # Stop trying after the first failure. Repeating the same audio error on
                 # every turn would bury the conversation it is meant to accompany.
                 print(f"       ! audio disabled: {problem}")
                 speaker = None
+
+    if listener is not None:
+        await listener.close()
 
     snapshot = engine.snapshot(session_id)
     print(
@@ -317,6 +434,25 @@ async def run(args: argparse.Namespace) -> int:
         f"phase {snapshot.phase.value}"
     )
     return 0
+
+
+async def speak(text: str, speaker: Speaker | None, listener: Listener | None) -> str | None:
+    """Say ``text``, holding the floor so the microphone does not hear the agent.
+
+    The floor is yielded in a ``finally`` because a synthesis failure that left the
+    microphone paused would end the conversation silently: the buyer would keep talking to
+    a program that had stopped listening and would never say so.
+    """
+
+    if speaker is None:
+        return None
+    if listener is not None:
+        listener.agent_started_speaking()
+    try:
+        return await speaker.say(text)
+    finally:
+        if listener is not None:
+            listener.agent_stopped_speaking()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -353,6 +489,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-id",
         help="upstream model id for the licence check, e.g. microsoft/Phi-3.5-mini-instruct",
+    )
+    parser.add_argument(
+        "--listen",
+        action="store_true",
+        help="hold the conversation by voice using the microphone (needs the microphone, "
+        "webrtc-vad and faster-whisper extras); implies --speak",
+    )
+    parser.add_argument(
+        "--input-device",
+        help="microphone to capture from, by index or name; omit for the system default",
+    )
+    parser.add_argument(
+        "--vad-mode",
+        type=int,
+        default=2,
+        choices=(0, 1, 2, 3),
+        help="webrtc voice-activity aggressiveness; higher discards more non-speech",
+    )
+    parser.add_argument(
+        "--whisper-model",
+        default="small",
+        help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
     )
     parser.add_argument(
         "--script",

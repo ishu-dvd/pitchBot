@@ -23,7 +23,10 @@ The implemented application currently provides only:
 - The agent now **plans what to say** instead of returning one fixed sentence per language every turn. A deterministic planner reads the four slots the conversation has filled — business type, requested features, budget, timeline — acknowledges what was just learned, and asks for the most useful missing one, abandoning a slot after two unanswered attempts. It needs no model, costs ~1 ms, and works offline. The rendered reply is composed of fixed phrases only, so no buyer text can reach the agent's own words.
 - An optional **local language model** behind the previously unimplemented text model contract, run on CPU through `onnxruntime-genai` (MIT, no PyTorch; chosen because `llama-cpp-python` publishes no Windows wheel on PyPI at any version). Its output is **structurally constrained** to a JSON schema rather than parsed out of prose. It improves *understanding* of code-mixed input and feeds the same planner, so it can never change how a reply is composed. **No model is selected**: measured on an 8-core CPU, a 0.5B model answers in 950 ms but scored 1/10, while a 3.8B model scored 10/10 at ~5.2 s per turn — too slow for the spoken path, so it is off by default. Licence review found the Qwen2.5 family is **licence-split** (0.5B/1.5B Apache-2.0, 3B non-commercial) and that Hindi coverage among licence-clean small models is weak.
 - **Telugu**, added as a third language and shaped entirely by measurement. Two Piper `te_IN` voices are **CC-BY-4.0**, which makes Telugu the only Indic language this project can currently ship a voice for — every published Hindi voice is non-commercial or unresolved. Whisper transcribes Telugu speech into **Devanagari 100% of the time** at both `small` and `medium` while naming the language `te` at 0.76–0.98 confidence: it hears correctly and writes in the wrong alphabet. Transliterating the result back takes character error rate from 100% to **41%** — enough to fill slots, not enough to quote a buyer's words back. The `initial_prompt` script anchor that appears to fix this is deliberately unused: it corrects the alphabet and destroys the words (CER 90–116%). Adding the language also exposed that **Telugu had no safety vocabulary at all** — a buyer asking not to be contacted was answered with the next qualifying question — which is now guarded by tests driven from the supported-language set rather than a hard-coded list.
-- **`pitchbot-talk`**, an interactive terminal conversation, which is the first way to actually *use* the product rather than measure it. It runs the real engine and prints why each reply was chosen: known slots, missing slots, phase, lead temperature, turn latency. It needs no optional extra; `--speak` adds Piper synthesis played through the operating system's own audio player, and `--understand` adds the local model. See [`docs/TRY_IT_LOCALLY.md`](docs/TRY_IT_LOCALLY.md).
+- **`pitchbot-talk`**, an interactive terminal conversation, which is the first way to actually *use* the product rather than measure it. It runs the real engine and prints why each reply was chosen: known slots, missing slots, phase, lead temperature, turn latency. It needs no optional extra; `--speak` adds Piper synthesis played through the operating system's own audio player, `--listen` holds the whole conversation by voice, and `--understand` adds the local model. See [`docs/TRY_IT_LOCALLY.md`](docs/TRY_IT_LOCALLY.md).
+- **A complete local voice loop** — microphone in, spoken reply out, in English, Hindi and Telugu, with nothing leaving the machine. Every part of this existed and had never been connected: the detector, endpointer, transcriber and synthesiser had only ever been fed recorded audio, because there was no capture source. Frames are produced at exactly the size WebRTC's detector accepts (30 ms of 16 kHz mono PCM), since PortAudio was measured to open that rate directly and no resampling code is therefore needed. The device is opened once, because opening it costs ~840 ms — longer than most of the utterances it would be opened for. Turn-taking is deliberately **half duplex**: there is no acoustic echo cancellation, so capture is paused for each reply rather than shipping a barge-in that would trigger on the agent's own voice. Audio is never written anywhere and the capture queue is bounded, discarding the *oldest* frame under back-pressure so a stall can neither retain call audio nor resume on speech that has already ended. `sounddevice` is MIT and bundles PortAudio, also MIT.
+- **The agent now sells rather than only qualifying.** It answers a price objection, a competitor comparison and a stall each in their own words, states what matters for the buyer's specific vertical at the moment it learns it, and closes on agreement instead of asking another question. This began as a two-layer defect: `Intent` was computed and handed to a renderer that never read it, *and* it was produced only by the optional language model — so the default configuration, which is what every test ran in, could not observe that a buyer had objected or agreed at all. Stance detection now lives in the rules and needs no dependency; a model, when installed, still wins. A stated commitment outranks a concern raised in the same breath, because making a decided buyer wait is the expensive mistake, and an objection is answered *in addition to* continuing rather than instead of it.
+- **One sales catalogue.** The vocabulary of verticals and features previously existed in three independent copies — the extractor matched against one, the action policy allowlisted a second, the deck builder a third — so adding a vertical to the extractor produced facts the other two silently discarded, with no error anywhere. It is now defined once in `pitchbot.domain.catalog` and read by all three, and the per-language phrase tables fail at import if a vertical cannot be pitched or an objection cannot be answered. This is what makes "a new language or vertical is a data change" true rather than aspirational.
 - Versioned privacy-minimized evaluation snapshots, suite-aware fail-closed gate validation that returns a non-zero exit code and fails the build on a regression, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
@@ -38,14 +41,16 @@ Durable simulator history requires an explicitly managed key and an Alembic-migr
 
 ### Optional extras
 
-Both speech providers are optional and absent by default. `pitchbot` imports and the whole
-test suite passes without either, and neither is re-exported from `pitchbot.adapters`, so
-the core import graph structurally cannot depend on them.
+Every optional provider is absent by default. `pitchbot` imports and the whole test suite
+passes without any of them, and none is re-exported from `pitchbot.adapters`, so the core
+import graph structurally cannot depend on them.
 
 ```powershell
 python -m pip install -e ".[webrtc-vad]"      # MIT AND BSD-3-Clause, ~19 KiB, no weights
 python -m pip install -e ".[piper-tts]"       # GPL-3.0-or-later; voices supplied separately
 python -m pip install -e ".[faster-whisper]"  # MIT; model weights supplied separately
+python -m pip install -e ".[microphone]"      # MIT, bundles PortAudio (MIT); needs hardware
+python -m pip install -e ".[local-llm]"       # MIT; model weights supplied separately
 ```
 
 The Piper extra installs a **GPL-3.0-or-later** runtime. PitchBot never vendors or
@@ -59,6 +64,12 @@ The faster-whisper extra is permissively licensed throughout, but it likewise in
 model weights**. The adapter runs with `local_files_only=True` unless a caller explicitly
 opts in, so a missing model is a clear error rather than a silent multi-hundred-megabyte
 download in the middle of a call — or in the middle of CI.
+
+The microphone extra is the only one whose absence is not the whole story: it installs
+successfully on a machine with **no input device** and still cannot listen. Callers check
+`pitchbot.speech.microphone.is_available()` rather than treating a successful import as a
+working microphone, and the voice loop is tested against a fake capture source so CI needs
+no audio hardware.
 
 ## Target architecture
 
@@ -127,7 +138,15 @@ To hold a conversation from a terminal instead — no server, no downloads, no e
 
 ```powershell
 pitchbot-talk
+pitchbot-talk --script examples/sales-en.txt     # a whole sale: objection, pitch, close
 pitchbot-talk --language te --script examples/demo-te.txt
+```
+
+To hold it **by voice**, in English, Hindi or Telugu, with nothing leaving the machine:
+
+```powershell
+python -m pip install -e ".[microphone,webrtc-vad,faster-whisper,piper-tts]"
+pitchbot-talk --listen --language hi --voices-dir models/piper
 ```
 
 [`docs/TRY_IT_LOCALLY.md`](docs/TRY_IT_LOCALLY.md) walks through this end to end, including

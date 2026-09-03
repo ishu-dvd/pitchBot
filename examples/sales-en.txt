@@ -1,0 +1,26 @@
+# A real sale: the buyer pushes back on price, shops around, hesitates, then agrees.
+# Each turn below is a stance the agent has to answer rather than a slot to fill.
+# Run: pitchbot-talk --script examples/sales-en.txt
+#
+# Turn 1 names the vertical, so the agent pitches what matters for that business.
+We run an online toy store.
+
+# Turn 2 fills features. Ordinary qualification, no stance.
+We need a catalogue and online payments.
+
+# Turn 3 is a price objection. Before this existed the agent answered it with the next
+# form field, which is the failure the whole selling path was built to remove.
+Honestly that sounds too expensive for us.
+
+# Turn 4 is a competitor. Different concern, different answer.
+We are also comparing another vendor.
+
+# Turn 5 is a stall, the most common close-killer of the three.
+Let me think about it and get back to you.
+
+# Turn 6 fills budget now that the concerns have been answered.
+Our budget is around 150000 rupees.
+
+# Turn 7 agrees. The agent must stop qualifying and close, even though the timeline
+# slot is still empty - a buyer who has said yes should not be asked another question.
+Okay, let's start.

@@ -1,3 +1,12 @@
+from pitchbot.domain.catalog import (
+    BUSINESS_TYPES,
+    FEATURES,
+    INTENT_PHRASES,
+    INTENT_PRIORITY,
+    Intent,
+    business_types,
+    features,
+)
 from pitchbot.domain.models import (
     ActionExecution,
     ActionProposal,
@@ -32,6 +41,10 @@ from pitchbot.domain.models import (
 )
 
 __all__ = [
+    "BUSINESS_TYPES",
+    "FEATURES",
+    "INTENT_PHRASES",
+    "INTENT_PRIORITY",
     "ActionExecution",
     "ActionProposal",
     "ActionStatus",
@@ -45,6 +58,7 @@ __all__ = [
     "ContactPolicy",
     "ConversationStrategy",
     "FollowUp",
+    "Intent",
     "IntentEvidence",
     "JsonScalar",
     "JsonValue",
@@ -61,5 +75,7 @@ __all__ = [
     "StrategyExperiment",
     "TranscriptSpan",
     "Turn",
+    "business_types",
+    "features",
     "utc_now",
 ]

@@ -2,7 +2,11 @@
 
 ## Status
 
-This document describes the target architecture. The current implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a browser simulator with opt-in durable conversation turns, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, privacy-validated BM25 fact retrieval, a conservative temporal lead knowledge view, and guarded in-memory follow-up, callback, and deck previews. No production model is selected. Components marked as planned must not be represented as working capabilities.
+This document describes the target architecture. The implementation includes the audited FastAPI foundation, default-off configuration, typed domain contracts, Alembic-managed local persistence, provider contracts, deterministic mocks, resilience primitives, a browser simulator with opt-in durable conversation turns, speech/runtime benchmark manifests and metrics, privacy-minimized evaluation snapshots and static reports, deterministic conversation/classification, privacy-validated BM25 fact retrieval, a conservative temporal lead knowledge view, and guarded in-memory follow-up, callback, and deck previews.
+
+It also includes a **complete local voice loop** — microphone capture, voice-activity detection, endpointing, transcription, reply planning and speech synthesis — and a **reply planner that sells** rather than only qualifying: it answers objections, pitches the buyer's vertical, and closes on agreement, in English, Hindi and Telugu, with no optional package installed.
+
+No production model is selected. Components marked as planned must not be represented as working capabilities.
 
 ## Principles
 
@@ -11,8 +15,10 @@ This document describes the target architecture. The current implementation incl
 - Deterministic policy code authorizes every external action.
 - Models propose structured outputs; they never directly execute side effects.
 - Append-only lead journeys preserve evidence and requirement revisions.
-- English, Hindi, and code-switching are first-class evaluation dimensions.
+- English, Hindi, Telugu, and code-switching are first-class evaluation dimensions.
 - External effects fail closed and remain disabled by default.
+- **A new language or vertical is a data change.** Vocabulary lives once, in `pitchbot.domain.catalog`; extraction, action allowlisting and reply planning all read it.
+- **Buyer text never reaches a reply.** Replies are composed from fixed per-language phrases indexed by enum members and catalogue keys, so no turn can be reflected back into the agent's own words.
 
 ## Component view
 
@@ -21,10 +27,14 @@ flowchart LR
     Buyer[Buyer or test participant]
     Operator[Operator]
     UI[Browser simulator / data-call UI]
+    CLI[pitchbot-talk terminal]
+    Mic[Microphone capture]
     API[FastAPI control plane]
     Conversation[Conversation state machine]
+    Planner[Reply planner - sales moves]
+    Catalog[(Sales catalogue - verticals, features, stances)]
     Policy[Policy and compliance engine]
-    Extractor[Fact and evidence extraction]
+    Extractor[Fact, stance and evidence extraction]
     Classifier[Hot / Warm / Cold / Review]
     Store[(Lead journey store)]
     Scheduler[Persisted scheduler]
@@ -36,15 +46,23 @@ flowchart LR
     Evals[Replay and evaluation harness]
 
     Buyer <--> UI
+    Buyer <--> CLI
     Operator --> UI
+    CLI <--> Mic
+    Mic --> Speech
     UI <--> API
+    CLI --> Conversation
     API --> Conversation
     Conversation --> Extractor
     Extractor --> Classifier
+    Extractor --> Catalog
+    Conversation --> Planner
+    Planner --> Catalog
     Conversation <--> Speech
     Conversation <--> Model
     Conversation --> Policy
     Classifier --> Policy
+    Policy --> Catalog
     Policy --> Actions
     Conversation --> Store
     Classifier --> Store
@@ -55,6 +73,10 @@ flowchart LR
     Evals --> API
     Evals --> Store
 ```
+
+The catalogue edge is the load-bearing one. Extraction, action allowlisting and reply
+planning previously each held their own copy of the vocabulary, so a vertical added to one
+was silently discarded by the others.
 
 ## Simulated-call sequence
 
@@ -87,6 +109,81 @@ sequenceDiagram
     API-->>UI: Reply action status and redacted events
     UI-->>Buyer: Render or play response
 ```
+
+## Spoken turn: the local voice loop
+
+Everything below runs on one machine with no network call. The microphone is the piece that
+was missing until recently: the detector, endpointer and transcriber all existed and had
+only ever been fed recorded audio.
+
+```mermaid
+sequenceDiagram
+    actor Buyer
+    participant Mic as Microphone (sounddevice)
+    participant VAD as WebRTC VAD
+    participant Turn as Turn-taking machine
+    participant STT as faster-whisper
+    participant Engine as Conversation engine
+    participant Planner as Reply planner
+    participant TTS as Piper
+    participant Speaker
+
+    Buyer->>Mic: Speaks
+    loop every 30 ms
+        Mic->>VAD: One 960-byte frame at 16 kHz
+        VAD->>Turn: speech / not speech
+    end
+    Turn-->>STT: Utterance closed on trailing silence
+    STT-->>Engine: Transcript, language, confidence
+    Engine->>Engine: Safety check, then extract facts and stance
+    Engine->>Planner: Known slots, stance, vertical
+    Planner-->>Engine: Answer objection, pitch, ask or close
+    Engine-->>TTS: Reply composed from fixed phrases
+    Note over Mic,TTS: Capture is paused for the whole reply
+    TTS-->>Speaker: Audio
+    Speaker-->>Buyer: Hears the reply
+```
+
+Three properties of this loop are deliberate and constrain the code:
+
+**Frames are produced at exactly the size the detector accepts.** WebRTC's VAD takes only
+10, 20 or 30 ms of mono 16-bit PCM at 8/16/32/48 kHz. Capture is opened at 16 kHz with a
+block size of one frame, so no resampling or repacking code exists to get wrong. The
+pipeline must be constructed with a matching `frame_duration_ms`; a mismatch does not fail
+loudly, it silently misreports every duration the endpointer reasons about.
+
+**Turn-taking is half duplex.** There is no acoustic echo cancellation, so a microphone left
+open while the agent speaks hears the agent and endpoints on it. Capture is paused for the
+duration of each reply. The cost is that a buyer cannot interrupt — the pipeline supports
+barge-in, but enabling it here would fire on our own voice.
+
+**Audio is never retained.** Frames are handed to the pipeline and forgotten, the capture
+queue is bounded, and it discards the *oldest* frame under back-pressure so that a stall
+cannot accumulate call audio and cannot resume on speech that has already ended.
+
+## Reply planning: qualifying versus selling
+
+The planner chooses a **sales move**, not just a slot. Before this it had exactly one move —
+ask for the next missing slot — which is a questionnaire: a buyer who objected to a price
+received the same next question as one who had said nothing.
+
+| Move | When | Why it exists |
+| --- | --- | --- |
+| `ANSWER_OBJECTION` | The buyer pushed back on price, is comparing, or is stalling | Not answering reads as nothing the buyer says changes anything |
+| `PITCH` | The vertical has just become known | Says something specific about their business at the only moment it is new |
+| `ASK` | A slot is missing and unasked | Ordinary qualification |
+| `CLOSE` | The buyer agreed, or nothing is left to ask | A buyer who has said yes must not be asked another question |
+
+Two rules matter more than the table:
+
+- **An objection is answered *and* the conversation still moves.** Answering then falling
+  silent trades one failure for another. The stance sets emphasis, not whether the rest of
+  the turn happens.
+- **A stated commitment outranks a concern in the same breath.** "It is expensive but let us
+  start" closes, because making a decided buyer wait is the expensive mistake.
+
+The stance is read by the rules, so this works with no model installed. A local model, when
+present, supplies a stance it reads from a sentence matching no phrase, and wins.
 
 ## Deployment profiles
 

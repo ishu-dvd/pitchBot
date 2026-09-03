@@ -1007,3 +1007,90 @@ Telugu turn correctly**, which is the only input the spoken path can produce.
 The conclusion is the same one PR 39 reached for a different reason: the model is not what
 makes Telugu work. The deterministic planner and the rule extractors are, and they run in
 under 15 ms.
+
+## Microphone capture, measured 2026-09-04
+
+Target hardware: Windows 11, Python 3.12, 8 logical CPUs, no accelerator, RDP session with
+remote-audio redirection. `sounddevice` 0.5.6, PortAudio V19.7.0-devel.
+
+### PortAudio opens 16 kHz mono directly, so no resampling code is needed
+
+`sd.check_input_settings(samplerate=R, channels=1, dtype="int16")` was accepted for
+**16 000, 44 100 and 48 000 Hz**, and a real 0.5 s capture at 16 kHz returned 8 000 int16
+samples. Every input device enumerated reported a `default_samplerate` of 44 100, so the
+naive reading is that 16 kHz needs resampling; it does not, because WASAPI resamples
+internally.
+
+This is the measurement that removed a whole component. WebRTC's detector accepts only
+10/20/30 ms frames at 8/16/32/48 kHz and Whisper wants 16 kHz, so had the device refused
+16 kHz the capture path would have needed a resampler and a repacker — two pieces of
+signal-handling code, both easy to get subtly wrong, on the path where a mistake is
+inaudible and shows up as bad transcription. Capture is instead opened at exactly
+`blocksize=480` (30 ms) and every callback yields one legal frame.
+
+### Opening the device costs ~840 ms, so it is opened once
+
+A blocking 500 ms capture took **1 344 ms** wall-clock end to end. The ~844 ms difference is
+device open. That is longer than many buyer utterances, so a stream opened per utterance
+would insert most of a second between the buyer finishing a sentence and the agent
+noticing. The microphone is opened once and `pause()`/`resume()` gate delivery instead,
+which costs nothing.
+
+### `sounddevice` licence review
+
+| Package | Version | Licence | Notes |
+| --- | --- | --- | --- |
+| `sounddevice` | 0.5.6 | **MIT** (`license_expression` in package metadata) | pure-Python `cffi` binding |
+| PortAudio | V19.7.0-devel | **MIT** | bundled in the wheel |
+
+Permissive with no distribution obligation, unlike the `piper-tts` extra
+(GPL-3.0-or-later). Wheels are published as `py3-none-win_amd64` (also win32/arm64), so
+there is no source build. Runtime dependency closure is `cffi` alone — no numpy, no
+PyTorch, and no model weights, so installing it downloads nothing at import or capture time.
+
+**Not measured:** capture on a machine with a physically attached microphone. Every device
+enumerated here is RDP remote-audio, so open latency and the resampling path may differ on
+local hardware. Nothing in the design depends on the specific number.
+
+## Stance detection, measured 2026-09-04
+
+Rule-based intent detection was checked against 15 sentences — four stances plus a
+no-stance control, in English, Hindi and Telugu. **15/15 correct**, including the three
+controls (`"We sell toys."`, `"हम कपड़े बेचते हैं।"`, `"మేము బొమ్మలు అమ్ముతాము."`) which must
+return no stance rather than a default one.
+
+Detection is a word-bounded vocabulary match, the same machinery business signals use, and
+deliberately **not** the looser matching safety detection uses. The failure directions are
+not symmetric: over-matching a safety phrase costs a polite refusal, over-matching a stance
+makes the agent answer a concern nobody raised.
+
+**Known limitation, measured and accepted:** there is no negation window, so
+*"it is not expensive for us"* is read as an objection. Priority ordering removes the case
+that actually costs money — `"It is expensive but let's start."` resolves to `READY`, not
+`OBJECTING`, so a decided buyer is closed rather than re-qualified.
+
+### Budget extraction: a hedge broke it, and was found by use rather than by review
+
+`"Our budget is around 150000 rupees"` extracted **nothing**. The pattern required digits to
+follow the cue with only punctuation between, so the single most common way a person states
+a budget — with a hedge — filled no slot. The buyer answered the question, the answer was
+discarded, the agent asked again, hit `MAX_ASKS_PER_SLOT` and closed the conversation
+without a budget. `MAX_ASKS_PER_SLOT` was introduced in PR 39 to bound exactly this symptom;
+this was its cause, one layer down, still live.
+
+Fixed with a **closed list** of hedges in three languages rather than a permissive gap:
+
+| Input | Before | After |
+| --- | --- | --- |
+| `Our budget is around 150000 rupees.` | miss | `budget is around 150000` |
+| `budget is about 2 lakh` | miss | `budget is about 2 lakh` |
+| `budget is up to 50000` | miss | `budget is up to 50000` |
+| `हमारा बजट लगभग 150000 रुपये है` | miss | `बजट लगभग 150000` |
+| `మా బడ్జెట్ దాదాపు 150000 రూపాయలు` | miss | `బడ్జెట్ దాదాపు 150000` |
+| `budget is not decided, we sold 500 units last month` | miss | **miss** (required) |
+| `no budget yet but we shipped 900 orders` | miss | **miss** (required) |
+
+The last two rows are why the list is closed. "Allow up to two words between the cue and the
+number" would read those as budgets of 500 and 900, and the failure directions are not
+comparable: a missed budget costs one more question, an invented one is quoted back to the
+buyer and shapes a proposal.
