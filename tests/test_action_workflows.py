@@ -155,6 +155,17 @@ def eligible_context(**changes: object) -> ActionAuthorizationContext:
     return ActionAuthorizationContext.model_validate(values)
 
 
+def _eligible_policy(**changes: bool) -> ContactPolicy:
+    values = {
+        "outreach_allowed": True,
+        "allowlisted": True,
+        "dnd_check_passed": True,
+        "calling_hours_check_passed": True,
+    }
+    values.update(changes)
+    return ContactPolicy(**values)
+
+
 def test_policy_denies_unknown_state_and_reports_all_reasons() -> None:
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
     decision = ActionPolicy(clock=clock).authorize(
@@ -174,6 +185,49 @@ def test_policy_denies_unknown_state_and_reports_all_reasons() -> None:
         BlockReason.CLASSIFICATION_REVIEW,
     }
     assert decision.decided_at == clock.now()
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({"disclosure_delivered": False}, BlockReason.DISCLOSURE_MISSING),
+        ({"contact_policy": _eligible_policy(allowlisted=False)}, BlockReason.NOT_ALLOWLISTED),
+        ({"contact_policy": _eligible_policy(dnd_check_passed=False)}, BlockReason.DND_NOT_PASSED),
+        (
+            {"contact_policy": _eligible_policy(calling_hours_check_passed=False)},
+            BlockReason.CALLING_HOURS_NOT_PASSED,
+        ),
+    ],
+)
+def test_disclosure_allowlist_dnd_and_calling_hours_gates_are_unconditional(
+    override: dict[str, object], expected: BlockReason
+) -> None:
+    # This is a lock, not a failing-first regression: the behaviour is unchanged
+    # and this passes before and after PR 30. ActionPolicy takes no Settings and
+    # reads none, so each of these four gates blocks whenever its input fails,
+    # with no configuration path that can turn it off. PR 30 removed the
+    # never-wired require_ai_disclosure/require_dnd_check/require_calling_hours/
+    # allowlist_enabled knobs precisely so this stays true; the test fails if
+    # someone later reintroduces a config switch that lets one of these mandatory
+    # safety gates be disabled.
+    decision = ActionPolicy().authorize(ActionType.WHATSAPP_PREVIEW, eligible_context(**override))
+
+    assert decision.status is AuthorizationStatus.BLOCKED
+    assert expected in decision.reasons
+
+
+def test_action_policy_layer_consults_no_configuration() -> None:
+    # The four gates above are unconditional because the policy layer never reads
+    # Settings. Wiring settings in to add a require_*/allowlist_enabled switch is
+    # exactly the regression PR 30 forecloses, so catch it at the source: the
+    # policy module must not import the config singleton or its type.
+    import inspect
+
+    from pitchbot.actions import policy as policy_module
+
+    source = inspect.getsource(policy_module)
+    assert "pitchbot.config" not in source
+    assert "settings" not in source
 
 
 def test_opt_out_and_quota_fail_closed() -> None:

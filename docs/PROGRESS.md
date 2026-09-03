@@ -917,3 +917,68 @@
   and `normalize_text()` are untouched, so turn digests, business extraction, and the
   disposition each signal maps to are identical either way; only which turns produce a
   signal changes, and reverting restores PR 23's substring behaviour exactly.
+
+## PR 29: Remove inert safety-relaxation knobs
+
+- **Branch:** `chore/remove-inert-safety-knobs`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 26 commit `aaca22a`.
+- **Scope:** `config.py` declared five settings that `.env.example` and the README's
+  "Foundation safety defaults" presented as active safety controls -
+  `enable_real_time_audio`, `require_ai_disclosure`, `require_dnd_check`,
+  `require_calling_hours`, `allowlist_enabled`. A grep of the whole tree found each of the
+  five appears exactly once - its own declaration - with **zero consumers** in `src`,
+  `tests`, `apps`, or `evals`. None gates anything. Meanwhile `actions/policy.py` already
+  enforces the four compliance checks **unconditionally**, with no config guard:
+  `disclosure_delivered` -> `DISCLOSURE_MISSING`, `policy.allowlisted` -> `NOT_ALLOWLISTED`,
+  `policy.dnd_check_passed` -> `DND_NOT_PASSED`, `policy.calling_hours_check_passed` ->
+  `CALLING_HOURS_NOT_PASSED`.
+  1. **The four safety-relaxation knobs are removed entirely (`src/pitchbot/config.py`,
+     `.env.example`).** `require_ai_disclosure`, `require_dnd_check`, `require_calling_hours`,
+     and `allowlist_enabled` are gone from the settings model and the sample env. Each was
+     re-verified to have no consumer before removal. `allowed_contacts` is retained (it is
+     data, not a gate toggle, and is out of scope). No enforcement code was touched: the
+     policy already ignored these settings, so their removal is byte-for-byte behaviour-
+     preserving.
+  2. **The gates are documented as always enforced (`README.md`, `docs/COMPLIANCE_AND_PRIVACY.md`).**
+     The README's "Foundation safety defaults" section and the compliance doc's "Contact
+     authorization" section now state that disclosure, allowlisting, DND, and calling-hours
+     checks are unconditional in the action policy and cannot be disabled by configuration,
+     citing the real block reasons. This reads as a strengthening because it is one.
+  3. **`enable_real_time_audio` is left in place, unwired, and its inertness is recorded
+     (`src/pitchbot/config.py` comment, `README.md`, this entry's Deferred).** It is a
+     capability switch, not a safety-relaxation switch, and wiring it would turn the
+     simulator's speech features off by default - a product decision the owner has not made.
+     Its inertness is now called out beside the setting and in the README so no reader
+     believes the "real-time audio disabled by default" claim is code-enforced.
+  4. **Regression locks added (`tests/test_action_workflows.py`, `tests/test_config.py`).**
+     A parametrized test asserts the action policy blocks on each of the four conditions
+     regardless of configuration - a lock, not a failing-first regression, since the
+     behaviour is unchanged - plus a source-level test that the policy module imports no
+     configuration, so a future `require_*`/`allowlist_enabled` switch is caught at the
+     point it would be wired. `test_config.py` asserts the four removed settings are gone
+     from the model so they cannot silently return as dead config.
+- **Safety decisions:** Removal is strictly safer than wiring. The four `require_*`/
+  `allowlist_enabled` toggles could only ever be built as a switch that **disables a
+  currently-mandatory safety gate** - disclosure, allowlisting, DND, and calling-hours are
+  enforced unconditionally today, so a config path to `false` would be a net reduction in
+  safety with no offsetting benefit. Wiring them makes the product less safe; removing them
+  keeps the gates non-optional and deletes a switch nobody would remember to think about the
+  day WhatsApp or telephony lands. `enable_real_time_audio` is treated differently precisely
+  because it is not a safety-relaxation switch: wiring it would *disable* a working feature by
+  default, so it is left inert and documented as such rather than silently trusted. No
+  enforcement logic changed; `actions/policy.py` is untouched and its block conditions are
+  identical before and after.
+- **Deferred:** `enable_real_time_audio` is currently **inert** - no code reads it, so the
+  README's "real-time audio disabled by default" claim is a documented intention, not a
+  code-enforced gate; the simulator's audio socket is always available. Before any live
+  channel ships, this flag must either be wired to gate the audio socket or be removed. It is
+  left in place here because turning the simulator's speech features off by default is a
+  product decision outside this PR's scope. `allowed_contacts` also has no consumer yet but is
+  retained as the data an allowlist check will read; it is not a gate toggle and removing it
+  is a separate decision.
+- **Rollback:** Revert PR 29. It adds no schema migration, persistent state, runtime cache,
+  model, provider, retained buyer data, or external side effect. It is a source-compatibility
+  change to `Settings`: `require_ai_disclosure`, `require_dnd_check`, `require_calling_hours`,
+  and `allowlist_enabled` are removed, but no in-repo code read them, so nothing breaks.
+  Reverting restores the four dead settings and their misleading documentation exactly.

@@ -22,6 +22,8 @@ Before every live call or message, policy code must verify:
 
 Unknown or unavailable checks fail closed.
 
+The action policy already enforces the AI-disclosure, contact-allowlist, DND, and calling-hours checks **unconditionally** today (`src/pitchbot/actions/policy.py`): each failed check blocks the action, and no configuration setting can disable any of them. There is deliberately no `require_ai_disclosure`, `require_dnd_check`, `require_calling_hours`, or `allowlist_enabled` toggle — such a switch could only make a mandatory safety gate optional.
+
 ## Recording and transcription
 
 - Inform participants and obtain consent where required before recording or retaining transcripts.
