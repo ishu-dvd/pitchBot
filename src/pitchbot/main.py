@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -9,6 +11,8 @@ from starlette.responses import Response
 
 from pitchbot.config import settings
 from pitchbot.simulator.router import router as simulator_router
+from pitchbot.simulator.router import speech_providers
+from pitchbot.speech.providers import preload_speech_providers
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -29,7 +33,22 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app = FastAPI(title="PitchBot API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load speech model weights before serving, never during a call.
+
+    Measured: a lazily-loaded transcriber made the first spoken turn report 5,384 ms for
+    3.4 s of speech, roughly three seconds of which was model construction. That work
+    holds the GIL, so it does not merely delay one caller - it stalls the event loop and
+    the audio socket that barge-in depends on. This is a no-op in the default
+    configuration, where no transcriber is enabled.
+    """
+
+    await preload_speech_providers(speech_providers)
+    yield
+
+
+app = FastAPI(title="PitchBot API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(simulator_router)
 
@@ -50,4 +69,9 @@ def health() -> dict[str, str | bool]:
         "telephony_enabled": settings.enable_telephony,
         "whatsapp_enabled": settings.enable_whatsapp,
         "external_network_enabled": settings.enable_external_network,
+        # Which speech providers are actually running, so "why is nothing being
+        # transcribed" is answerable without reading logs or configuration.
+        "speech_detector": speech_providers.detector_id,
+        "speech_transcriber": speech_providers.transcriber_id,
+        "speech_transcription_enabled": speech_providers.can_transcribe,
     }

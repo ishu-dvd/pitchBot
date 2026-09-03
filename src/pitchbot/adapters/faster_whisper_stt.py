@@ -313,6 +313,12 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         return self._model_size
 
     @property
+    def language(self) -> LanguageCode | None:
+        """The declared language, or ``None`` when Whisper auto-detects."""
+
+        return self._language
+
+    @property
     def license(self) -> ModelLicense:
         return self._license
 
