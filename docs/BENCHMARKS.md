@@ -8,6 +8,8 @@ PR 22 adds the first measurable speech dimension: a deterministic synthetic **vo
 
 PR 30 runs the first **real** speech provider — `py-webrtcvad` — through that benchmark, and reports a negative result: the synthetic corpus is **not adequate to select a VAD provider**, and **no provider is selected**. The measurement, the reasoning, and what the corpus would need are in [Measured result](#measured-result-py-webrtcvad-on-the-synthetic-vad-corpus) below. `min_f1` on this suite remains a harness regression gate and must not be read as a provider ranking.
 
+PR 33 adds the first provider that **produces speech**: an opt-in Piper text-to-speech adapter. It satisfies the gate this document set for Piper — *"Distribution review + each voice license required"* — and the review returned a **blocking finding**: **no published Piper Hindi voice is cleared for commercial use**, and the widely used `en_US-amy-low` is not either. See [Piper distribution and voice license review](#piper-distribution-and-voice-license-review-2026-09-03). **No TTS provider is selected**, no TTS quality is claimed, and no voice is bundled; the adapter refuses a non-commercial voice unless a caller explicitly opts in for local evaluation.
+
 No audio file or model weight is committed. Planned STT/TTS corpus entries are test requirements, not evidence; synthetic VAD audio is regenerated from a seed and hash-verified rather than committed as a binary.
 
 ## Candidate review
@@ -22,7 +24,7 @@ Repository metadata was checked on 2026-08-31 using the GitHub API:
 | py-webrtcvad | VAD | NOASSERTION | **License reviewed 2026-09-03 (below). Measured 2026-09-03; not selected.** |
 | llama.cpp | Model runtime | MIT | Model license + structured-output benchmark required |
 | Ollama | Model runtime | MIT | Model license; convenience adapter only |
-| Piper (`piper1-gpl`) | TTS | GPL-3.0 | Distribution review + each voice license required |
+| Piper (`piper1-gpl`) | TTS | GPL-3.0 | **Reviewed 2026-09-03 (below). Adapter landed opt-in; no provider or voice selected.** |
 | AI4Bharat Indic-TTS | TTS | MIT | Model/voice license + activity/quality review required |
 
 The assumed `AI4Bharat/IndicConformer` repository was unavailable and is not registered as a candidate. A specific maintained repository/model card must be identified before evaluation.
@@ -44,6 +46,106 @@ Both are permissive and compatible. The distribution's own metadata declares `Li
 and the OSI MIT classifier. Recorded as `MIT AND BSD-3-Clause`. There are **no model
 weights**: the GMM parameters are compiled into the C extension, so no separate model or
 voice license exists and nothing is downloaded at any point.
+
+### Piper distribution and voice license review (2026-09-03)
+
+This table required *"Distribution review + each voice license required"* before Piper could
+be used. Both halves were performed; the second returned a blocking finding.
+
+#### Distribution: the runtime is copyleft
+
+`piper-tts` 1.7.0 ships the verbatim **GNU GPL v3** text as its `COPYING` file and bundles
+`espeak-ng` phoneme data, which is itself GPL-3.0-or-later. Recorded as
+**`GPL-3.0-or-later`**. This is materially different from the permissive `webrtc-vad`
+extra reviewed above, and it is why the adapter is shaped the way it is:
+
+- Piper is an **optional extra** (`pip install "pitchbot[piper-tts]"`), never a runtime
+  dependency. `pitchbot` imports and the whole suite passes with it absent.
+- It is imported at runtime through `importlib`, never vendored and never redistributed.
+- Installing it is a deliberate operator action, and the operator then owns the
+  obligations of whatever they distribute.
+
+Shipping a combined artifact that *includes* Piper is a distribution question this
+repository has **not** answered. Nothing here authorises that.
+
+Its runtime dependency closure is small — `onnxruntime` (MIT) and `pathvalidate` (MIT) —
+and CPU-only; the heavier `torch` set is confined to Piper's `train` extra.
+
+#### Voices: a voice's license is not the runtime's license
+
+Each voice is a separate `.onnx` + `.onnx.json` pair with its own license, taken from the
+dataset it was trained on. Every voice below was reviewed from its upstream `MODEL_CARD`
+on 2026-09-03. **PitchBot is a sales assistant, so "non-commercial" is disqualifying for
+its stated purpose rather than a footnote.**
+
+| Voice | Dataset license | Commercial use |
+|---|---|---|
+| `en_US-joe-medium` | CC0-1.0 | **yes** |
+| `en_US-libritts_r-medium` | CC BY 4.0 | **yes** (attribution) |
+| `en_GB-alba-medium` | CC BY 4.0 | **yes** (attribution) |
+| `en_US-amy-low` | CC BY-NC-SA 4.0 (finetune of RyanSpeech) | no |
+| `en_US-ryan-low` | CC BY-NC-SA 4.0 | no |
+| `en_US-hfc_female-medium` | CC BY-NC-SA 4.0 | no |
+| `en_US-lessac-medium` | Blizzard 2013 restricted | no |
+| `hi_IN-pratham-medium` | CC BY-NC-SA 4.0 | no |
+| `hi_IN-priyamvada-medium` | CC BY-NC-SA 4.0 | no |
+| `hi_IN-rohan-medium` | IIT-M IndicTTS custom — **document did not respond** | no (unresolved) |
+
+**Blocking finding: Piper published exactly three `hi_IN` voices at review time and none of
+them is cleared for commercial use.** Two are explicitly non-commercial; the third points
+at a license PDF that did not respond when fetched. A bilingual *commercial* deployment
+therefore cannot be served by Piper's published Hindi voices today. This is a finding about
+the available voices, not a gap in the adapter.
+
+An unresolvable license is recorded as **not** permitting commercial use. That is the only
+reading that is safe to encode: the alternative is clearing a voice through a gate on the
+strength of a document nobody has read.
+
+Note also that `en_US-amy-low` — the default in much Piper example code — is a finetune of
+RyanSpeech and inherits **CC BY-NC-SA 4.0**. A voice's license follows its training data
+through finetuning, so the base model's license has to be chased, not just the voice's own
+card.
+
+#### How the finding is enforced
+
+The review is encoded as data in `KNOWN_VOICE_LICENSES`
+(`pitchbot.adapters.piper_tts`) rather than left in prose, and
+`PiperVoiceRegistry` is **deny-by-default**: a voice whose license does not permit
+commercial use, or whose license could not be established, is refused unless the caller
+passes `allow_non_commercial=True`. That flag exists because local evaluation is a
+legitimate non-commercial use, and it is deliberately noisy to write down. A test pins the
+Hindi finding, so adding a commercially-usable Hindi voice is a deliberate act that has to
+update it.
+
+Adding a language is a **data** change — one catalog row plus a voice file — and never a
+code change.
+
+#### Measured behaviour of the adapter (not a quality claim)
+
+These are engineering properties of the integration, measured on
+`Windows-11`, Python 3.12, CPU only, no accelerator, voice `en_US-joe-medium`. **They say
+nothing about speech quality, naturalness, or intelligibility**, which require the blinded
+human rubrics and consented audio described under [TTS and audio similarity](#tts-and-audio-similarity). No TTS provider is selected.
+
+| Property | Measured | Why it matters |
+|---|---|---|
+| Synthesis real-time factor | ~0.04–0.09 | Far faster than real time on 8 CPUs |
+| Event-loop stall during synthesis | **~20 ms** | Chunks advance on a worker thread, so the audio socket keeps serving |
+| Event-loop stall on first (lazy) load | **~2,100 ms** | Loading holds the GIL despite the thread; `preload()` moves it to startup |
+| Streaming granularity | one chunk per sentence | First audio leaves before the last sentence is synthesised |
+| Determinism, default | **not reproducible** | VITS samples its duration predictor |
+| Determinism, `DETERMINISTIC_SYNTHESIS` | byte-identical across runs | Required for any corpus item carrying an `audio_sha256` |
+| Concurrent synthesis, one voice | byte-identical to serial | Measured safe, so the adapter does not serialize |
+| Network access at load or synthesis | **none** | Verified with the process's sockets disabled |
+
+Two of these corrected a wrong assumption rather than confirming a right one: an earlier
+draft serialized synthesis behind a per-voice lock that measurement showed was unnecessary,
+and the ~2.1 s stall was attributed to synthesis until load and synthesis were measured
+separately.
+
+**Consequence for the VAD corpus.** [What the corpus would need to select a VAD](#what-the-corpus-would-need-to-select-a-vad) asks for spectrally speech-like audio, which the
+byte-size synthetic generator cannot produce. Piper output *is* speech-like and can now be
+made byte-reproducible, so it can generate that corpus. That work is not in this PR.
 
 ### VAD candidate comparison, measured 2026-09-03
 

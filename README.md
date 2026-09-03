@@ -16,6 +16,7 @@ The implemented application currently provides only:
 - Streaming speech turn-taking in the simulator: a voice-activity-detector contract with a deterministic mock, an endpointing/barge-in state machine, and a transcription pipeline wired to the audio WebSocket so a spoken utterance becomes an ordinary turn. No speech-to-text provider is selected, so utterances report `transcriber-unavailable`; audio is buffered only for the utterance in flight, byte-capped, and never persisted.
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and a validation CLI, plus a deterministic, dependency-free synthetic voice-activity benchmark (`run-speech`) that regenerates a hash-verified corpus at run time and gates VAD structural F1 in CI. STT and TTS measurement remains blocked pending reviewed audio.
 - An optional `py-webrtcvad` adapter behind the voice-activity contract, measured against that corpus. **No voice-activity provider is selected:** it fails the suite threshold in every aggressiveness mode, while a trivial energy threshold scores perfectly on the same clips, so the synthetic corpus cannot yet rank an acoustic detector against an energy heuristic. The dependency is optional and absent by default.
+- An optional Piper adapter behind the text-to-speech contract — the first provider that actually produces speech. It streams one chunk per sentence off the event loop, always terminates a stream with exactly one final chunk, and can synthesise reproducibly. **No text-to-speech provider or voice is selected**, and the required license review returned a blocking finding: **no published Piper Hindi voice is cleared for commercial use**, and the commonly used `en_US-amy-low` is not either. The voice registry is deny-by-default, refusing non-commercial or unverifiable voices unless a caller explicitly opts in for local evaluation. Voices are operator-supplied and never downloaded; the Piper runtime is GPL-3.0-or-later and is never vendored.
 - Versioned privacy-minimized evaluation snapshots, suite-aware fail-closed gate validation that returns a non-zero exit code and fails the build on a regression, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
@@ -26,7 +27,25 @@ The implemented application currently provides only:
 - Deny-by-default mock action policy with unconditional AI-disclosure, allowlist, DND, and calling-hours gates; minimized follow-ups; fake-time callback scheduling; and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.
 
-Durable simulator history requires an explicitly managed key and an Alembic-migrated database, and is off by default. BM25 retrieval and the temporal knowledge view are now surfaced in the simulator turn path as advisory, display-only lead recall, run after the durable commit; they are not used in reply generation, classification, or the speech response path. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, vector retrieval, concrete speech-to-text/text-to-speech providers and any model-backed speech recognition or synthesis, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests.
+Durable simulator history requires an explicitly managed key and an Alembic-migrated database, and is off by default. BM25 retrieval and the temporal knowledge view are now surfaced in the simulator turn path as advisory, display-only lead recall, run after the durable commit; they are not used in reply generation, classification, or the speech response path. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, vector retrieval, speech-to-text providers and any model-backed speech recognition, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests. Text-to-speech now has an optional adapter, but no provider or voice is selected and it is not wired into the simulator's speech response path.
+
+### Optional extras
+
+Both speech providers are optional and absent by default. `pitchbot` imports and the whole
+test suite passes without either, and neither is re-exported from `pitchbot.adapters`, so
+the core import graph structurally cannot depend on them.
+
+```powershell
+python -m pip install -e ".[webrtc-vad]"   # MIT AND BSD-3-Clause, ~19 KiB, no weights
+python -m pip install -e ".[piper-tts]"    # GPL-3.0-or-later; voices supplied separately
+```
+
+The Piper extra installs a **GPL-3.0-or-later** runtime. PitchBot never vendors or
+redistributes it, and installing it is a deliberate act by the operator, who then owns the
+obligations of whatever they distribute. It installs **no voices**: each voice is a separate
+file with its own license that the operator places on disk, and PitchBot never downloads
+one. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the full distribution and per-voice
+license review.
 
 ## Target architecture
 

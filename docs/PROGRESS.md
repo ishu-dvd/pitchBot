@@ -1295,3 +1295,100 @@
   place. Reverting restores the unbounded tombstone growth and nothing else; every other
   callback behaviour, including the cancellation-reconciliation semantics, is identical before
   and after.
+
+## PR 33: Opt-in Piper text-to-speech adapter, and the voice-license finding that shapes it
+
+- **Branch:** `feat/piper-tts-adapter`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 32 commit `3f8413a`.
+- **Scope:** The first provider that actually produces speech, behind the **unchanged**
+  `TextToSpeechAdapter` contract. `docs/BENCHMARKS.md` had registered Piper with the gate
+  *"Distribution review + each voice license required"*; this PR performs that review, and
+  the review returned a blocking finding that dictates the adapter's shape. **No
+  text-to-speech provider or voice is selected** and no quality claim is made. The adapter
+  is not wired into the simulator's speech response path.
+  1. **The license review, and why it is code rather than prose
+     (`src/pitchbot/adapters/piper_tts.py`, `KNOWN_VOICE_LICENSES`).** Two findings.
+     *Distribution:* `piper-tts` 1.7.0 ships the verbatim GPL-3 text and bundles
+     `espeak-ng` data, so the runtime is **GPL-3.0-or-later** - copyleft, unlike the
+     permissive extra reviewed in PR 30. It is therefore an operator-installed extra,
+     imported through `importlib`, never vendored and never redistributed; shipping a
+     combined artifact remains an unanswered question. *Voices:* a voice's license comes
+     from its training data and is **not** the runtime's license. Reviewed from each
+     upstream `MODEL_CARD` on 2026-09-03: Piper published exactly three `hi_IN` voices and
+     **none is cleared for commercial use** - `pratham` and `priyamvada` are CC BY-NC-SA
+     4.0, and `rohan` points at an IIT-M license PDF that did not respond when fetched. The
+     commonly used `en_US-amy-low` is a finetune of RyanSpeech and inherits CC BY-NC-SA 4.0,
+     so a license follows its training data *through finetuning*. PitchBot is a sales
+     assistant, so non-commercial is disqualifying rather than a footnote. Commercially
+     usable voices found: `en_US-joe-medium` (CC0-1.0), `en_US-libritts_r-medium` and
+     `en_GB-alba-medium` (CC BY 4.0). The review is encoded as a data catalog and
+     `PiperVoiceRegistry` is **deny-by-default**: a voice that does not permit commercial
+     use, or whose license could not be established, is refused unless the caller passes
+     `allow_non_commercial=True` for local evaluation. An unretrievable license is recorded
+     as denied, because the alternative is clearing a voice on the strength of a document
+     nobody has read. Adding a language stays a **data** change: one catalog row plus a
+     voice file.
+  2. **No fallback voice, because a mismatch is silent corruption rather than degradation.**
+     Measured: Piper does not reject Devanagari fed to an English voice - it emits 58,880
+     bytes of confident, fluent, wrong audio. An unmapped language therefore raises
+     `PermanentAdapterError` naming the mapped languages. A duplicate language mapping is
+     also refused at construction rather than resolved by ordering.
+  3. **Every completed stream terminates with exactly one `is_final=True` chunk.** Measured:
+     Piper yields one chunk per sentence and **zero** chunks for empty, whitespace-only, or
+     punctuation-only text. Emitting nothing would strand a consumer waiting on `is_final`
+     to release a playback buffer, so the adapter emits a single empty final chunk instead.
+     `is_final` is resolved by one-chunk lookahead rather than guessed.
+  4. **Synthesis never blocks the event loop; loading does, and is therefore preloadable.**
+     Piper's generator is lazy - constructing it is free and each `next()` runs one sentence
+     of ONNX inference - so chunks are advanced one at a time inside `asyncio.to_thread`,
+     and audio starts flowing after the first sentence rather than after the whole
+     utterance. Measured while synthesising 27 s of audio: worst event-loop stall **19 ms**.
+     Loading a voice is different and was initially misattributed to synthesis: isolating
+     the two showed a **2,114 ms** stall on first (lazy) load versus **19-20 ms** on a
+     loaded voice, because constructing the ONNX session holds the GIL and the worker thread
+     cannot yield. `preload()` moves that cost to startup, where it is predictable instead
+     of freezing the audio socket mid-conversation, and it applies the license gate so a
+     denied voice fails at startup rather than on first use.
+  5. **Reproducible synthesis is available and was not assumed.** Measured: default output
+     is **not** byte-identical across runs, because VITS samples its duration predictor.
+     `DETERMINISTIC_SYNTHESIS` (`noise_scale=0`, `noise_w_scale=0`) produces byte-identical
+     audio across three runs. This is what any generated corpus item carrying an
+     `audio_sha256` requires, and it is what makes the adapter's own tests exact.
+  6. **A wrong assumption was removed by measurement.** An earlier draft serialized
+     synthesis behind a per-voice lock on the theory that ONNX re-entrancy is undocumented.
+     Four threads synthesising different text through one loaded voice produced output
+     byte-identical to the serial baseline, so the lock was deleted: it cost throughput,
+     bought no correctness, and let an abandoned stream block an unrelated one.
+  7. **Bounded and offline.** Text length and chunk count are bounded and fail closed. A
+     voice is addressed by an explicit path that must already exist, together with its
+     `.onnx.json` sidecar; Piper's downloader is never invoked. Verified by running load and
+     synthesis with the process's sockets disabled. Mono/16-bit framing is validated per
+     chunk rather than assumed, because `SynthesizedAudioChunk` carries no channel or
+     sample-width field and would silently reinterpret anything else.
+- **Verification:** 544 passed / 22 skipped with the extra and a voice present, up from 504.
+  **530 passed / 36 skipped with `piper-tts` uninstalled, zero failures** - the optionality
+  claim was tested by actually removing the package, not by reading the import guard. The
+  piper-absent import branch is covered even in an environment that has piper installed, by
+  forcing the import to fail. `ruff check`, `ruff format --check`, and `mypy` are clean over
+  101 source files in both states. Synthesis tests skip unless `PITCHBOT_PIPER_VOICE_DIR`
+  points at a directory already containing the CC0 voice; nothing is downloaded by a test
+  run. The Hindi finding is pinned by a test, so adding a commercially-usable Hindi voice is
+  a deliberate act that has to update it.
+- **Deferred:** Wiring text-to-speech into the simulator's speech response path; that is a
+  transport and turn-taking change, not an adapter change, and it needs the barge-in
+  interaction with a real audio stream designed rather than assumed. Selecting a provider,
+  which needs the blinded human rubrics and consented audio ADR-0004 requires - the numbers
+  recorded here are engineering properties, not quality. **Generating a realistic audio
+  corpus with Piper to finally rank a VAD**, which PR 30 showed the byte-size synthetic
+  corpus cannot do; determinism support landed here specifically to make that corpus
+  hash-verifiable, but the corpus itself is not in this PR. Sourcing a commercially usable
+  Hindi voice, which is a product decision rather than an engineering one: options are a
+  non-Piper provider, a permissively licensed Hindi dataset, or accepting a non-commercial
+  voice for evaluation only. Speech-to-text remains unimplemented.
+- **Rollback:** Revert PR 33. It adds no schema migration, persistent state, runtime
+  dependency, provider selection, retained buyer data, or external side effect, changes no
+  public signature, and is not referenced by any existing code path - the module is
+  deliberately not re-exported from `pitchbot.adapters.__init__`. Reverting removes the
+  adapter and the recorded license review and nothing else. Uninstalling the optional extra
+  is sufficient to disable it without reverting anything.
