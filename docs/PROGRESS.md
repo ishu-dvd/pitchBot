@@ -1172,3 +1172,126 @@
 - **Rollback:** Revert PR 31. It adds no schema migration, persistent state, runtime cache,
   model, provider, retained buyer data, or external side effect; only Markdown is changed, so
   reverting restores the prior (stale) documentation exactly.
+
+## PR 32: Bounded callback cancellation tombstones
+
+- **Branch:** `fix/callback-bookkeeping-bounds`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 31 commit `a074c05`.
+- **Scope:** An audit of `CallbackService` raised two findings. A3 (unbounded tombstone
+  growth) is fixed here. A7 (one process-wide lock held across provider I/O) is **designed
+  and deliberately not attempted** - see *Deferred*. Verification of A3 before touching it:
+  on the base commit `_failed_cancellations` appeared exactly three times in `src` - the
+  declaration (`callbacks.py:63`), one read in `_check_operation` (`callbacks.py:399`), and
+  one write in `_record_failed_cancellation` (`callbacks.py:426`) - and zero times in
+  `tests`. There was no
+  `pop`, `del`, or reassignment anywhere. Session cleanup reclaims idempotency keys by
+  scanning `_operation_results` for entries whose `result.request.callback_id` matches, and
+  `_record_failed_cancellation` writes `_operation_fingerprints` and `_failed_cancellations`
+  but never `_operation_results`, so a tombstoned key is structurally invisible to cleanup.
+  Both entries are keyed by a per-session idempotency key - a user cancel key, or a
+  `cleanup:{callback_id}:{incarnation}:{attempt}` key minted during teardown - so each
+  occurrence leaked one permanent pair, unbounded in session count for the life of the
+  process.
+  1. **Tombstones are reclaimed with the callback they protect
+     (`src/pitchbot/actions/callbacks.py:429`, `_release_failed_cancellations`, called from
+     `remove_by_prefix` at `callbacks.py:374`).** After both cleanup loops have completed and
+     every provider
+     cancellation has been acknowledged, the service reclaims each `_failed_cancellations`
+     entry whose *value* - the callback identifier the key failed to cancel - matches the
+     teardown's `callback_id_prefix` **and** is absent from both `_records` and
+     `_pending_schedules`, popping the matching `_operation_fingerprints` and
+     `_operation_results` entries with it. Matching on the value rather than the key is what
+     makes this correct for both tombstone sites: the user-supplied cancel key and the
+     generated cleanup key have unrelated shapes, but both record the same callback
+     identifier, so one rule covers the `_cancel` path (`callbacks.py:204`) and all three
+     `remove_by_prefix` paths (`callbacks.py:292`, `:335`, `:349`).
+  2. **The reuse guarantee is unchanged and now has a lock (`tests/test_action_workflows.py`,
+     `test_failed_cancellation_tombstone_survives_while_its_callback_does`).** A tombstone is
+     reclaimed only when the callback is gone from every live map, so a key that failed
+     against a `SCHEDULED`, `CANCELLATION_PENDING`, or `CANCELLATION_REQUIRED` callback still
+     raises `CallbackConflictError`, the record stays non-dispatchable, and an unrelated
+     session's teardown cannot release it. The reclamation is also unreachable on the failure
+     path: if any provider cancellation in `remove_by_prefix` raises, the method propagates
+     before reaching the release, so an unresolved job keeps its tombstone until a later
+     teardown succeeds.
+  3. **Failing-first regressions added (`tests/test_action_workflows.py`).** Three tests fail
+     against the unfixed service and pass after:
+     `test_failed_cancellation_tombstone_is_reclaimed_with_the_callback` (the `_cancel` site),
+     `test_pending_schedule_cancellation_tombstone_is_reclaimed_with_the_callback` (the
+     pending-schedule cleanup site, where no `_records` entry ever existed), and
+     `test_callback_bookkeeping_does_not_grow_with_session_count`, which runs six
+     schedule/permanent-cancel/teardown cycles and asserts every one of the nine bookkeeping
+     maps is empty after each. All three assert on the maps themselves rather than on a
+     proxy, because the leak is invisible to the public surface: `get` already raised
+     `LookupError` and capacity was already released, so no observable behaviour distinguished
+     the leaking service from the fixed one.
+- **Safety decisions:** The tombstone semantic PR 18 established - "failed keys remain
+  tombstoned" - is a guarantee about a key and *the resource it names*, not a guarantee that
+  the key is remembered forever. Reclaiming it any earlier would weaken that, so reclamation
+  is gated on the callback being absent from `_records` **and** `_pending_schedules` rather
+  than on the teardown prefix alone; a `CANCELED` record left behind by a successful
+  new-key reconciliation still holds its old tombstone until the session itself is torn down.
+  Both conditions matter: a pending schedule can legitimately coexist with a `CANCELED`
+  record for the same identifier, so checking `_records` alone would release a tombstone
+  while a claim on that identifier was still in flight. Reclamation runs after all provider
+  acknowledgement, never before, preserving PR 18's "local state is removed only after
+  provider acknowledgement". No dispatch, admission, capacity, or reconciliation logic was
+  touched, and no existing test was modified.
+- **Performance:** The leak was the performance defect - two dictionary entries retained per
+  permanently rejected cancellation, forever, in a process-wide singleton. Retention is now
+  bounded by live callbacks times failed cancellation attempts against them, and drops to
+  zero when their sessions close. The reclamation cost is one linear scan of
+  `_failed_cancellations` per `remove_by_prefix`, which is bounded precisely because the map
+  is now bounded. The single global `CallbackService` lock is unchanged; see *Deferred*.
+- **Deferred:** **A7 - `CallbackService` holds one process-wide `asyncio.Lock` across every
+  provider `await`, so one session's slow cancel blocks every other session's callback
+  preview and teardown (head-of-line blocking, not deadlock). Not attempted in this PR, by
+  design.** The proposed shape - keep the lock for admission and release it around provider
+  I/O, using the existing `_pending_schedules` / `_pending_cancellations` claims for exclusion
+  - is sound for `_cancel` and insufficient for the other three entry points, each of which
+  would silently lose an invariant that has a passing test today:
+  - `_dispatch_due` has **no claim at all**. It snapshots `due` from `_records` and awaits
+    `telephony.dial` in a loop. Releasing the lock around the dial admits the interleaving
+    *dispatch snapshots, then cancel marks `CANCELLATION_PENDING`, then the dial lands* -
+    a real call placed for a callback the buyer cancelled. Today
+    `test_cancel_claim_prevents_concurrent_due_dispatch` passes only because the lock makes
+    that interleaving unreachable. This needs a new `_pending_dispatches` claim set before
+    the lock is released, consulted by `_cancel`, with the same task-cancellation survival
+    semantics PR 10 built for `_pending_schedules` and a reconciliation state for an
+    ambiguous dial.
+  - `remove_by_prefix` snapshots matching identifiers under the lock. Releasing it inside
+    the loop lets a concurrent `schedule` admit a new callback with the same session prefix
+    *after* the snapshot, so teardown silently leaves it behind - the same class of leak this
+    PR is fixing. This needs a per-prefix teardown barrier that rejects admissions for a
+    closing session.
+  - The pending-schedule cleanup branch awaits `scheduler.cancel` while the entry is still in
+    `_pending_schedules`. A concurrent same-key `schedule` retry matches the fingerprint and
+    calls `scheduler.schedule` on the same job key concurrently with that cancel.
+    `_pending_schedule_cancellations` records the cleanup key but does **not** block that
+    retry, so it would have to become a true exclusion claim.
+  Sequencing: land the `_pending_dispatches` claim and the teardown barrier first, each with
+  its own failing-first test, then release the lock one entry point at a time. The test that
+  proves A7 itself: two `CallbackService` sessions over one `BlockingCancelAdapter`-style
+  scripted provider; session A starts `remove_by_prefix` and parks inside the provider cancel
+  on an `asyncio.Event`; session B then completes a full `schedule` while A is parked;
+  assert B's record reaches `SCHEDULED` **before** A's event is released. Ordering is gated
+  by the event and the existing `FakeClock`, never by `sleep` or wall-clock. The six
+  invariants that must be re-proven under interleaving - concurrent admission cannot exceed
+  capacity, a pending schedule claim still consumes capacity and blocks conflicting
+  identifiers, exact retries create no duplicate provider action, permanent cancellation
+  rejection stays non-dispatchable and excluded from due dispatch, cancellation becomes
+  non-dispatchable before provider I/O, and local state is removed only after provider
+  acknowledgement - all have tests today that pass under the global lock; each needs a
+  concurrent counterpart before the lock is narrowed. The blocking is not currently
+  observable: every provider is an in-memory mock with no `await` that yields under load. It
+  becomes real when a live scheduler with `execute_with_retry` lands (3 attempts,
+  0.1s->2.0s backoff, 10s per-attempt timeout), which is why this is recorded now rather than
+  discovered then. Also unchanged and out of scope: durable scheduler state, provider-specific
+  reconciliation and webhooks, and live channels.
+- **Rollback:** Revert PR 32. It adds no schema migration, persistent state, runtime cache,
+  dependency, model, provider, retained buyer data, or external side effect, and changes no
+  public signature - `_release_failed_cancellations` is private and called from exactly one
+  place. Reverting restores the unbounded tombstone growth and nothing else; every other
+  callback behaviour, including the cancellation-reconciliation semantics, is identical before
+  and after.
