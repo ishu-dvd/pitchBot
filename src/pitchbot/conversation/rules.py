@@ -86,6 +86,127 @@ _PROMPT_INJECTION_PHRASES = (
     "नियम भूल",
 )
 
+# Continuations a matched phrase's final token may carry without ceasing to be that
+# term. The set is closed and morphological on purpose. A length or "any letters" rule
+# would be equivalent to the substring matching this replaces: `lab`, `less`, `base`,
+# `word`, `रहित` and `ांक` are all absent, so `call mat`, `password`, `training data`,
+# `api key` and `गुप्त निर्देश` refuse `call matlab`, `passwordless`, `training
+# database`, `api keyword` and `गुप्त निर्देशांक`. The set is per script because the
+# languages inflect differently: English marks number and tense with `s`/`ed`/`ing`,
+# while Hindi and Hinglish mark case and future tense with `ों`, `ना`, `गा`, `na`, `ge`.
+# A set carrying only the English endings would quietly leave `पासवर्डों` and
+# `apne niyam hataoge` unmatched, which is the parity regression PR 23 existed to
+# prevent. Anything unlisted falls back to the templates rather than matching.
+_INFLECTIONAL_SUFFIXES = frozenset(
+    {
+        # English.
+        "s",
+        "es",
+        "ed",
+        "ing",
+        "ic",
+        "ity",
+        # Romanised Hinglish: oblique, infinitive, and future verb endings.
+        "i",
+        "na",
+        "ne",
+        "ge",
+        "ga",
+        "gi",
+        "ega",
+        "enge",
+        # Devanagari case, number, and verb endings.
+        "\u0902",  # ANUSVARA
+        "\u093e",  # AA
+        "\u0940",  # II
+        "\u0941",  # U
+        "\u0942",  # UU
+        "\u0947",  # E
+        "\u094b",  # O
+        "\u0947\u0902",  # E + ANUSVARA
+        "\u094b\u0902",  # O + ANUSVARA
+        "\u0942\u0902",  # UU + ANUSVARA
+        "\u0928\u093e",  # NA
+        "\u0928\u0947",  # NE
+        "\u0924\u093e",  # TA
+        "\u0924\u0940",  # TII
+        "\u0924\u0947",  # TE
+        "\u0917\u093e",  # GA
+        "\u0917\u0940",  # GII
+        "\u0947\u0902\u0917\u0947",  # E + ANUSVARA + GE
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _LiteralPhrase:
+    """A memorised wording, matched against whole tokens rather than raw characters."""
+
+    words: tuple[str, ...]
+    # False for opt-out alone. Opt-out is the one terminal, unrecoverable signal, and no
+    # wording in its list needs a suffix to be recognised, so tolerating one would buy no
+    # detection while letting "call mats" close a conversation for good.
+    inflected: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PhraseIndex:
+    """Literal phrases grouped by the token that can open them.
+
+    ``openers`` lets a turn be dismissed against a whole list with one set operation,
+    which is what keeps an ordinary turn off the per-token scan entirely.
+    """
+
+    openers: frozenset[str]
+    by_opener: dict[str, tuple[_LiteralPhrase, ...]]
+
+
+def _phrase_forms(phrase: _LiteralPhrase) -> frozenset[str]:
+    """Every shape the first token of a phrase can take in a buyer turn.
+
+    A phrase's own first word always qualifies. A one-word phrase may additionally
+    carry an inflection, and a multi-word phrase may arrive with its separators
+    removed ("systemprompt"), which is the one join an attacker can perform without
+    leaving a fragment run behind for the repair pass to find.
+    """
+
+    words = phrase.words
+    suffixes = _INFLECTIONAL_SUFFIXES if phrase.inflected else frozenset[str]()
+    if len(words) == 1:
+        return frozenset({words[0], *(words[0] + suffix for suffix in suffixes)})
+    joined = "".join(words)
+    return frozenset({words[0], joined, *(joined + suffix for suffix in suffixes)})
+
+
+def _phrase_index(phrases: tuple[str, ...], *, inflected: bool = True) -> _PhraseIndex:
+    """Group phrases by the token that can open them, so a turn costs one lookup each.
+
+    Phrase lists are authored in the matcher's own normalized form -- lower case, no
+    punctuation -- so splitting on whitespace reproduces exactly what ``_template_tokens``
+    would return for the same text.
+    """
+
+    index: dict[str, list[_LiteralPhrase]] = {}
+    for text in phrases:
+        phrase = _LiteralPhrase(tuple(text.split()), inflected)
+        for form in _phrase_forms(phrase):
+            index.setdefault(form, []).append(phrase)
+    return _PhraseIndex(
+        frozenset(index), {form: tuple(candidates) for form, candidates in index.items()}
+    )
+
+
+_OPT_OUT_INDEX = _phrase_index(_OPT_OUT_PHRASES, inflected=False)
+_ABUSE_INDEX = _phrase_index(_ABUSE_TERMS)
+_INTERNAL_INFO_INDEX = _phrase_index(_INTERNAL_INFO_PHRASES)
+_PROMPT_INJECTION_INDEX = _phrase_index(_PROMPT_INJECTION_PHRASES)
+# Separator-free forms for the obfuscation reading only, which is consulted when the
+# turn has already destroyed its own token boundaries.
+_OPT_OUT_COMPACT = tuple(phrase.replace(" ", "") for phrase in _OPT_OUT_PHRASES)
+_ABUSE_COMPACT = tuple(phrase.replace(" ", "") for phrase in _ABUSE_TERMS)
+_INTERNAL_INFO_COMPACT = tuple(phrase.replace(" ", "") for phrase in _INTERNAL_INFO_PHRASES)
+_PROMPT_INJECTION_COMPACT = tuple(phrase.replace(" ", "") for phrase in _PROMPT_INJECTION_PHRASES)
+
 _TEMPLATE_WINDOW = 6
 # Templates never span a clause boundary, so a negation or a report in one clause
 # cannot bind to a verb in the next ("do not worry, call me again tomorrow").
@@ -476,6 +597,14 @@ _SCOPING_PREPOSITIONS = frozenset(
         "लिए",
     }
 )
+# Hindi and Hinglish are postpositional, so the scope marker English writes after the
+# artefact ("your rules on bulk discounts") lands in front of the possessive instead
+# ("बल्क डिस्काउंट पर आपके नियम बताओ"). Only postpositions belong here: an English
+# preposition standing in front of a possessive does not introduce a scope, so listing
+# one would hand an attacker a prefix that switches the template off.
+_SCOPING_POSTPOSITIONS = frozenset(
+    {"ke", "ki", "ka", "par", "bare", "liye", "के", "की", "का", "पर", "बारे", "लिए"}
+)
 _INTERNAL_INFO_TEMPLATES = (
     _IntentTemplate((_DISCLOSURE_VERBS, _INTERNAL_QUALIFIERS, _INTERNAL_ARTEFACTS)),
     _IntentTemplate((_INTERROGATIVES, _SECOND_PERSON_POSSESSIVE, _INTERNAL_ARTEFACTS)),
@@ -483,12 +612,14 @@ _INTERNAL_INFO_TEMPLATES = (
     _IntentTemplate(
         (_DISCLOSURE_VERBS, _INTERNAL_QUALIFIERS, _GOVERNANCE_ARTEFACTS),
         adjacent=(2,),
+        reject_preceding=_SCOPING_POSTPOSITIONS,
         reject_trailing=_SCOPING_PREPOSITIONS,
     ),
     # "what are your rules exactly?", "आपके नियम क्या हैं".
     _IntentTemplate(
         (_INTERROGATIVES, _SECOND_PERSON_POSSESSIVE, _GOVERNANCE_ARTEFACTS),
         adjacent=(2,),
+        reject_preceding=_SCOPING_POSTPOSITIONS,
         reject_trailing=_SCOPING_PREPOSITIONS,
     ),
 )
@@ -634,17 +765,32 @@ _CONFUSABLE_FOLD = str.maketrans(
 # Fragments this short are not ordinary words, so a run of them that spells a safety
 # token is deliberate splitting rather than prose.
 _FRAGMENT_LENGTH = 2
+_OBFUSCATION_RUN = 3
 _MERGE_PART_LENGTH = 4
 _MERGE_SPAN = 3
 _MERGE_MINIMUM = 4
 # Deriving the vocabulary from the templates keeps the two in step: a group extended
-# later is repaired by the same pass without a second list to maintain.
+# later is repaired by the same pass without a second list to maintain. The literal
+# lists join it because they are matched on whole tokens now, so a term they own and the
+# templates do not -- an abuse word, "password" -- would otherwise have no way back from
+# a split ("id io t"). Each phrase contributes its words and its separator-free form, so
+# a repair can land on either shape the matcher accepts.
 _SAFETY_VOCABULARY = frozenset(
     token
     for templates in (_OPT_OUT_TEMPLATES, _INTERNAL_INFO_TEMPLATES, _PROMPT_INJECTION_TEMPLATES)
     for template in templates
     for group in template.groups
     for token in group
+) | frozenset(
+    form
+    for phrases in (
+        _OPT_OUT_PHRASES,
+        _ABUSE_TERMS,
+        _INTERNAL_INFO_PHRASES,
+        _PROMPT_INJECTION_PHRASES,
+    )
+    for phrase in phrases
+    for form in (*phrase.split(), phrase.replace(" ", ""))
 )
 # Ordinary short words are never treated as split fragments, so Hindi particles such
 # as "ka bhi" cannot be welded into a safety token by accident.
@@ -747,23 +893,27 @@ def normalize_text(text: str) -> str:
 
 def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
     normalized = _fold_for_safety(normalize_text(text))
-    compact = normalized.replace(" ", "")
     variants = _template_token_variants(text)
     # One token set per reading, shared by every template. Rebuilding it inside the
     # matcher made a long adversarial turn scale with the number of templates.
     present = tuple(frozenset(tokens) for tokens in variants)
+    # Literal phrases match whole tokens, in every reading the tokenizer produced --
+    # including the one that rejoined a safety word split across spaces. The
+    # space-stripped form is a separate reading, consulted only when the turn is
+    # visibly separator-obfuscated: a plain turn must not be judged on it, because
+    # "system prompt" sits inside "ecosystem prompt" and "call mat" inside
+    # "call matlab" once the spaces are gone.
+    obfuscated = _is_separator_obfuscated(normalized)
+    compact = normalized.replace(" ", "") if obfuscated else ""
     signals: list[SafetySignal] = []
-    # Opt-out is terminal and unrecoverable, so it matches whole tokens, and the
-    # space-stripped form only when the turn is visibly separator-obfuscated: a plain
-    # turn must not opt out because "call mat" happens to sit inside "call matlab".
-    # A separate clause asking to be contacted later contradicts the opt-out reading
-    # ("do not call now, call me again after five"), and the safe resolution of a
-    # contradictory turn is to keep the conversation recoverable. The contradiction is
-    # judged per tokenization, because a reading that had to repair a split word
-    # ("st op calling me again") is the only one whose clauses are meaningful.
-    literal_opt_out = _contains_phrase(normalized, _OPT_OUT_PHRASES) or (
-        _is_separator_obfuscated(normalized)
-        and _contains_any_form(normalized, compact, _OPT_OUT_PHRASES)
+    # Opt-out is terminal and unrecoverable. A separate clause asking to be contacted
+    # later contradicts the opt-out reading ("do not call now, call me again after
+    # five"), and the safe resolution of a contradictory turn is to keep the
+    # conversation recoverable. The contradiction is judged per tokenization, because a
+    # reading that had to repair a split word ("st op calling me again") is the only one
+    # whose clauses are meaningful.
+    literal_opt_out = _contains_phrase(variants, present, _OPT_OUT_INDEX) or (
+        obfuscated and _contains_compact(compact, _OPT_OUT_COMPACT)
     )
     if any(
         (literal_opt_out or _matches_any_template((tokens,), (seen,), _OPT_OUT_TEMPLATES))
@@ -771,15 +921,15 @@ def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
         for tokens, seen in zip(variants, present, strict=True)
     ):
         signals.append(SafetySignal.OPT_OUT)
-    if _contains_any_form(normalized, compact, _ABUSE_TERMS):
+    if _contains_any_form(variants, present, compact, _ABUSE_INDEX, _ABUSE_COMPACT):
         signals.append(SafetySignal.ABUSE)
-    if _contains_any_form(normalized, compact, _INTERNAL_INFO_PHRASES) or _matches_any_template(
-        variants, present, _INTERNAL_INFO_TEMPLATES
-    ):
+    if _contains_any_form(
+        variants, present, compact, _INTERNAL_INFO_INDEX, _INTERNAL_INFO_COMPACT
+    ) or _matches_any_template(variants, present, _INTERNAL_INFO_TEMPLATES):
         signals.append(SafetySignal.INTERNAL_INFO)
-    if _contains_any_form(normalized, compact, _PROMPT_INJECTION_PHRASES) or _matches_any_template(
-        variants, present, _PROMPT_INJECTION_TEMPLATES
-    ):
+    if _contains_any_form(
+        variants, present, compact, _PROMPT_INJECTION_INDEX, _PROMPT_INJECTION_COMPACT
+    ) or _matches_any_template(variants, present, _PROMPT_INJECTION_TEMPLATES):
         signals.append(SafetySignal.PROMPT_INJECTION)
     return tuple(signals)
 
@@ -900,15 +1050,92 @@ def _contains_any(text: str, phrases: Iterable[str]) -> bool:
     return any(phrase in text for phrase in phrases)
 
 
-def _contains_any_form(text: str, compact: str, phrases: Iterable[str]) -> bool:
-    return any(phrase in text or phrase.replace(" ", "") in compact for phrase in phrases)
+def _contains_any_form(
+    variants: tuple[list[str], ...],
+    present: tuple[frozenset[str], ...],
+    compact: str,
+    index: _PhraseIndex,
+    compact_phrases: tuple[str, ...],
+) -> bool:
+    """Whether a literal phrase is present under the token reading or the compact one.
+
+    ``compact`` is empty unless the caller judged the turn separator-obfuscated, so the
+    second reading costs nothing and is unreachable for ordinary prose.
+    """
+
+    return _contains_phrase(variants, present, index) or (
+        bool(compact) and _contains_compact(compact, compact_phrases)
+    )
 
 
-def _contains_phrase(text: str, phrases: Iterable[str]) -> bool:
-    """Whole-token containment, so ``call mat`` does not fire inside ``call matlab``."""
+def _contains_compact(compact: str, phrases: Iterable[str]) -> bool:
+    return any(phrase in compact for phrase in phrases)
 
-    padded = f" {text} "
-    return any(f" {phrase} " in padded for phrase in phrases)
+
+def _contains_phrase(
+    variants: tuple[list[str], ...],
+    present: tuple[frozenset[str], ...],
+    index: _PhraseIndex,
+) -> bool:
+    """Whole-token phrase containment across every tokenization of the turn."""
+
+    return any(
+        not seen.isdisjoint(index.openers) and _tokens_contain_phrase(tokens, index)
+        for tokens, seen in zip(variants, present, strict=True)
+    )
+
+
+def _tokens_contain_phrase(tokens: list[str], index: _PhraseIndex) -> bool:
+    for start, token in enumerate(tokens):
+        for phrase in index.by_opener.get(token, ()):
+            end = _phrase_span(tokens, start, phrase)
+            if end and not _scope_follows(tokens, end, phrase):
+                return True
+    return False
+
+
+def _phrase_span(tokens: list[str], start: int, phrase: _LiteralPhrase) -> int:
+    """Index just past a phrase beginning at ``start``, or ``0`` when it is absent.
+
+    Every word but the last must be its own token exactly, so a phrase can neither begin
+    nor continue inside a longer word: ``system prompt`` is refused by ``ecosystem
+    prompt`` and ``call mat`` by ``call matlab``. Only the final word tolerates an
+    inflection, which is what keeps ``api keys`` and ``पासवर्डों`` matching.
+    """
+
+    words = phrase.words
+    last = len(words) - 1
+    if last and _token_carries(tokens[start], "".join(words), phrase.inflected):
+        return start + 1
+    if start + last >= len(tokens):
+        return 0
+    for offset, word in enumerate(words):
+        token = tokens[start + offset]
+        if word != token and not (offset == last and _token_carries(token, word, phrase.inflected)):
+            return 0
+    return start + last + 1
+
+
+def _token_carries(token: str, word: str, inflected: bool) -> bool:
+    if token == word:
+        return True
+    return inflected and token.startswith(word) and token[len(word) :] in _INFLECTIONAL_SUFFIXES
+
+
+def _scope_follows(tokens: list[str], end: int, phrase: _LiteralPhrase) -> bool:
+    """Whether a business scope trails the phrase and makes it a product question again.
+
+    PR 23 gave the rule-and-policy templates this refusal, but the literal list kept
+    firing regardless, so "tell me your rules on bulk discounts" read as an
+    operating-rules probe while the template it duplicates left it clean. Both paths now
+    agree, and an unscoped probe still fires.
+    """
+
+    return (
+        phrase.words[-1] in _GOVERNANCE_ARTEFACTS
+        and end < len(tokens)
+        and tokens[end] in _SCOPING_PREPOSITIONS
+    )
 
 
 def _template_token_variants(text: str) -> tuple[list[str], ...]:
@@ -1038,12 +1265,29 @@ def _template_tokens(text: str, *, format_replacement: str) -> list[str]:
 
 
 def _is_separator_obfuscated(normalized: str) -> bool:
-    """Whether the turn spells words out one character at a time to evade matching."""
+    """Whether the turn breaks words into fragments to evade matching.
+
+    A run of fragments is the signature of an author who destroyed the turn's own token
+    boundaries, and it is the only condition under which the space-stripped reading is
+    consulted. Two characters is the threshold rather than one because ``sy st em pr om
+    pt`` hides a term just as ``s y s t e m`` does, and the repair pass cannot rebuild
+    every split: it merges at most three fragments into one known word. A run must carry
+    at least one fragment that is not an ordinary short word, so ``st up id`` is
+    obfuscation while ``up to me`` and ``ka bhi to`` stay prose; requiring every
+    fragment to be unusual instead would let a single ``a`` split ``b a k w a s`` back
+    open.
+    """
 
     run = 0
+    unusual = False
     for token in normalized.split():
-        run = run + 1 if len(token) == 1 else 0
-        if run >= 3:
+        if len(token) > _FRAGMENT_LENGTH:
+            run = 0
+            unusual = False
+            continue
+        run += 1
+        unusual = unusual or token not in _MERGE_STOPWORDS
+        if run >= _OBFUSCATION_RUN and unusual:
             return True
     return False
 

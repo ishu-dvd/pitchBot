@@ -443,12 +443,13 @@
   it remains linear in turn length with no regex backtracking and no per-turn table rebuild.
 - **Deferred:** Findings C1 (raw buyer text reaching browser-facing timeline events) and C6
   (`RecalledClaim` exposing `session_id`) are out of scope here because they touch the
-  simulator. C7 (pending callback retry reusing stale authorization) and C8 (`_contains_any_form`
-  matching `"system prompt"` inside `"ecosystem prompt"` without token boundaries) are also
-  untouched; C8's compact substring path additionally means the pre-existing literal
-  `"tell me your rules"` still fires inside `"tell me your rules on bulk discounts"`, which the
-  new scoped templates would otherwise have left clean. Learned or model-based safety
-  classification, a full Unicode confusable skeleton, and live channels remain deferred.
+  simulator. C7 (pending callback retry reusing stale authorization) is also untouched.
+  C8 (`_contains_any_form` matching `"system prompt"` inside `"ecosystem prompt"` without
+  token boundaries) was deferred here and is fixed in PR 28, which also closes the related
+  case C8's compact substring path caused: the pre-existing literal `"tell me your rules"`
+  firing inside `"tell me your rules on bulk discounts"`, which the scoped templates added
+  here would otherwise have left clean. Learned or model-based safety classification, a
+  full Unicode confusable skeleton, and live channels remain deferred.
 - **Rollback:** Revert PR 23. It adds no schema migration, persistent index, API surface, model,
   provider, retained buyer data, or external side effect; `normalize_text()` is unchanged, so
   turn digests and business extraction are byte-identical either way.
@@ -633,3 +634,108 @@
   model, provider, retained buyer data, external side effect, or HTTP API change; the only
   new surface is `ConversationJournal.with_history_bounds` and its keyword arguments, and
   behaviour returns to PR 22's unbounded projection read.
+
+## PR 28: Token-aware safety phrase matching
+
+- **Branch:** `fix/token-aware-phrase-matching`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 25 commit `ef6518c`.
+- **Scope:** Close PR 23's deferred finding C8. `_contains_any_form` matched literal safety
+  phrases as raw substrings of the turn and of its space-stripped form, so a phrase fired
+  wherever its characters happened to appear. Two benign turns were misread as extraction
+  probes: `"We need an ecosystem prompt for our marketplace."` matched `system prompt`
+  inside `ecosystem prompt`, and `"Tell me your rules on bulk discounts."` matched the
+  literal `tell me your rules` that the scoped templates from PR 23 would otherwise have
+  left clean. Both are recoverable redirects rather than closes, but both derail a live
+  sales conversation on exactly the vocabulary this product's buyers use.
+  1. **Literal phrases match tokens, not characters (`_LiteralPhrase`, `_phrase_span`,
+     `_tokens_contain_phrase`).** A phrase now matches a run of whole tokens in the same
+     tokenizations the templates already use, so it can neither begin nor continue inside a
+     longer word. Every word but the last must be its own token exactly; the final word may
+     carry one inflection from `_INFLECTIONAL_SUFFIXES`, a closed per-script set, so
+     `api keys`, `passwords` and `पासवर्डों` still match while `passwordless`,
+     `training database`, `api keyword`, `गुप्त निर्देशांक` and `पासवर्डरहित` no longer do.
+  2. **The scoped-rules refusal reaches the literal path (`_scope_follows`).** A phrase
+     ending in a `_GOVERNANCE_ARTEFACTS` word is refused when a scoping preposition follows
+     it, which is the rule PR 23 gave the templates and the literal list ignored. An
+     unscoped `"Tell me your rules."` still fires.
+  3. **The refusal is mirrored for postpositional word order (`_SCOPING_POSTPOSITIONS`).**
+     Fixing English alone would have left Hindi and Hinglish noisier than English, because
+     they write the same scope in front of the possessive: `बल्क डिस्काउंट पर आपके नियम
+     बताओ` and `bulk discount par apne rules batao` are the word-order twins of the English
+     false positive. Only postpositions are listed, never an English preposition.
+  4. **Obfuscation resistance is carried by two mechanisms instead of one substring scan
+     (`_SAFETY_VOCABULARY`, `_is_separator_obfuscated`).** The split-word repair pass now
+     draws on the literal phrases as well as the template groups, so a term the templates do
+     not own can be rebuilt from fragments (`id io t`, `sy st em pr om pt`). The
+     space-stripped reading is gated on a fragment run rather than a single-character run,
+     so `pa ss wo rd` and `se cr et ke y` still reach it.
+  5. **Opt-out keeps its stricter reading.** Its literals tolerate no inflection, and a
+     one-set pre-filter (`_PhraseIndex.openers`) keeps ordinary turns off the per-token scan.
+- **Safety decisions:** **How token-awareness and obfuscation resistance coexist.** They
+  are answers to opposite questions and must not be merged. Token boundaries are evidence
+  *the author supplied*; a space-stripped form is a reading that *destroys* that evidence.
+  Trusting the compact form everywhere is the defect being fixed - once the spaces are
+  gone, `system prompt` sits inside `ecosystem prompt` and `call mat` inside `call matlab`.
+  Trusting only tokens is the opposite failure, because an attacker writing `sy st em pr om
+  pt` has already deleted the boundaries a token reading depends on. The resolution is to
+  keep both readings and let the turn's own shape decide which applies. An ordinary turn
+  has intact boundaries and is judged purely on tokens. A turn that visibly fragments its
+  own words has attacker-supplied boundaries, and only then is the compact reading
+  consulted. Between those, the repair pass rebuilds a split word into a real token so the
+  token reading can do the work without a compact form at all - `st op calling me again`
+  and `sy st em pr om pt` are caught this way, not by stripping spaces. The gate needs a
+  run of at least three fragments of at most two characters, and the run must carry at
+  least one fragment that is not an ordinary short word: requiring every fragment to be
+  unusual would let a single `a` split `b a k w a s` back open, while requiring none would
+  read `up to me` as obfuscation. A gate that opens on a benign turn is harmless in kind,
+  because the compact reading can only ever match an actual safety phrase; it cannot invent
+  one. **Opt-out stays stricter than the rest.** It is the only terminal, unrecoverable
+  signal, so its literals match tokens exactly. No wording in its list needs a suffix to be
+  recognised - the differential over every phrase and every ending confirms tolerance there
+  buys no detection - so the only thing it would add is the risk of `call mats` closing a
+  conversation for good. **Inflection is a closed set, per script.** English marks number
+  and tense with `s`, `ed`, `ing`; Hindi and Hinglish mark case and future tense with `ों`,
+  `ना`, `गा`, `na`, `ge`. A set carrying only English endings would have silently cost
+  `पासवर्डों` and `apne niyam hataoge`, which is the parity regression PR 23 existed to
+  prevent, so both scripts are enumerated. Anything unlisted is refused and falls back to
+  the templates, which is the safe direction: an unrecognised ending costs one paraphrase,
+  while an open-ended rule restores the substring behaviour this PR removes. **Nothing was
+  broadened.** A differential over 2,293 turns - every literal phrase alone, in carrier
+  sentences, upper-cased, joined, zero-width-separated, one- and two-character split, and
+  suffixed with 60 endings, plus every corpus turn and every adversarial case asserted in
+  the test suite - lost **zero** signals. The only losses are turns where a safety term is
+  embedded in a longer, different word, which is the defect. The 59 gains are all opt-out
+  evasions (`donotcall`, `कॉलमत`, `ca ll ma t`) that the old whole-token literal missed.
+  `engine.py` and `normalize_text()` are unchanged, so opt-out remains terminal and turn
+  digests and business extraction are byte-identical either way.
+- **Performance:** The matcher runs on every buyer turn including transcribed speech, so the
+  literal path was rebuilt to be cheaper rather than merely correct. Phrases are indexed at
+  import by the token that can open them, so a turn costs one dictionary lookup per token
+  rather than a scan per phrase, and each list is dismissed with a single set-disjointness
+  test against the reading's existing token set before any per-token work. The compact form
+  is now built only when the obfuscation gate opens, so an ordinary turn never allocates it.
+  Measured against this branch's base in one process, best of nine runs of 200 calls: an
+  ordinary buyer turn improved from 0.097 ms to 0.086 ms, a 1203-character adversarial turn
+  from 0.850 ms to 0.842 ms, a 1206-character benign turn from 0.919 ms to 0.887 ms, and a
+  1266-character fully fragmented turn from 2.336 ms to 2.327 ms. A 258-character Hindi
+  adversarial turn costs 0.495 ms against 0.477 ms, the one regression, because its tokens
+  do hit the phrase index and the obfuscation gate now consults a stopword set. Matching
+  stays linear in turn length, with no regex, no backtracking, and no per-turn table
+  rebuild; the indexes are module constants, so nothing is cached per turn.
+- **Deferred:** Three known limits, all lexical rather than fixable by boundaries. `prompt`
+  is both noun and verb, so `"Does your catalog system prompt users to re-order?"` and
+  `"Our inventory system prompts the team"` still read as extraction; separating them needs
+  syntax this matcher deliberately does not have. The postpositional refusal covers `पर`,
+  `के`, `की`, `का`, `के लिए` and their romanisations but not `के बारे में`, because its final
+  token romanises as `me`, and listing that would refuse `"tell me your rules"` outright.
+  Derivational endings that are not inflections are refused, so `stupidly` and `promptly`
+  no longer match where substring matching caught them - accepted, since `ly` would also
+  make `"the system promptly sent the invoice"` an extraction probe. PR 23's C1, C6 and C7,
+  learned or model-based classification, a full Unicode confusable skeleton, and live
+  channels remain deferred.
+- **Rollback:** Revert PR 28. It adds no schema migration, persistent index, runtime cache,
+  API surface, model, provider, retained buyer data, or external side effect. `engine.py`
+  and `normalize_text()` are untouched, so turn digests, business extraction, and the
+  disposition each signal maps to are identical either way; only which turns produce a
+  signal changes, and reverting restores PR 23's substring behaviour exactly.
