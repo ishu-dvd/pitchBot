@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from pitchbot.actions import ActionPreviewResult, DeckIndustry
 from pitchbot.conversation import (
@@ -81,6 +81,14 @@ class RecalledClaim(SimulatorModel):
     Recall is never authoritative: it cannot change the reply, the extracted facts,
     or the classification. Fact and span identifiers are deliberately omitted so the
     browser never receives journal provenance handles.
+
+    The originating session identifier is omitted for the same reason but a stronger
+    one. Recall deliberately spans a lead's *earlier* sessions, so returning it would
+    hand this client a capability for a session it was never granted, not merely echo
+    back the one it already holds. ``prior_session_ordinal`` restores the ability to
+    tell one earlier call from another without naming any of them: it is a position
+    within this response, derived only from ``observed_at`` and ``rank``, which are
+    already here. It carries no bits of the session UUID and cannot address a session.
     """
 
     rank: int = Field(ge=1)
@@ -88,10 +96,20 @@ class RecalledClaim(SimulatorModel):
     value: JsonValue
     status: FactClaimStatus
     language: LanguageCode
-    session_id: UUID
     observed_at: AwareDatetime
     confirmed_by_customer: bool
     from_current_session: bool
+    # ``None`` exactly when the claim is from the current session; earlier calls are
+    # numbered from 1, oldest first, within this response only.
+    prior_session_ordinal: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_origin(self) -> RecalledClaim:
+        # Fail closed: an ordinal on a current-session claim, or a prior-session claim
+        # with no ordinal, is an unlabelled origin the browser would have to guess at.
+        if self.from_current_session is (self.prior_session_ordinal is not None):
+            raise ValueError("prior_session_ordinal is required exactly for earlier-session claims")
+        return self
 
 
 class TurnRecall(SimulatorModel):

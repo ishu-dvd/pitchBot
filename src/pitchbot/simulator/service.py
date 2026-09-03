@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID, uuid4, uuid5
@@ -46,6 +47,7 @@ from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.knowledge import (
     FactClaimStatus,
     LeadKnowledgeBm25Retriever,
+    RankedKnowledgeClaim,
     TemporalKnowledgeGraphBuilder,
 )
 from pitchbot.retrieval import (
@@ -826,22 +828,53 @@ class SimulatorService:
             duration_ms=response.duration_ms,
             indexed_claim_count=response.indexed_claim_count,
             timed_out=response.timed_out,
-            claims=[
-                RecalledClaim(
-                    rank=item.rank,
-                    key=item.claim.fact.key,
-                    value=item.claim.fact.value,
-                    status=item.claim.status,
-                    language=item.claim.language,
-                    session_id=item.claim.session_id,
-                    observed_at=item.claim.valid_from,
-                    confirmed_by_customer=item.claim.confirmed_by_customer,
-                    from_current_session=item.claim.session_id == session_id,
-                )
-                for item in response.results
-                if item.claim.status is not FactClaimStatus.SUPERSEDED
-            ],
+            claims=self._recalled_claims(response.results, session_id),
         )
+
+    @staticmethod
+    def _recalled_claims(
+        results: Sequence[RankedKnowledgeClaim],
+        session_id: UUID,
+    ) -> list[RecalledClaim]:
+        """Project ranked claims onto the browser surface, dropping every handle.
+
+        The claim's own session identifier is used here as a grouping key and never
+        leaves this method: recall spans a lead's earlier sessions, so emitting it would
+        give this client a capability for a session it was never granted. Earlier calls
+        are labelled with an ordinal ordered by the observation time and rank the
+        response already carries, never by the UUID, so the label discloses nothing the
+        client could not already derive and cannot be reversed into a session handle.
+        """
+
+        items = [item for item in results if item.claim.status is not FactClaimStatus.SUPERSEDED]
+        ordering: dict[UUID, tuple[datetime, int]] = {}
+        for item in items:
+            if item.claim.session_id == session_id:
+                continue
+            key = (item.claim.valid_from, item.rank)
+            best = ordering.get(item.claim.session_id)
+            if best is None or key < best:
+                ordering[item.claim.session_id] = key
+        ordinals = {
+            prior_session: ordinal
+            for ordinal, (prior_session, _) in enumerate(
+                sorted(ordering.items(), key=lambda entry: entry[1]), start=1
+            )
+        }
+        return [
+            RecalledClaim(
+                rank=item.rank,
+                key=item.claim.fact.key,
+                value=item.claim.fact.value,
+                status=item.claim.status,
+                language=item.claim.language,
+                observed_at=item.claim.valid_from,
+                confirmed_by_customer=item.claim.confirmed_by_customer,
+                from_current_session=item.claim.session_id == session_id,
+                prior_session_ordinal=ordinals.get(item.claim.session_id),
+            )
+            for item in items
+        ]
 
     def _restore_turn(
         self,

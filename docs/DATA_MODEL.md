@@ -94,6 +94,8 @@ Lead-level export, anonymization, and hard deletion cover every associated sessi
 
 Simulator lead aggregates use a deterministic UUID derived from validated synthetic `lead_ref`; session UUIDs remain unguessable capabilities. Durable API replay validates the entire stream before returning at most 100 typed results and excludes raw buyer text, internal lead/source identifiers, request fingerprints, and repetition digests.
 
+Because session UUIDs are capabilities, no response may carry one the caller does not already hold. Lead recall reads across a lead's earlier sessions, so `RecalledClaim` carries no session identifier at all: `from_current_session` separates this call from earlier ones, and `prior_session_ordinal` numbers the earlier calls within a single response from `observed_at` and `rank` alone. A response envelope may still echo the session UUID the caller supplied on the request path, which grants nothing new.
+
 ## Knowledge views
 
 The implemented BM25 baseline projects current structured facts for one session from a fully validated journal replay. Each result carries the fact ID, source spans, source aggregate version, session, language, and occurrence time. The aggregate's active privacy state and unchanged version are checked again after scoring.
