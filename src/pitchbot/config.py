@@ -37,6 +37,63 @@ class Settings(BaseSettings):
     max_call_minutes: int = 12
     max_turns: int = 80
 
+    # --- Speech providers -------------------------------------------------------------
+    # Both default to the behaviour that shipped before PR 33/34 existed: a byte-size mock
+    # detector, and NO transcriber at all, so spoken utterances are reported as
+    # `transcriber-unavailable` rather than invented. No provider has been benchmarked and
+    # selected (ADR-0004), so turning one on is a deliberate local act.
+    #
+    # A provider named here that is not installed is a **startup error**, not a silent
+    # downgrade. Falling back to the mock would leave an operator believing speech works
+    # when it does not, which is worse than refusing to start.
+    speech_vad_provider: str = "mock"
+    speech_vad_mode: int = 2
+    speech_vad_sample_rate_hz: int = 16_000
+
+    speech_stt_provider: str = "none"
+    speech_stt_model: str = "small"
+    speech_stt_device: str = "cpu"
+    speech_stt_compute_type: str = "int8"
+    speech_stt_beam_size: int = 1
+    # Empty means auto-detect. Whisper labels anything, including silence, so the adapter
+    # reports UNKNOWN below its detection-probability floor rather than guessing.
+    speech_stt_language: str = ""
+    # Weights are never fetched by PitchBot unless this is explicitly enabled.
+    speech_stt_download_root: str = ""
+    speech_stt_allow_download: bool = False
+
+    @model_validator(mode="after")
+    def validate_speech_providers(self) -> Settings:
+        """Reject an unrecognised provider name at import, not at first spoken turn.
+
+        Only the *name* is validated here; whether the optional extra is installed is
+        checked by :mod:`pitchbot.speech.providers` when the service is built. Settings
+        must not import adapters.
+        """
+
+        valid_vad = {"mock", "webrtc"}
+        if self.speech_vad_provider not in valid_vad:
+            raise ValueError(
+                f"speech_vad_provider must be one of {sorted(valid_vad)}, "
+                f"received {self.speech_vad_provider!r}"
+            )
+        valid_stt = {"none", "faster-whisper"}
+        if self.speech_stt_provider not in valid_stt:
+            raise ValueError(
+                f"speech_stt_provider must be one of {sorted(valid_stt)}, "
+                f"received {self.speech_stt_provider!r}"
+            )
+        if not 0 <= self.speech_vad_mode <= 3:
+            raise ValueError("speech_vad_mode must be between 0 and 3")
+        if self.speech_stt_beam_size < 1:
+            raise ValueError("speech_stt_beam_size must be positive")
+        if self.speech_stt_language not in {"", "en", "hi", "mixed", "unknown"}:
+            raise ValueError(
+                "speech_stt_language must be empty (auto-detect) or one of "
+                "'en', 'hi', 'mixed', 'unknown'"
+            )
+        return self
+
     @model_validator(mode="after")
     def validate_durable_history(self) -> Settings:
         if not self.enable_durable_history:

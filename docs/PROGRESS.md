@@ -1606,3 +1606,63 @@
   audio under ADR-0004.
 - **Rollback:** Revert PR 36. Documentation only; reverting removes the recorded
   measurement and nothing else.
+## PR 37: Make the speech providers reachable from configuration
+
+- **Branch:** `feat/speech-provider-configuration`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 36 commit `73569c5`.
+- **Scope:** PR 33 and PR 34 landed real text-to-speech and speech-to-text adapters behind
+  the existing contracts, but **nothing in the running application could construct one**:
+  `_build_service` never passed `speech_detector` or `speech_transcriber`, so both adapters
+  were reachable only from tests and PitchBot could not listen even with the extras
+  installed. This closes that gap. It selects no provider and changes no default.
+  1. **A single place where configuration becomes a provider
+     (`src/pitchbot/speech/providers.py`).** `build_speech_providers(settings)` returns the
+     detector, the transcriber, and identifiers for both. Nothing else in the codebase
+     turns settings into an adapter.
+  2. **Deny by default.** With no configuration the result is exactly the pre-adapter
+     behaviour: the byte-size mock detector and **no transcriber at all**, so a spoken
+     utterance is reported `transcriber-unavailable` rather than invented. No provider has
+     satisfied ADR-0004, so none may be a default; enabling one is a deliberate local act.
+     A test asserts the default path does not consult an optional dependency at all.
+  3. **A configured provider that cannot be built is a startup error, never a silent
+     downgrade.** Naming `faster-whisper` without the extra raises rather than quietly
+     returning `None`. Falling back would leave an operator believing speech works while
+     every utterance is silently dropped - the same class of inert-configuration problem
+     PR 29 removed elsewhere. Both refusal paths are asserted by forcing the availability
+     flags off, so they hold regardless of which extras the test environment happens to
+     have. Provider *names* are validated in `Settings` so a typo fails at import; whether
+     the extra is installed is checked in the factory, because settings must not import
+     adapters.
+  4. **Weights load at startup, not during a call.** Found by running the whole path end to
+     end: with a lazily-loaded transcriber the first spoken turn reported `transcribe_ms`
+     of **5,384 ms** for 3.4s of speech, roughly three seconds of which was model
+     construction. That work holds the GIL, so it stalls the event loop and the audio
+     socket barge-in depends on. A FastAPI `lifespan` now calls `preload_speech_providers`,
+     which is a no-op in the default configuration; the same utterance then reported
+     **3,502 ms**, with a 1.61s load moved to startup.
+  5. **`/health` reports which providers are running**, so "why is nothing being
+     transcribed" is answerable without reading logs or configuration.
+- **Verification:** The decisive check is end to end, not a unit test: with
+  `PITCHBOT_SPEECH_VAD_PROVIDER=webrtc` and `PITCHBOT_SPEECH_STT_PROVIDER=faster-whisper`,
+  Piper-synthesised speech driven frame by frame through `SpeechTurnPipeline` exactly as
+  the audio WebSocket does produced a real buyer turn - `outcome=transcribed`,
+  `is_turn=True`, text *"I want to order 50 units of the blue cotton shirts."*, language
+  `en`, confidence 0.753. **This is the first time the speech path works with real models.**
+  618 passed / 0 skipped with all extras installed, up from 594. **582 passed / 36 skipped
+  with `faster-whisper` and `webrtcvad` both uninstalled, zero failures**, and the
+  application still imports and builds with `MockVoiceActivityDetector` and no
+  transcriber. `ruff check`, `ruff format --check`, and `mypy` clean over 105 source files.
+- **Deferred:** Wiring **text-to-speech** into a speech *response* path. The
+  `TextToSpeechAdapter` seam does not exist yet - `SpeechTurnPipeline` consumes audio and
+  produces turns, and nothing consumes synthesised audio - so exposing a TTS provider here
+  would be constructing an adapter that nothing can call. That needs the transport and
+  turn-taking design PR 34 already deferred, and it is the natural next PR. Also deferred:
+  a health or readiness signal that distinguishes "preloaded" from "configured but not yet
+  loaded", which matters only once a provider is enabled in a deployed environment; and
+  selecting a provider, which still requires reviewed consented or licensed human audio
+  under ADR-0004.
+- **Rollback:** Revert PR 37. It adds no schema migration, persistent state, runtime
+  dependency, or provider selection, and every new setting defaults to the previous
+  behaviour, so reverting is behaviour-preserving for any deployment that has not opted in.
+  A deployment that *has* opted in returns to the mock detector and no transcriber.

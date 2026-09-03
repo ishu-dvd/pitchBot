@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from time import perf_counter
 from uuid import UUID, uuid4
@@ -37,6 +38,7 @@ from pitchbot.simulator.service import (
     TurnOperationCapacityError,
 )
 from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
+from pitchbot.speech.providers import build_speech_providers
 from pitchbot.storage import (
     SqlAlchemyEventRepository,
     create_database_engine,
@@ -45,12 +47,17 @@ from pitchbot.storage import (
 
 router = APIRouter(prefix="/api/simulator", tags=["simulator"])
 
+logger = logging.getLogger(__name__)
+
 PLAYBACK_FINISHED = "playback-finished"
 
 
 def _build_service() -> SimulatorService:
     if not settings.enable_durable_history:
-        return SimulatorService()
+        return SimulatorService(
+            speech_detector=speech_providers.detector,
+            speech_transcriber=speech_providers.transcriber,
+        )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
         turn_digest_key=bytes.fromhex(settings.durable_history_digest_key),
@@ -63,8 +70,20 @@ def _build_service() -> SimulatorService:
         recall_top_k=settings.lead_recall_top_k,
         recall_deadline_ms=settings.lead_recall_deadline_ms,
         recall_failure_budget=settings.lead_recall_failure_budget,
+        speech_detector=speech_providers.detector,
+        speech_transcriber=speech_providers.transcriber,
     )
 
+
+# Built at import, before the service, so a misconfigured provider fails once with a clear
+# error rather than at the first spoken utterance - and fails identically whether or not
+# durable history is enabled. Weights are NOT loaded here; that is the lifespan's job.
+speech_providers = build_speech_providers(settings)
+logger.info(
+    "Speech providers: detector=%s transcriber=%s",
+    speech_providers.detector_id,
+    speech_providers.transcriber_id,
+)
 
 simulator_service = _build_service()
 
