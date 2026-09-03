@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from pitchbot.adapters.contracts import TranscriptChunk
+from pitchbot.adapters.contracts import SynthesizedAudioChunk, TranscriptChunk
 from pitchbot.adapters.mocks import MockSpeechToTextAdapter, MockVoiceActivityDetector
 from pitchbot.domain import LanguageCode
 from pitchbot.main import app
 from pitchbot.simulator import router as router_module
 from pitchbot.simulator.router import PLAYBACK_FINISHED
+from pitchbot.simulator.speech_output import REPLY_AUDIO_BEGIN, REPLY_AUDIO_END
 
 SPEECH = b"x" * 1_024
 SILENCE = b"x" * 16
@@ -47,6 +51,75 @@ def use_transcriber(
     transcriber: MockSpeechToTextAdapter | None,
 ) -> None:
     monkeypatch.setattr(router_module.simulator_service, "_speech_transcriber", transcriber)
+
+
+class StubSynthesizer:
+    """Yields fixed PCM so the socket's framing can be asserted without a real voice.
+
+    ``gate`` holds the stream open after the first chunk. Without it a stub finishes
+    instantly, and a test that interrupts afterwards proves nothing about aborting: it
+    would pass even if barge-in never cancelled anything.
+    """
+
+    def __init__(
+        self,
+        *sizes: int,
+        rate: int = 22_050,
+        gate: asyncio.Event | None = None,
+    ) -> None:
+        self._sizes = sizes or (2_048,)
+        self._rate = rate
+        self._gate = gate
+        self.calls: list[str] = []
+
+    async def synthesize(
+        self,
+        text: str,
+        language: LanguageCode,
+    ) -> AsyncIterator[SynthesizedAudioChunk]:
+        self.calls.append(text)
+        for sequence, size in enumerate(self._sizes):
+            if self._gate is not None and sequence:
+                await self._gate.wait()
+            yield SynthesizedAudioChunk(
+                data=b"\x01\x02" * (size // 2),
+                sequence=sequence,
+                is_final=sequence == len(self._sizes) - 1,
+                media_type="audio/pcm",
+                sample_rate_hz=self._rate,
+            )
+
+
+def use_synthesizer(
+    monkeypatch: pytest.MonkeyPatch,
+    synthesizer: StubSynthesizer | None,
+) -> None:
+    monkeypatch.setattr(router_module.simulator_service, "_speech_synthesizer", synthesizer)
+
+
+def drain_until(socket: Any, message_type: str, limit: int = 40) -> list[dict[str, Any]]:
+    """Collect socket traffic until ``message_type`` arrives, keeping binary frames.
+
+    Reply audio is sent by a background task, so it interleaves with the JSON the receive
+    loop sends rather than arriving in a block that can be read with ``receive_json``.
+    """
+
+    seen: list[dict[str, Any]] = []
+    for _ in range(limit):
+        raw = cast(dict[str, Any], socket.receive())
+        if raw.get("bytes") is not None:
+            seen.append({"type": "binary", "bytes": raw["bytes"]})
+            if message_type == "binary":
+                return seen
+            continue
+        text = raw.get("text")
+        if text is None:
+            continue
+        payload = cast(dict[str, Any], json.loads(text))
+        seen.append(payload)
+        if payload.get("type") == message_type:
+            return seen
+    raise AssertionError(f"{message_type!r} never arrived; saw {[i['type'] for i in seen]}")
 
 
 def new_session(client: TestClient, lead_ref: str) -> str:
@@ -348,3 +421,173 @@ def test_turn_capacity_exhaustion_is_reported_distinguishably(
     assert message["outcome"] == "transcribed"
     assert message["error"] == "turn-capacity-reached"
     assert "reply" not in message
+
+
+# --------------------------------------------------------------------------------------
+# Speaking the reply with the server's own voice
+# --------------------------------------------------------------------------------------
+
+
+def test_without_a_synthesizer_the_browser_is_told_to_speak_the_reply(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default. Nothing changes for a deployment that has not configured a voice."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, None)
+    session_id = new_session(client, "audio-no-voice")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+        message = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+
+    assert ready["speech_output_available"] is False
+    assert message["reply"]
+    assert message["reply_audio"] is False
+
+
+def test_a_configured_voice_streams_the_reply_as_bounded_frames(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply arrives as audio, announced before it and terminated after it."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    synthesizer = StubSynthesizer(70_000)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-voice")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+        utterance = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+        traffic = drain_until(socket, REPLY_AUDIO_END)
+
+    assert ready["speech_output_available"] is True
+    assert utterance["reply_audio"] is True
+    assert synthesizer.calls == [utterance["reply"]]
+
+    kinds = [item["type"] for item in traffic]
+    assert kinds[0] == REPLY_AUDIO_BEGIN
+    assert kinds[-1] == REPLY_AUDIO_END
+    assert kinds.count("binary") == 3
+
+    begin = traffic[0]
+    assert begin["sample_rate_hz"] == 22_050
+    assert begin["media_type"] == "audio/pcm"
+
+    frames = [item["bytes"] for item in traffic if item["type"] == "binary"]
+    # 70,000 bytes re-cut at 32,768: no frame exceeds the bound the inbound side enforces,
+    # and every frame is a whole number of 16-bit samples.
+    assert [len(frame) for frame in frames] == [32_768, 32_768, 4_464]
+    assert all(len(frame) % 2 == 0 for frame in frames)
+    assert b"".join(frames) == b"\x01\x02" * 35_000
+
+    end = traffic[-1]
+    assert end["aborted"] is False
+    assert end["failed"] is False
+    assert end["truncated"] is False
+    assert end["frame_count"] == 3
+    assert end["byte_count"] == 70_000
+
+
+def test_interrupting_the_agent_aborts_the_reply_audio_in_flight(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Barge-in must stop the voice, not merely be reported alongside it.
+
+    The synthesiser is held open after its first chunk, so the reply is genuinely still
+    streaming when the buyer speaks over it. The abort is what unblocks it: the gate is
+    never released, so a stream that was not cancelled would hang this test rather than
+    pass it.
+    """
+
+    gate = asyncio.Event()
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Pricing?")]))
+    # The first sentence must exceed the frame size, or nothing is emitted until the
+    # second one arrives - and the second one is exactly what the gate is withholding.
+    synthesizer = StubSynthesizer(40_000, 40_000, gate=gate)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-voice-barge-in")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        first = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+        assert first["reply_audio"] is True
+        # The stream has begun and is now parked waiting for its second sentence.
+        opening = drain_until(socket, "binary")
+        assert opening[0]["type"] == REPLY_AUDIO_BEGIN
+
+        socket.send_bytes(SPEECH)
+        socket.send_bytes(SPEECH)
+        traffic = drain_until(socket, "barge-in")
+
+    kinds = [item["type"] for item in traffic]
+    # The abort is announced before the interruption, and no further audio followed it.
+    assert REPLY_AUDIO_END in kinds
+    end = next(item for item in traffic if item["type"] == REPLY_AUDIO_END)
+    assert end["aborted"] is True
+    assert end["reason"] == "interrupted"
+    assert kinds.index(REPLY_AUDIO_END) < kinds.index("barge-in")
+    assert "binary" not in kinds
+    assert not gate.is_set()
+
+
+def test_a_reply_that_synthesises_to_nothing_is_still_terminated(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the client never reports playback finished and the buyer stays muted."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(0))
+    session_id = new_session(client, "audio-voice-silent")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+        traffic = drain_until(socket, REPLY_AUDIO_END)
+
+    assert [item["type"] for item in traffic] == [REPLY_AUDIO_END]
+    assert traffic[-1]["frame_count"] == 0
+
+
+def test_synthesised_audio_is_as_unrecorded_as_captured_audio(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server's ``audio_retained: false`` promise covers what it speaks, too."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(4_096))
+    session_id = new_session(client, "audio-voice-privacy")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+        traffic = drain_until(socket, REPLY_AUDIO_END)
+
+    spoken = b"".join(item["bytes"] for item in traffic if item["type"] == "binary")
+    assert spoken == b"\x01\x02" * 2_048
+
+    events = json.dumps(client.get(f"/api/simulator/sessions/{session_id}").json()["events"])
+    # Neither the bytes nor their length appears anywhere in the journalled timeline.
+    assert "\\u0001\\u0002" not in events
+    assert "4096" not in events
+    assert str(traffic[-1]["byte_count"]) not in events

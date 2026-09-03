@@ -9,9 +9,11 @@ that turns configuration into a provider.
 Two rules govern it.
 
 **Deny by default.** With no configuration the result is exactly what shipped before those
-adapters existed: the byte-size mock detector, and **no transcriber at all**, so a spoken
-utterance is reported as ``transcriber-unavailable`` rather than invented. ADR-0004 has not
-been satisfied for any provider, so enabling one is a deliberate local act, never a default.
+adapters existed: the byte-size mock detector, **no transcriber at all** so a spoken
+utterance is reported as ``transcriber-unavailable`` rather than invented, and **no
+synthesiser**, leaving the browser to speak replies in its own voice as it always has.
+ADR-0004 has not been satisfied for any provider, so enabling one is a deliberate local
+act, never a default.
 
 **A configured provider that cannot be built is a startup error.** If an operator names
 ``faster-whisper`` and the extra is absent, this raises rather than quietly handing back
@@ -27,9 +29,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
-from pitchbot.adapters.contracts import SpeechToTextAdapter, VoiceActivityDetector
+from pitchbot.adapters.contracts import (
+    SpeechToTextAdapter,
+    TextToSpeechAdapter,
+    VoiceActivityDetector,
+)
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.adapters.faster_whisper_stt import (
     FASTER_WHISPER_AVAILABLE,
@@ -37,6 +44,15 @@ from pitchbot.adapters.faster_whisper_stt import (
 )
 from pitchbot.adapters.faster_whisper_stt import INSTALL_HINT as WHISPER_INSTALL_HINT
 from pitchbot.adapters.mocks import MockVoiceActivityDetector
+from pitchbot.adapters.piper_tts import (
+    DETERMINISTIC_SYNTHESIS,
+    PIPER_AVAILABLE,
+    PiperTextToSpeechAdapter,
+    PiperVoiceRegistry,
+    PiperVoiceSpec,
+    voice_spec,
+)
+from pitchbot.adapters.piper_tts import INSTALL_HINT as PIPER_INSTALL_HINT
 from pitchbot.adapters.webrtc_vad import INSTALL_HINT as WEBRTC_INSTALL_HINT
 from pitchbot.adapters.webrtc_vad import (
     WEBRTC_VAD_AVAILABLE,
@@ -56,8 +72,14 @@ class SttProvider(StrEnum):
     FASTER_WHISPER = "faster-whisper"
 
 
+class TtsProvider(StrEnum):
+    NONE = "none"
+    PIPER = "piper"
+
+
 MOCK_VAD_ID: Final[str] = "mock-voice-activity-detector"
 NO_TRANSCRIBER_ID: Final[str] = "none"
+NO_SYNTHESIZER_ID: Final[str] = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,17 +88,25 @@ class SpeechProviders:
 
     ``detector`` is always present because endpointing and barge-in must work with or
     without a model. ``transcriber`` is ``None`` when no speech-to-text provider is
-    configured, which is the default and is not an error.
+    configured, which is the default and is not an error. ``synthesizer`` is ``None`` when
+    no text-to-speech provider is configured, which is also the default: the browser
+    client falls back to its own Web Speech API voice, exactly as it did before.
     """
 
     detector: VoiceActivityDetector
     transcriber: SpeechToTextAdapter | None
+    synthesizer: TextToSpeechAdapter | None
     detector_id: str
     transcriber_id: str
+    synthesizer_id: str
 
     @property
     def can_transcribe(self) -> bool:
         return self.transcriber is not None
+
+    @property
+    def can_synthesize(self) -> bool:
+        return self.synthesizer is not None
 
 
 @runtime_checkable
@@ -95,13 +125,18 @@ async def preload_speech_providers(providers: SpeechProviders) -> None:
     that cost is not merely slow - it stalls the event loop, including the audio socket
     that barge-in depends on, for whichever caller happens to arrive first.
 
-    This is a no-op when no provider defines ``preload``, and when no transcriber is
-    configured at all, which is the default.
+    Synthesis has the same shape and needs the same treatment: loading a Piper voice was
+    measured at 2,561 ms, against roughly 110 ms to synthesise a whole sentence through a
+    voice already resident. Preloading also moves the registry's license refusal to
+    startup, so a denied voice stops the server rather than one conversation.
+
+    This is a no-op when no provider defines ``preload``, and when neither a transcriber
+    nor a synthesiser is configured at all, which is the default.
     """
 
-    transcriber = providers.transcriber
-    if isinstance(transcriber, Preloadable):
-        await transcriber.preload()
+    for provider in (providers.transcriber, providers.synthesizer):
+        if isinstance(provider, Preloadable):
+            await provider.preload()
 
 
 def _stt_language(value: str) -> LanguageCode | None:
@@ -155,28 +190,105 @@ def build_speech_to_text(settings: Settings) -> tuple[SpeechToTextAdapter | None
     return adapter, f"{adapter.provenance().provider_id}:{adapter.model_size}"
 
 
+def parse_voice_map(value: str) -> dict[LanguageCode, str]:
+    """``"en=en_US-joe-medium,hi=hi_IN-pratham-medium"`` to a language-to-voice mapping.
+
+    A language named twice is refused rather than resolved by ordering, for the same
+    reason the registry refuses it: whichever entry wins would be decided by the order
+    someone happened to type, and the loser would be silently ignored.
+    """
+
+    voices: dict[LanguageCode, str] = {}
+    for entry in (item.strip() for item in value.split(",")):
+        if not entry:
+            continue
+        language, separator, voice_id = entry.partition("=")
+        if not separator:
+            raise PermanentAdapterError(
+                f"speech_tts_voices entry {entry!r} must be '<language>=<voice-id>'"
+            )
+        code = LanguageCode(language.strip())
+        if code in voices:
+            raise PermanentAdapterError(
+                f"language {code.value!r} is mapped twice in speech_tts_voices"
+            )
+        voices[code] = voice_id.strip()
+    return voices
+
+
+def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None, str]:
+    """The configured synthesiser, ``None`` when none is configured, or a startup error.
+
+    Every failure here is a refusal to start: an unknown voice id, a missing voice file, a
+    voice whose license forbids commercial use. None of them is worth degrading past,
+    because a server that starts without the voice it was configured with is a server that
+    will quietly speak in the browser's voice instead - which is the situation this
+    provider exists to replace.
+    """
+
+    provider = TtsProvider(settings.speech_tts_provider)
+    if provider is TtsProvider.NONE:
+        return None, NO_SYNTHESIZER_ID
+    if not PIPER_AVAILABLE:
+        raise PermanentAdapterError(
+            f"speech_tts_provider={provider.value!r} is configured but the optional "
+            f"dependency is not installed. Install it with: {PIPER_INSTALL_HINT}. "
+            "Refusing to fall back to no synthesiser, because the reply would then be "
+            "spoken by the browser's own voice without anyone being told."
+        )
+    voice_dir = Path(settings.speech_tts_voice_dir)
+    specs: list[PiperVoiceSpec] = []
+    for language, voice_id in parse_voice_map(settings.speech_tts_voices).items():
+        # `voice_spec` refuses a voice id with no reviewed license, which is what keeps a
+        # licence decision from being made by whoever edits the .env file.
+        specs.append(voice_spec(voice_id, language, voice_dir / f"{voice_id}.onnx"))
+    registry = PiperVoiceRegistry(
+        specs,
+        allow_non_commercial=settings.speech_tts_allow_non_commercial,
+    )
+    for language in sorted(registry.languages):
+        # The registry gates on license at `resolve`, so a denied voice would otherwise
+        # surface on the first buyer turn in that language rather than at startup. Every
+        # mapped language is resolved once here, which is the whole point of building
+        # providers eagerly: a licence problem must stop the server, not a conversation.
+        registry.resolve(language)
+    adapter = PiperTextToSpeechAdapter(
+        registry,
+        synthesis=DETERMINISTIC_SYNTHESIS if settings.speech_tts_deterministic else None,
+    )
+    mapped = ",".join(sorted(spec.voice_id for spec in specs))
+    return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+
+
 def build_speech_providers(settings: Settings) -> SpeechProviders:
-    """Both providers, built together so a misconfiguration fails once at startup."""
+    """All three providers, built together so a misconfiguration fails once at startup."""
 
     detector, detector_id = build_voice_activity_detector(settings)
     transcriber, transcriber_id = build_speech_to_text(settings)
+    synthesizer, synthesizer_id = build_text_to_speech(settings)
     return SpeechProviders(
         detector=detector,
         transcriber=transcriber,
+        synthesizer=synthesizer,
         detector_id=detector_id,
         transcriber_id=transcriber_id,
+        synthesizer_id=synthesizer_id,
     )
 
 
 __all__ = [
     "MOCK_VAD_ID",
+    "NO_SYNTHESIZER_ID",
     "NO_TRANSCRIBER_ID",
     "Preloadable",
     "SpeechProviders",
     "SttProvider",
+    "TtsProvider",
     "VadProvider",
     "build_speech_providers",
     "build_speech_to_text",
+    "build_text_to_speech",
     "build_voice_activity_detector",
+    "parse_voice_map",
     "preload_speech_providers",
 ]

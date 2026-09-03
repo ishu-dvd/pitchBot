@@ -23,6 +23,7 @@ from pitchbot.adapters import (
     Clock,
     SpeechToTextAdapter,
     SystemClock,
+    TextToSpeechAdapter,
     VoiceActivityDetector,
 )
 from pitchbot.adapters.mocks import (
@@ -168,6 +169,7 @@ class SimulatorService:
         recall_failure_budget: int = 3,
         speech_detector: VoiceActivityDetector | None = None,
         speech_transcriber: SpeechToTextAdapter | None = None,
+        speech_synthesizer: TextToSpeechAdapter | None = None,
         turn_taking: TurnTakingConfig | None = None,
     ) -> None:
         if (
@@ -223,6 +225,10 @@ class SimulatorService:
         # so spoken turns stay unavailable rather than inventing buyer words.
         self._speech_detector = speech_detector or MockVoiceActivityDetector()
         self._speech_transcriber = speech_transcriber
+        # A synthesiser is optional for a third reason again: the browser client already
+        # speaks replies with its own Web Speech API voice, so absence here is a working
+        # fallback rather than a missing capability.
+        self._speech_synthesizer = speech_synthesizer
         self._turn_taking = turn_taking or TurnTakingConfig()
         # Recall reads the same journal the turn was just committed to, so it is only
         # available when durable history is enabled and lead identifiers are stable. The
@@ -560,6 +566,16 @@ class SimulatorService:
         """True when an endpointed utterance can actually become a buyer turn."""
 
         return self._speech_transcriber is not None
+
+    @property
+    def speech_output_available(self) -> bool:
+        """True when the server speaks replies itself instead of leaving it to the browser."""
+
+        return self._speech_synthesizer is not None
+
+    @property
+    def speech_synthesizer(self) -> TextToSpeechAdapter | None:
+        return self._speech_synthesizer
 
     def create_speech_pipeline(self, session_id: UUID) -> SpeechTurnPipeline:
         """Build a per-connection pipeline. Sessions never share turn-taking state."""

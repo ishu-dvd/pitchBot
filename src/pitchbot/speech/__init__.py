@@ -17,9 +17,19 @@ from pitchbot.speech.pipeline import (
     UtteranceOutcome,
     UtteranceResult,
 )
+from pitchbot.speech.reply_audio import (
+    DEFAULT_FRAME_BYTES,
+    DEFAULT_MAX_REPLY_BYTES,
+    MAX_FRAME_BYTES,
+    ReplyAudio,
+    ReplyAudioFrame,
+)
 from pitchbot.speech.turn_taking import TurnTaking, TurnTakingConfig, TurnTakingDecision
 
 __all__ = [
+    "DEFAULT_FRAME_BYTES",
+    "DEFAULT_MAX_REPLY_BYTES",
+    "MAX_FRAME_BYTES",
     "MAX_FRAME_DURATION_MS",
     "MAX_SILENCE_MS",
     "MAX_TRANSCRIPT_CHARS",
@@ -29,6 +39,8 @@ __all__ = [
     "BargeIn",
     "EndpointReason",
     "FrameResult",
+    "ReplyAudio",
+    "ReplyAudioFrame",
     "SpeechFrame",
     "SpeechSegment",
     "SpeechTurnPipeline",

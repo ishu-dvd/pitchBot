@@ -1110,7 +1110,7 @@
 ## PR 31: Restore user-facing status-documentation accuracy
 
 - **Branch:** `docs/status-accuracy`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 30 commit `5794df9`.
 - **Scope:** Nine PRs (21-29) merged after the user-facing documentation was last accurate,
   so `README.md`, `docs/TEST_REPORTS.md`, and several `docs/PROGRESS.md` status lines had
@@ -1176,7 +1176,7 @@
 ## PR 32: Bounded callback cancellation tombstones
 
 - **Branch:** `fix/callback-bookkeeping-bounds`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 31 commit `a074c05`.
 - **Scope:** An audit of `CallbackService` raised two findings. A3 (unbounded tombstone
   growth) is fixed here. A7 (one process-wide lock held across provider I/O) is **designed
@@ -1299,7 +1299,7 @@
 ## PR 33: Opt-in Piper text-to-speech adapter, and the voice-license finding that shapes it
 
 - **Branch:** `feat/piper-tts-adapter`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 32 commit `3f8413a`.
 - **Scope:** The first provider that actually produces speech, behind the **unchanged**
   `TextToSpeechAdapter` contract. `docs/BENCHMARKS.md` had registered Piper with the gate
@@ -1396,7 +1396,7 @@
 ## PR 34: Opt-in faster-whisper speech-to-text, and why it is utterance-batch
 
 - **Branch:** `feat/faster-whisper-stt`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 33 commit `e1b1d87`.
 - **Scope:** The first provider that turns buyer audio into text, behind the **unchanged**
   `SpeechToTextAdapter` contract. `docs/BENCHMARKS.md` gated faster-whisper on *"Model
@@ -1496,7 +1496,7 @@
 ## PR 35: Correct the VAD corpus requirements with measurement
 
 - **Branch:** `docs/corpus-requirements-measured`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 34 commit `52446cd`.
 - **Scope:** Documentation only. PR 30 listed five properties a corpus would need before it
   could select a VAD provider. Those were **hypotheses written without a way to test them** -
@@ -1550,7 +1550,7 @@
 ## PR 36: Measure the second local Whisper runtime and six-language coverage
 
 - **Branch:** `docs/whisper-runtime-and-language-coverage`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 35 commit `b1798fe`.
 - **Scope:** Documentation only. Two open questions were measured: is there a second local
   Whisper runtime worth using, and does `small` work beyond English and Hindi. Both
@@ -1609,7 +1609,7 @@
 ## PR 37: Make the speech providers reachable from configuration
 
 - **Branch:** `feat/speech-provider-configuration`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 36 commit `73569c5`.
 - **Scope:** PR 33 and PR 34 landed real text-to-speech and speech-to-text adapters behind
   the existing contracts, but **nothing in the running application could construct one**:
@@ -1666,3 +1666,85 @@
   dependency, or provider selection, and every new setting defaults to the previous
   behaviour, so reverting is behaviour-preserving for any deployment that has not opted in.
   A deployment that *has* opted in returns to the mock detector and no transcriber.
+
+## PR 38: Speak the reply with the server's own voice
+
+- **Branch:** `feat/tts-response-path`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 37 commit `067f32d`.
+- **Scope:** PR 37 made the *input* providers reachable but deliberately left
+  text-to-speech out, because at that point nothing could call `synthesize`. That was
+  correct then and is the gap now. The reply is spoken today by the **browser's**
+  `speechSynthesis`, which is not a missing capability so much as the wrong one: its voices
+  vary by browser and OS, Hindi is frequently absent, and on several platforms the audio is
+  produced by a **remote service** - so a product that answers `audio_retained: false` on
+  its own socket is, on those clients, sending the agent's words to a third party. This
+  moves synthesis to the server, where the voice, its license and its locality are known.
+  It selects no provider and changes no default.
+  1. **Frames the socket can abandon (`src/pitchbot/speech/reply_audio.py`).** Piper emits
+     one chunk per *sentence*, measured at 80 KB to 352 KB with the largest carrying 7.99s
+     of audio. A 352 KB write exceeds the 256 KB bound the inbound side of the same socket
+     enforces, and it cannot be abandoned part-way, so barge-in would only take effect on a
+     sentence boundary - which is not barge-in. `ReplyAudio` re-cuts the stream to 32 KB
+     frames (0.74s at 22.05 kHz), each a whole number of 16-bit samples, and caps a reply at
+     2 MB. The sample-alignment rule is load-bearing rather than tidy: the client rebuilds
+     frames into an `Int16Array`, so an odd-length frame byte-shifts every later sample and
+     the reply becomes noise rather than merely clicking.
+  2. **Synthesis off the receive loop (`src/pitchbot/simulator/speech_output.py`).** The
+     receive loop is the only thing classifying buyer audio, so synthesising inline would
+     trade barge-in against the feature being added - measured, it would blind the detector
+     for **1,052 ms** on a long reply, every turn. A background task produces the audio, a
+     `LockedSocket` serialises the two writers (a WebSocket is not safe for concurrent
+     sends), and barge-in cancels the task. Every stream is terminated, including one that
+     synthesised to nothing: the client hands the floor back when playback ends, so a
+     stream with no terminator would leave the buyer muted until `agent_floor_ms` expired.
+  3. **`speech_tts_provider` through the same factory.** Deny by default; a configured
+     provider whose extra is absent is a startup error, exactly as for the other two.
+     Voices are operator-supplied files, never downloaded, and a language maps to exactly
+     one voice with **no fallback** - an unmapped language must fail rather than be served
+     by the wrong voice.
+  4. **The browser plays it (`apps/web/reply-audio.js`).** PCM is scheduled gaplessly
+     through WebAudio, and `playback-finished` is reported when the audio finishes
+     *playing*, seconds after it finishes arriving. `speechSynthesis` remains the fallback
+     and is also used when synthesis produced nothing, so the buyer never loses the answer.
+- **Measured (2026-09-03, `en_US-joe-medium`, 8-core CPU):**
+
+  | Property | Value | Consequence |
+  | --- | --- | --- |
+  | Synthesis rate, voice resident | ~19x realtime (1,052 ms produced 20.75s) | The whole reply is ready long before any of it plays, so pacing the send buys nothing |
+  | Time to first chunk | 316-593 ms | The latency the buyer actually feels |
+  | Piper chunk size | 80 KB - 352 KB (1.82s - 7.99s) | Too coarse to send or to abandon; must be re-cut |
+  | Voice load | 2,561 ms, holds the GIL | Must be preloaded, like the transcriber |
+  | Cancel between chunks | 0 chunks after cancel; adapter byte-identical on reuse | Aborting is safe and immediate |
+
+- **Verification:** The decisive check closes the loop rather than counting bytes: with a
+  real Piper voice configured, the PCM that arrived over the WebSocket was written to WAV
+  and fed back through `faster-whisper`. Reply text *"Thanks. What matters most next:
+  features, budget, timeline, or the decision process?"*; **heard back** *"Thanks. What
+  matters most next? Features, budget, timeline, or the decision process."* - verbatim
+  modulo punctuation. 8 frames, 260,608 bytes, 5,909.5 ms of audio, delivered in **376 ms**
+  wall clock. Running it also confirmed the preload matters: skipping the lifespan put the
+  2.5s voice load on the first buyer and first audio arrived after **2,671 ms** against
+  **371 ms** with it. The barge-in test was checked for teeth by removing the abort call,
+  and it fails. 649 passed / 19 skipped, up from 618; **641 passed / 27 skipped with
+  `piper-tts` uninstalled, zero failures**, and `/health` still reports every provider as
+  `none`. `ruff check`, `ruff format --check`, and `mypy` clean over 109 source files, and
+  `mypy` reports identically with and without the extra.
+- **Found while building this:** `PiperVoiceRegistry` gates on license at `resolve`, not at
+  construction, so an operator who mapped a non-commercial voice got a server that started
+  cleanly and refused the **first buyer turn in that language**. The factory now resolves
+  every mapped language once at build time, which is the whole point of building providers
+  eagerly. The adapter is unchanged.
+- **Deferred:** Server audio for **typed** turns - that path is HTTP, has no floor
+  machinery, and would need its own transport; typed replies still use the browser voice.
+  Pacing the send to realtime, which would shrink the client's buffer but is unnecessary at
+  19x realtime and would add a second scheduler. A **non-Piper Hindi voice**, because no
+  reviewed Piper Hindi voice permits commercial use (PR 33), so a bilingual deployment
+  still has no licensed voice for half its buyers. Improving the **chunking policy**
+  remains open and still gated on a real STT corpus. Selecting any provider still requires
+  reviewed consented or licensed human audio under ADR-0004.
+- **Rollback:** Revert PR 38. It adds no schema migration, persistent state, or runtime
+  dependency, and every new setting defaults to the previous behaviour, so reverting is
+  behaviour-preserving for any deployment that has not opted in. A deployment that *has*
+  opted in returns to the browser speaking the reply.
+

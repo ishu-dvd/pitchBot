@@ -112,6 +112,31 @@ The adapter is **not** a selected provider and makes no quality claim. TTS natur
 intelligibility need the blinded human rubrics and consented audio described in
 [Benchmarks](BENCHMARKS.md).
 
+### Streaming a reply to a client (PR 38)
+
+The adapter is now reachable from a running conversation, which added two obligations that
+belong to the *transport* rather than to the adapter, and are implemented in
+`pitchbot.speech.reply_audio` and `pitchbot.simulator.speech_output`.
+
+- **A sentence is not a sendable unit.** A single Piper chunk was measured at up to 352 KB
+  carrying 7.99 s of audio, which both exceeds the 256 KB bound the inbound side of the same
+  socket enforces and cannot be abandoned part-way. Any consumer that streams synthesis to
+  a client must re-cut it; the size chosen here is 32 KB, and **every frame must be a whole
+  number of 16-bit samples**, because a client rebuilding frames into an `Int16Array`
+  byte-shifts every sample after an odd-length one.
+- **Synthesis must not run on the loop that detects interruptions.** Producing a long reply
+  took 1,052 ms. Inline, that is a second per turn during which no buyer audio is
+  classified — so the socket's own barge-in feature would be paid for by the feature being
+  added. It runs as a background task, all socket writes are serialised behind one lock
+  because a WebSocket is not safe for concurrent sends, and cancellation is the abort path.
+- **Every stream is terminated, including an empty one.** The client hands the floor back
+  when playback *ends*, so a reply that synthesised to nothing — which is what Piper returns
+  for punctuation-only text — must still be closed out, or the buyer stays muted until the
+  server's own floor timeout expires.
+- **Audio is best effort; the answer is not.** The reply text has already been delivered
+  over the socket before synthesis begins, so a failure costs the buyer the voice and never
+  the answer. Nothing retries and nothing fabricates audio.
+
 ## Speech recognition
 
 `FasterWhisperSpeechToTextAdapter` (PR 34) is the first provider that turns buyer audio into

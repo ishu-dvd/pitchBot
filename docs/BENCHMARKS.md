@@ -733,3 +733,81 @@ pitchbot-bench environment
 Measured results belong in an explicitly reviewed artifact/report path, not `benchmark-results/`, which is ignored by default.
 
 The session retrieval runner emits recall@k, reciprocal rank, timeout rate, and informational latency. The graph retrieval runner additionally gates superseded-claim exposure at zero over reviewed cross-session conflict, explicit supersession, and equal-observation cases. The synthetic VAD runner regenerates each seed-defined case, verifies its committed audio hash, and gates per-language/condition/vertical F1 against the suite's `min_f1`, with real-time factor gating available on labeled hardware via `--max-rtf`. All three reuse the same evaluation schema and the same suite-aware fail-closed gate, and all three return a non-zero exit code on a gate failure. Their artifacts contain allowlisted case, language, industry, persona, and tag labels plus metrics; synthetic queries, claims/documents, opaque gold identifiers, retrieved values, and audio seeds/segments remain in the reviewed suites and are not copied into run history.
+
+## Streaming a synthesised reply (measured 2026-09-03)
+
+These numbers decided the shape of the outbound speech path, so they are recorded here
+rather than inside the code that depends on them. Hardware: 8-core CPU, no accelerator.
+Voice `en_US-joe-medium` (CC0), `piper-tts` 1.7.0, mono 16-bit PCM at 22,050 Hz.
+
+### Piper streams by sentence, and a sentence is large
+
+| Reply | Chars | Chunks | Bytes | Audio | Time to first chunk | Total synthesis |
+| --- | --- | --- | --- | --- | --- | --- |
+| short | 27 | 1 | 72,192 | 1.64 s | 593 ms | 593 ms |
+| typical | 107 | 2 | 265,216 | 6.01 s | 316 ms | 316 ms |
+| long | 392 | 5 | 914,944 | 20.75 s | 527 ms | 1,052 ms |
+
+Individual chunks in the long reply ranged from **80,384 bytes (1.82 s)** to **352,256
+bytes (7.99 s)**. Two consequences follow directly:
+
+- A 352 KB write **exceeds the 256 KB bound the inbound side of the same socket enforces**,
+  and it cannot be abandoned part-way. Barge-in that can only take effect on a sentence
+  boundary is not barge-in, so the stream is re-cut into fixed 32 KB frames (0.74 s of
+  audio each) before it reaches the socket.
+- Every frame must be a whole number of 16-bit samples. The client rebuilds frames into an
+  `Int16Array`, so an odd-length frame byte-shifts every sample after it: the reply becomes
+  noise rather than merely clicking.
+
+### Synthesis is far faster than playback
+
+Once the voice is resident, synthesis runs at roughly **19x realtime** (1,052 ms produced
+20.75 s of audio; 1,000 ms produced 6.01 s in the two-sentence case). Repeating one
+sentence four times shows a warm-up of about 2.4x on the first call after load:
+
+| Call | Elapsed | Rate |
+| --- | --- | --- |
+| 0 | 255 ms | 8.2x realtime |
+| 1 | 127 ms | 16.4x |
+| 2 | 106 ms | 19.6x |
+| 3 | 114 ms | 18.2x |
+
+Because the whole reply is available long before any of it finishes playing, **pacing the
+send to realtime buys nothing** and costs delivery certainty - the audio is better sent
+while the network is known to be working. It does *not* follow that synthesis can run
+inline: 1,052 ms on the socket's receive loop would blind the interruption detector for
+about a second on every turn, which is why it runs as a background task.
+
+### Cancelling between chunks is immediate and safe
+
+Cancelling a synthesis in flight delivered **no further chunks**, and the adapter produced
+**byte-identical output on its next use**. An earlier measurement reporting
+`cancel-to-stopped=0 ms` was invalid - it cancelled an `asyncio.sleep` parked between
+chunks rather than a live synthesis - and was re-run against the real case. One caveat
+stands: `asyncio.to_thread` cancellation abandons the awaiting coroutine but cannot stop
+the worker thread, so at most one already-started sentence continues on a pooled thread.
+
+### Loading a voice belongs at startup
+
+Loading `en_US-joe-medium` took **2,561 ms** and holds the GIL, against roughly **110 ms**
+to synthesise a whole sentence through a voice already resident. Measured end to end
+through the audio socket, the difference lands entirely on the first buyer:
+
+| | Time to first audio frame |
+| --- | --- |
+| Voice preloaded by the application lifespan | **371 ms** |
+| Voice loaded lazily on the first reply | **2,671 ms** |
+
+### End-to-end round trip
+
+The outbound path was verified by feeding the PCM that arrived over the WebSocket back
+through `faster-whisper` (`small`, CPU, int8) rather than by counting bytes:
+
+- Reply text: *"Thanks. What matters most next: features, budget, timeline, or the decision
+  process?"*
+- Heard back: *"Thanks. What matters most next? Features, budget, timeline, or the decision
+  process."*
+
+Verbatim modulo punctuation. The turn delivered 8 frames, 260,608 bytes and 5,909.5 ms of
+audio in **376 ms** of wall clock.
+
