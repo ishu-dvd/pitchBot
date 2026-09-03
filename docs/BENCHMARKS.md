@@ -379,12 +379,19 @@ re-measured without further code the moment an adequate corpus exists.
 
 ### What the corpus would need to select a VAD
 
+Items 1-3 were **prototyped and measured on 2026-09-03**, now that PR 33 makes real speech
+synthesis available. The result corrects item 2 — see
+[Measured: which properties actually separate](#measured-which-properties-actually-separate-a-vad-from-a-threshold) below.
+
 1. **Spectrally speech-like "speech".** Formant structure, harmonicity, and an
    amplitude envelope rather than uniform noise, so a detector's sub-band model is
    exercised instead of its energy path.
-2. **Non-speech at speech energy.** Loud stationary broadband noise, hum, music, and
-   impulsive noise labeled non-speech. Without this, precision measures hangover length
-   and nothing else.
+2. **Non-speech at speech energy, *abutting* speech.** Loud stationary broadband noise,
+   hum, music, and impulsive noise labeled non-speech — but **placed immediately adjacent
+   to speech, with no silent gap**. Measurement showed the original form of this
+   requirement, which did not specify adjacency, does not work: loud non-speech in its own
+   isolated region is rejected no better by an acoustic VAD than by a threshold. What
+   discriminates is the **boundary**.
 3. **A realistic noise floor.** Non-speech that is not digital zero, so a warm-up or
    hangover frame lands on plausible audio rather than on mathematically perfect silence.
 4. **Boundary tolerance in the metric, or a declared hangover budget.** A detector that
@@ -396,6 +403,49 @@ re-measured without further code the moment an adequate corpus exists.
 
 Until at least items 1-3 exist, `min_f1` on this suite is a harness regression gate and
 must not be read as a provider ranking.
+
+### Measured: which properties actually separate a VAD from a threshold
+
+A four-clip corpus was generated from real Piper speech at 16 kHz, with a non-zero noise
+floor and non-speech placed at the *same RMS* as the speech, and scored against an
+**oracle-tuned** RMS threshold — the best threshold energy detection could achieve on that
+exact corpus, chosen with hindsight. That is the strongest possible baseline; beating a
+hand-picked threshold is the bar an acoustic model has to clear to be worth its dependency.
+
+| Clip construction | Oracle RMS F1 | py-webrtcvad F1 | Delta |
+|---|---:|---:|---:|
+| Speech **abutting** loud non-speech, no gap | 0.7634 | 0.8193 | **+0.056** |
+| Speech in a realistic room-tone floor | 0.9516 | 0.9697 | +0.018 |
+| Speech vs. isolated loud broadband noise | 0.8262 | 0.8229 | −0.003 |
+| Speech vs. isolated 440 Hz tone and 50 Hz hum | 0.7135 | 0.7107 | −0.003 |
+
+Aggregated over all four, the best detector mode reached mean F1 0.8243 against the
+oracle threshold's 0.8137 — and **lost** on worst-case F1 (0.7033 vs 0.7135). Three of the
+four aggressiveness modes lost outright.
+
+Two conclusions, both of which change the corpus design:
+
+- **"Non-speech at speech energy" is not sufficient on its own, and as originally written
+  is counter-productive.** Isolated loud noise, tone, and hum are rejected no better by the
+  acoustic detector than by a threshold; those two clip types make the corpus *worse* at
+  discriminating. This is consistent with what PR 30 already observed — real VADs reject
+  low-energy stationary noise, not loud broadband signals — so requiring that rejection
+  measures a property the detector does not claim to have.
+- **The discriminating property is boundary placement.** When non-speech sits immediately
+  against speech at the same level, an energy threshold has *no information at all* to
+  locate the transition, while a spectral model does. That is the only construction here
+  that separated the two clearly.
+
+**This is still not a corpus that can rank VAD quality**, and none is being added. A
++0.056 margin on one clip construction, against one detector, is evidence about corpus
+*design*, not a provider ranking. A corpus that could rank would need the boundary
+construction above as its dominant case, and would need to demonstrate a stable ordering
+between **at least two** real detectors rather than one detector against a threshold.
+
+Reproduced by `probe_corpus_viability.py` / `probe_corpus_perclip.py`, which are
+development probes and are deliberately not committed: they depend on an optional TTS
+extra and a non-commercially-licensed voice used for local evaluation only, and no audio
+is committed to the repository.
 
 ### Frame compatibility
 

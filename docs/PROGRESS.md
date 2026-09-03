@@ -1492,3 +1492,57 @@
   public signature, and is not referenced by any existing code path - the module is
   deliberately not re-exported from `pitchbot.adapters.__init__`. Uninstalling the optional
   extra is sufficient to disable it without reverting anything.
+
+## PR 35: Correct the VAD corpus requirements with measurement
+
+- **Branch:** `docs/corpus-requirements-measured`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 34 commit `52446cd`.
+- **Scope:** Documentation only. PR 30 listed five properties a corpus would need before it
+  could select a VAD provider. Those were **hypotheses written without a way to test them** -
+  no real speech synthesis existed in the repository at the time. PR 33 added it, so items
+  1-3 were prototyped and measured, and one of them is wrong as written.
+  1. **The measurement (`docs/BENCHMARKS.md`, "Measured: which properties actually
+     separate a VAD from a threshold").** A four-clip corpus was generated from real Piper
+     speech at 16 kHz with a non-zero noise floor and non-speech placed at the same RMS as
+     the speech, then scored against an **oracle-tuned** RMS threshold - the best threshold
+     energy detection could achieve on that exact corpus, chosen with hindsight. Beating a
+     hand-picked threshold is the bar an acoustic model must clear to be worth its
+     dependency, and it is a deliberately harsher baseline than PR 30's fixed threshold.
+  2. **Item 2 is corrected.** As written it asked for "non-speech at speech energy". Two
+     clip constructions that satisfy it exactly - isolated loud broadband noise, and an
+     isolated 440 Hz tone plus 50 Hz hum - are rejected *no better* by py-webrtcvad than by
+     the threshold (delta -0.003 each), so they make the corpus **worse** at
+     discriminating, not better. This is consistent with PR 30's own observation that real
+     VADs reject low-energy stationary noise rather than loud broadband signals; requiring
+     that rejection measures a property the detector does not claim to have. The
+     requirement now specifies **adjacency**: non-speech at speech energy *abutting* speech
+     with no silent gap.
+  3. **The discriminating property is boundary placement.** The only construction that
+     separated the two clearly (+0.056) was speech immediately against loud non-speech at
+     the same level, where an energy threshold has *no information at all* to locate the
+     transition while a spectral model does.
+  4. **No corpus is added and no provider is selected.** Aggregated over all four clips the
+     best detector mode reached mean F1 0.8243 against the oracle threshold's 0.8137, and
+     **lost** on worst-case F1 (0.7033 vs 0.7135), with three of four aggressiveness modes
+     losing outright. A +0.056 margin on one construction against one detector is evidence
+     about corpus *design*, not a ranking. The document says so explicitly and states what
+     a ranking-capable corpus would additionally need: the boundary construction as its
+     dominant case, and a stable ordering between **at least two** real detectors rather
+     than one detector against a threshold.
+- **Verification:** Documentation only - no source, test, dependency, or configuration
+  change. 594 passed / 0 skipped with all three optional extras installed (the same tree
+  reports 572 passed / 22 skipped without the `webrtc-vad` extra, unchanged from PR 34).
+  `ruff check`, `ruff format --check`, and `mypy` clean over 103 source files. The probes
+  that produced the numbers are development scripts and are deliberately **not** committed:
+  they depend on an optional TTS extra and on a voice licensed CC BY-NC-SA 4.0 that is used
+  for local evaluation only, and committing generated audio would violate the repository's
+  standing rule that no audio file or model weight is committed.
+- **Deferred:** Building the corpus itself, which needs the boundary construction as its
+  dominant case and a second real detector to demonstrate a stable ordering. Silero remains
+  unmeasured on cost grounds (PR 30: it cannot be installed without ~118 MiB of PyTorch),
+  so "a second detector" is currently an open sourcing question rather than a coding task.
+  Reviewed consented or licensed human audio, which ADR-0004 requires before any ranking
+  claim, remains absent.
+- **Rollback:** Revert PR 35. It changes documentation only; reverting restores the
+  previous, untested wording of the requirement list and nothing else.
