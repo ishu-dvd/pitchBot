@@ -1546,3 +1546,63 @@
   claim, remains absent.
 - **Rollback:** Revert PR 35. It changes documentation only; reverting restores the
   previous, untested wording of the requirement list and nothing else.
+
+## PR 36: Measure the second local Whisper runtime and six-language coverage
+
+- **Branch:** `docs/whisper-runtime-and-language-coverage`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 35 commit `b1798fe`.
+- **Scope:** Documentation only. Two open questions were measured: is there a second local
+  Whisper runtime worth using, and does `small` work beyond English and Hindi. Both
+  `whisper.cpp` and `faster-whisper` were run at the **same model size** so the comparison
+  is about the runtime rather than the model.
+  1. **`whisper.cpp` runs locally and is not adopted.** `pywhispercpp==1.5.1` (MIT) has a
+     prebuilt `cp312`/`win_amd64` wheel with a light dependency set - `numpy`, `requests`,
+     `tqdm`, `platformdirs`, no PyTorch - and `ggml-small` is 487 MB, CPU only. It works.
+     Across six clips it took **23.27s against faster-whisper's 13.98s**, roughly 1.7x
+     slower, with transcripts essentially identical. There is no offsetting advantage, so
+     it is recorded as a viable fallback rather than a replacement. Caveat kept in the
+     document: ggml ran its default **f16** build while CTranslate2 ran **int8**, so a
+     quantised ggml would narrow and might close the gap - this measures the default
+     configuration of each, not the ceiling of either.
+  2. **`small` gets the script right in all six languages.** English, Spanish, Arabic,
+     Russian, Hindi, and Chinese - five scripts - all produced the correct script in both
+     runtimes. That matters because the earlier size sweep showed the failure mode of an
+     out-of-depth Whisper model is not a bad score but the **wrong script entirely**
+     (`tiny` emitted romanised Latin for Hindi, `base` emitted Urdu). That failure mode is
+     a property of `tiny`/`base`, not of Whisper at this size. Quality still varies
+     enormously: European languages are effectively perfect once formatting is accounted
+     for, Hindi is mediocre at 27.3%, and **Chinese is poor at 62.5%** and would need its
+     own evaluation before any claim.
+  3. **CER without number normalisation is close to meaningless for this content, and this
+     nearly went unnoticed.** The reference sentences spell numbers as words while the model
+     writes digits; both are correct transcriptions of the same speech. Normalising numerals
+     away takes English and Spanish from ~29% and ~26% CER to **0.0%** - the recognition was
+     perfect and the whole error was formatting. It also dissolves what looked like a large
+     runtime disagreement: Arabic scored 52.4% for faster-whisper against 4.8% for
+     whisper.cpp, which was **not** a quality difference but the two runtimes choosing
+     different number formatting; normalised, faster-whisper scores 0.0% on Arabic. This
+     document already required that "WER/CER normalization is versioned and cannot be
+     changed alongside a baseline without a reviewed delta"; this is the concrete
+     justification, because an unnormalised score made a perfect transcription look like a
+     52% failure and would have ranked apart two runtimes that agreed.
+  4. **A further voice-licensing data point.** Of the four voices newly reviewed for this
+     measurement, only Spanish `es_ES-davefx` is clean (CC0); `ar_JO-kareem` reports
+     "See URL" and both `ru_RU-irina` and `zh_CN-huayan` report `Unknown`. Combined with
+     PR 33's Hindi finding, Piper's published catalogue is **largely licence-unclear**
+     rather than merely non-commercial in one language.
+- **Verification:** Documentation only - no source, test, dependency, or configuration
+  change. 594 passed / 0 skipped with all optional extras installed (572 / 22 without the
+  `webrtc-vad` extra). `ruff check`, `ruff format --check`, and `mypy` clean over 103 source
+  files. The probes are development scripts and are deliberately **not** committed: they
+  depend on optional extras and on voices with unresolved or unknown licences used for
+  local evaluation only, and no audio or model weight is committed.
+- **Deferred:** Re-measuring `whisper.cpp` with a quantised ggml model, which is the only
+  configuration that could change the adoption decision. A Chinese evaluation, since 62.5%
+  normalised CER is not usable and the cause - model capacity, the synthesised voice, or
+  tokenisation - is not established. Defining and versioning the number-normalisation rule
+  itself, which belongs with the first real STT suite rather than with a measurement.
+  **No provider is selected**, which still requires reviewed consented or licensed human
+  audio under ADR-0004.
+- **Rollback:** Revert PR 36. Documentation only; reverting removes the recorded
+  measurement and nothing else.
