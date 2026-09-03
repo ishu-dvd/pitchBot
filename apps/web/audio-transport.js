@@ -3,9 +3,10 @@ const MAX_BUFFERED_BYTES = 512 * 1024;
 const MAX_CHUNK_BYTES = 256 * 1024;
 
 export class AudioTransport {
-  constructor(onDiagnostics, onMessage) {
+  constructor(onDiagnostics, onMessage, onBinary) {
     this.onDiagnostics = onDiagnostics;
     this.onMessage = onMessage || (() => {});
+    this.onBinary = onBinary || (() => {});
     this.queue = [];
     this.dropped = 0;
     this.socket = null;
@@ -22,11 +23,20 @@ export class AudioTransport {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const encodedType = encodeURIComponent(mediaType || "application/octet-stream");
     this.socket = new WebSocket(`${protocol}//${location.host}/api/simulator/sessions/${sessionId}/audio?media_type=${encodedType}`);
+    // Reply audio arrives as binary frames. Without this they are delivered as Blobs,
+    // which can only be read asynchronously - and reading them out of order would
+    // reassemble the reply's PCM scrambled.
+    this.socket.binaryType = "arraybuffer";
     this.socket.onopen = () => {
       this.reconnectAttempts = 0;
       this.flush();
     };
     this.socket.onmessage = (event) => {
+      if (typeof event.data !== "string") {
+        this.onBinary(event.data);
+        this.flush();
+        return;
+      }
       let payload = null;
       try {
         payload = JSON.parse(event.data);

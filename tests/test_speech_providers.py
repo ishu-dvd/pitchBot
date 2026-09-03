@@ -4,8 +4,9 @@ The property under test is that this is the *only* place configuration becomes a
 and that it behaves in two specific ways:
 
 *Deny by default.* With no configuration the result is exactly what shipped before the
-real adapters existed - the byte-size mock detector and no transcriber at all - so a spoken
-utterance is reported as ``transcriber-unavailable`` rather than invented.
+real adapters existed - the byte-size mock detector, no transcriber at all so a spoken
+utterance is reported as ``transcriber-unavailable`` rather than invented, and no
+synthesiser so the browser keeps speaking replies in its own voice.
 
 *A configured provider that cannot be built is a startup error.* Naming a provider whose
 optional extra is absent raises rather than silently handing back the mock or ``None``.
@@ -20,25 +21,47 @@ import pytest
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.adapters.faster_whisper_stt import FasterWhisperSpeechToTextAdapter
 from pitchbot.adapters.mocks import MockVoiceActivityDetector
+from pitchbot.adapters.piper_tts import DETERMINISTIC_SYNTHESIS, PiperTextToSpeechAdapter
 from pitchbot.adapters.webrtc_vad import WebRtcVoiceActivityDetector
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
 from pitchbot.speech.providers import (
     MOCK_VAD_ID,
+    NO_SYNTHESIZER_ID,
     NO_TRANSCRIBER_ID,
     SpeechProviders,
     SttProvider,
+    TtsProvider,
     VadProvider,
     build_speech_providers,
     build_speech_to_text,
+    build_text_to_speech,
     build_voice_activity_detector,
+    parse_voice_map,
+    preload_speech_providers,
 )
 
 _PROVIDERS = "pitchbot.speech.providers"
 
+requires_piper = pytest.mark.skipif(
+    not __import__("pitchbot.adapters.piper_tts", fromlist=["x"]).PIPER_AVAILABLE,
+    reason="piper-tts is not installed",
+)
+
 
 def _settings(**overrides: object) -> Settings:
     return Settings(**overrides)  # type: ignore[arg-type]
+
+
+def _voice_settings(**overrides: object) -> Settings:
+    """A minimally valid Piper configuration; the voice file need not exist to build."""
+
+    defaults: dict[str, object] = {
+        "speech_tts_provider": "piper",
+        "speech_tts_voice_dir": "/voices",
+        "speech_tts_voices": "en=en_US-joe-medium",
+    }
+    return _settings(**{**defaults, **overrides})
 
 
 # --------------------------------------------------------------------------------------
@@ -54,8 +77,11 @@ def test_default_configuration_is_the_pre_adapter_behaviour() -> None:
     assert isinstance(providers.detector, MockVoiceActivityDetector)
     assert providers.transcriber is None
     assert providers.can_transcribe is False
+    assert providers.synthesizer is None
+    assert providers.can_synthesize is False
     assert providers.detector_id == MOCK_VAD_ID
     assert providers.transcriber_id == NO_TRANSCRIBER_ID
+    assert providers.synthesizer_id == NO_SYNTHESIZER_ID
 
 
 def test_a_detector_is_always_present() -> None:
@@ -78,6 +104,8 @@ def test_a_detector_is_always_present() -> None:
         ("speech_vad_provider", ""),
         ("speech_stt_provider", "whisper"),
         ("speech_stt_provider", "openai"),
+        ("speech_tts_provider", "coqui"),
+        ("speech_tts_provider", ""),
     ],
 )
 def test_unknown_provider_name_is_rejected(field: str, value: str) -> None:
@@ -135,6 +163,19 @@ def test_configured_stt_without_the_extra_refuses_to_downgrade(
     message = str(error.value)
     assert "pitchbot[faster-whisper]" in message
     assert "transcriber-unavailable" in message
+
+
+def test_configured_tts_without_the_extra_refuses_to_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falling back would leave the browser speaking without anyone being told."""
+
+    monkeypatch.setattr(f"{_PROVIDERS}.PIPER_AVAILABLE", False)
+    with pytest.raises(PermanentAdapterError) as error:
+        build_text_to_speech(_voice_settings())
+    message = str(error.value)
+    assert "pitchbot[piper-tts]" in message
+    assert "browser's own voice" in message
 
 
 def test_build_speech_providers_fails_once_for_a_misconfiguration(
@@ -248,6 +289,7 @@ async def test_download_is_disabled_unless_explicitly_enabled() -> None:
 def test_provider_enums_match_the_accepted_configuration_values() -> None:
     assert {item.value for item in VadProvider} == {"mock", "webrtc"}
     assert {item.value for item in SttProvider} == {"none", "faster-whisper"}
+    assert {item.value for item in TtsProvider} == {"none", "piper"}
 
 
 # --------------------------------------------------------------------------------------
@@ -258,7 +300,7 @@ def test_provider_enums_match_the_accepted_configuration_values() -> None:
 def test_build_service_passes_the_configured_providers_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Before this, ``_build_service`` never passed either one.
+    """Before this, ``_build_service`` never passed any of them.
 
     PR 33 and PR 34 landed real adapters that the running application could not construct,
     so they were reachable only from tests. This asserts the seam is actually connected;
@@ -272,25 +314,30 @@ def test_build_service_passes_the_configured_providers_through(
     default_service = router_module._build_service()
     assert isinstance(default_service._speech_detector, MockVoiceActivityDetector)
     assert default_service._speech_transcriber is None
+    assert default_service._speech_synthesizer is None
 
     class _StubDetector(MockVoiceActivityDetector):
         pass
 
     stub_detector = _StubDetector()
     stub_transcriber = object()
+    stub_synthesizer = object()
     monkeypatch.setattr(
         router_module,
         "speech_providers",
         SpeechProviders(
             detector=stub_detector,
             transcriber=stub_transcriber,  # type: ignore[arg-type]
+            synthesizer=stub_synthesizer,  # type: ignore[arg-type]
             detector_id="stub-detector",
             transcriber_id="stub-transcriber",
+            synthesizer_id="stub-synthesizer",
         ),
     )
     wired_service = router_module._build_service()
     assert wired_service._speech_detector is stub_detector
     assert wired_service._speech_transcriber is stub_transcriber
+    assert wired_service._speech_synthesizer is stub_synthesizer
 
 
 def test_providers_are_built_at_import_so_a_misconfiguration_stops_startup() -> None:
@@ -306,3 +353,129 @@ def test_providers_are_built_at_import_so_a_misconfiguration_stops_startup() -> 
 
     assert isinstance(router_module.speech_providers, SpeechProviders)
     assert router_module.speech_providers.detector is not None
+
+
+# --------------------------------------------------------------------------------------
+# Text to speech
+# --------------------------------------------------------------------------------------
+
+
+def test_no_synthesizer_is_configured_by_default() -> None:
+    """Absence is a working fallback here: the browser speaks the reply itself."""
+
+    synthesizer, identifier = build_text_to_speech(_settings())
+
+    assert synthesizer is None
+    assert identifier == NO_SYNTHESIZER_ID
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"speech_tts_voice_dir": ""}, "speech_tts_voice_dir"),
+        ({"speech_tts_voices": ""}, "speech_tts_voices"),
+    ],
+)
+def test_an_enabled_provider_with_nothing_to_speak_with_is_rejected(
+    overrides: dict[str, object],
+    expected: str,
+) -> None:
+    """A synthesiser with no voice would produce a server that is silently mute."""
+
+    with pytest.raises(ValueError) as error:
+        _voice_settings(**overrides)
+
+    assert expected in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["en_US-joe-medium", "en=", "=en_US-joe-medium", "de=some-voice"],
+)
+def test_a_malformed_voice_mapping_is_rejected_at_import(value: str) -> None:
+    with pytest.raises(ValueError):
+        _voice_settings(speech_tts_voices=value)
+
+
+def test_a_voice_mapping_is_parsed_into_languages() -> None:
+    assert parse_voice_map("en=en_US-joe-medium, hi=hi_IN-pratham-medium") == {
+        LanguageCode.ENGLISH: "en_US-joe-medium",
+        LanguageCode.HINDI: "hi_IN-pratham-medium",
+    }
+    assert parse_voice_map("") == {}
+
+
+def test_a_language_mapped_twice_is_refused_rather_than_resolved_by_ordering() -> None:
+    with pytest.raises(PermanentAdapterError) as error:
+        parse_voice_map("en=en_US-joe-medium,en=en_US-libritts_r-medium")
+
+    assert "mapped twice" in str(error.value)
+
+
+@requires_piper
+def test_a_voice_with_no_reviewed_license_is_refused() -> None:
+    """The licence decision must not be made by whoever edits the .env file."""
+
+    with pytest.raises(PermanentAdapterError) as error:
+        build_text_to_speech(_voice_settings(speech_tts_voices="en=some-unreviewed-voice"))
+
+    assert "reviewed license" in str(error.value)
+
+
+@requires_piper
+def test_a_non_commercial_voice_is_denied_by_default() -> None:
+    """Every reviewed Piper Hindi voice is non-commercial; PitchBot is a sales assistant."""
+
+    with pytest.raises(PermanentAdapterError) as error:
+        build_text_to_speech(_voice_settings(speech_tts_voices="hi=hi_IN-pratham-medium"))
+
+    assert "does not permit commercial use" in str(error.value)
+
+
+@requires_piper
+def test_a_non_commercial_voice_is_allowed_only_when_explicitly_enabled() -> None:
+    synthesizer, identifier = build_text_to_speech(
+        _voice_settings(
+            speech_tts_voices="hi=hi_IN-pratham-medium",
+            speech_tts_allow_non_commercial=True,
+        )
+    )
+
+    assert isinstance(synthesizer, PiperTextToSpeechAdapter)
+    assert identifier == "piper:hi_IN-pratham-medium"
+
+
+@requires_piper
+def test_a_configured_voice_builds_the_adapter_without_loading_weights() -> None:
+    """Construction must not touch the model file; the lifespan preloads it."""
+
+    synthesizer, identifier = build_text_to_speech(
+        _voice_settings(speech_tts_voices="en=en_US-joe-medium")
+    )
+
+    assert isinstance(synthesizer, PiperTextToSpeechAdapter)
+    assert identifier == "piper:en_US-joe-medium"
+    assert synthesizer.registry.languages == {LanguageCode.ENGLISH}
+    assert synthesizer.synthesis is None
+
+
+@requires_piper
+def test_deterministic_synthesis_is_opt_in() -> None:
+    synthesizer, _ = build_text_to_speech(_voice_settings(speech_tts_deterministic=True))
+
+    assert isinstance(synthesizer, PiperTextToSpeechAdapter)
+    assert synthesizer.synthesis is DETERMINISTIC_SYNTHESIS
+
+
+@requires_piper
+@pytest.mark.asyncio
+async def test_preload_loads_both_models_and_is_a_no_op_by_default() -> None:
+    """A denied voice or a missing model must stop startup, not one conversation."""
+
+    await preload_speech_providers(build_speech_providers(_settings()))
+
+    providers = build_speech_providers(_voice_settings())
+    with pytest.raises(PermanentAdapterError) as error:
+        await preload_speech_providers(providers)
+
+    assert "model file not found" in str(error.value)

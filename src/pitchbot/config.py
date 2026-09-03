@@ -62,6 +62,25 @@ class Settings(BaseSettings):
     speech_stt_download_root: str = ""
     speech_stt_allow_download: bool = False
 
+    # Text-to-speech is off by default, and for a different reason than the other two.
+    # The browser client already speaks replies with the Web Speech API, so this is not a
+    # missing capability but a *replacement* for one whose voices vary by browser, are
+    # frequently absent for Hindi, and on several platforms are synthesised by a remote
+    # service. Turning this on moves synthesis onto the server, where the voice, its
+    # license and its locality are known. Voices are operator-supplied files; PitchBot
+    # never downloads them.
+    speech_tts_provider: str = "none"
+    speech_tts_voice_dir: str = ""
+    # "en=en_US-joe-medium,hi=hi_IN-pratham-medium" - a language maps to exactly one voice
+    # and there is no fallback, because an unmapped language served by the wrong voice
+    # produces fluent audio in the wrong language rather than an error.
+    speech_tts_voices: str = ""
+    # Every Piper Hindi voice reviewed on 2026-09-03 is non-commercial or unresolved, so a
+    # bilingual local evaluation needs this. It stays off by default: PitchBot is a sales
+    # assistant, and shipping a non-commercial voice in one would be a licensing breach.
+    speech_tts_allow_non_commercial: bool = False
+    speech_tts_deterministic: bool = False
+
     @model_validator(mode="after")
     def validate_speech_providers(self) -> Settings:
         """Reject an unrecognised provider name at import, not at first spoken turn.
@@ -92,6 +111,39 @@ class Settings(BaseSettings):
                 "speech_stt_language must be empty (auto-detect) or one of "
                 "'en', 'hi', 'mixed', 'unknown'"
             )
+        valid_tts = {"none", "piper"}
+        if self.speech_tts_provider not in valid_tts:
+            raise ValueError(
+                f"speech_tts_provider must be one of {sorted(valid_tts)}, "
+                f"received {self.speech_tts_provider!r}"
+            )
+        if self.speech_tts_provider != "none":
+            # A synthesiser with no voice mapped can never speak, so accepting the
+            # configuration would produce a server that is silently mute rather than one
+            # that refuses to start.
+            if not self.speech_tts_voice_dir.strip():
+                raise ValueError(
+                    "speech_tts_voice_dir must name the directory holding the .onnx "
+                    "voice files when speech_tts_provider is enabled"
+                )
+            if not self.speech_tts_voices.strip():
+                raise ValueError(
+                    "speech_tts_voices must map at least one language to a voice, "
+                    "for example 'en=en_US-joe-medium', when a provider is enabled"
+                )
+        for entry in (item.strip() for item in self.speech_tts_voices.split(",")):
+            if not entry:
+                continue
+            language, separator, voice_id = entry.partition("=")
+            if not separator or not language.strip() or not voice_id.strip():
+                raise ValueError(
+                    f"speech_tts_voices entry {entry!r} must be '<language>=<voice-id>'"
+                )
+            if language.strip() not in {"en", "hi", "mixed", "unknown"}:
+                raise ValueError(
+                    f"speech_tts_voices language {language.strip()!r} must be one of "
+                    "'en', 'hi', 'mixed', 'unknown'"
+                )
         return self
 
     @model_validator(mode="after")

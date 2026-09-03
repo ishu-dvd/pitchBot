@@ -40,8 +40,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Measured: a lazily-loaded transcriber made the first spoken turn report 5,384 ms for
     3.4 s of speech, roughly three seconds of which was model construction. That work
     holds the GIL, so it does not merely delay one caller - it stalls the event loop and
-    the audio socket that barge-in depends on. This is a no-op in the default
-    configuration, where no transcriber is enabled.
+    the audio socket that barge-in depends on. A Piper voice has the same shape: 2,561 ms
+    to load, against roughly 110 ms to synthesise a sentence once resident. This is a
+    no-op in the default configuration, where neither is enabled.
     """
 
     await preload_speech_providers(speech_providers)
@@ -73,5 +74,7 @@ def health() -> dict[str, str | bool]:
         # transcribed" is answerable without reading logs or configuration.
         "speech_detector": speech_providers.detector_id,
         "speech_transcriber": speech_providers.transcriber_id,
+        "speech_synthesizer": speech_providers.synthesizer_id,
         "speech_transcription_enabled": speech_providers.can_transcribe,
+        "speech_synthesis_enabled": speech_providers.can_synthesize,
     }

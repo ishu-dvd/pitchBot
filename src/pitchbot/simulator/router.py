@@ -37,6 +37,7 @@ from pitchbot.simulator.service import (
     SimulatorService,
     TurnOperationCapacityError,
 )
+from pitchbot.simulator.speech_output import LockedSocket, ReplyAudioSender
 from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
 from pitchbot.speech.providers import build_speech_providers
 from pitchbot.storage import (
@@ -57,6 +58,7 @@ def _build_service() -> SimulatorService:
         return SimulatorService(
             speech_detector=speech_providers.detector,
             speech_transcriber=speech_providers.transcriber,
+            speech_synthesizer=speech_providers.synthesizer,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -72,6 +74,7 @@ def _build_service() -> SimulatorService:
         recall_failure_budget=settings.lead_recall_failure_budget,
         speech_detector=speech_providers.detector,
         speech_transcriber=speech_providers.transcriber,
+        speech_synthesizer=speech_providers.synthesizer,
     )
 
 
@@ -80,9 +83,10 @@ def _build_service() -> SimulatorService:
 # durable history is enabled. Weights are NOT loaded here; that is the lifespan's job.
 speech_providers = build_speech_providers(settings)
 logger.info(
-    "Speech providers: detector=%s transcriber=%s",
+    "Speech providers: detector=%s transcriber=%s synthesizer=%s",
     speech_providers.detector_id,
     speech_providers.transcriber_id,
+    speech_providers.synthesizer_id,
 )
 
 simulator_service = _build_service()
@@ -228,13 +232,18 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
     if len(media_type) > 100:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
+    # Every write goes through the lock, because the reply-audio task writes to this same
+    # socket concurrently with the loop below and interleaved writes corrupt the stream.
+    socket = LockedSocket(websocket.send_json, websocket.send_bytes)
+    sender = ReplyAudioSender(socket, simulator_service.speech_synthesizer)
     sequence = 0
     try:
-        await websocket.send_json(
+        await socket.send_json(
             {
                 "type": "ready",
                 "audio_retained": False,
                 "speech_input_available": simulator_service.speech_input_available,
+                "speech_output_available": sender.enabled,
                 "end_silence_ms": pipeline.turn_taking.config.end_silence_ms,
             }
         )
@@ -281,7 +290,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
                 )
             )
             sequence += 1
-            await websocket.send_json(
+            await socket.send_json(
                 {
                     "type": "ack",
                     "acknowledged_sequence": event.sequence,
@@ -291,12 +300,21 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
                 }
             )
             if frame.barge_in is not None:
-                await websocket.send_json(_barge_in_message(frame.barge_in))
+                # Stop the voice before announcing the interruption: the sooner the task
+                # is cancelled, the less audio the buyer has to talk over.
+                await sender.abort()
+                await socket.send_json(_barge_in_message(frame.barge_in))
             if frame.utterance is not None:
-                if not await _handle_utterance(websocket, session_id, pipeline, frame.utterance):
+                if not await _handle_utterance(
+                    websocket, socket, sender, session_id, pipeline, frame.utterance
+                ):
                     return
     except WebSocketDisconnect:
         return
+    finally:
+        # A reply nobody can hear must not keep synthesising, and its task must not
+        # outlive the connection it was speaking to.
+        await sender.abort()
 
 
 def _barge_in_message(barge_in: BargeIn) -> dict[str, object]:
@@ -325,6 +343,8 @@ def _utterance_message(result: UtteranceResult) -> dict[str, object]:
 
 async def _handle_utterance(
     websocket: WebSocket,
+    socket: LockedSocket,
+    sender: ReplyAudioSender,
     session_id: UUID,
     pipeline: SpeechTurnPipeline,
     result: UtteranceResult,
@@ -333,7 +353,7 @@ async def _handle_utterance(
 
     message = _utterance_message(result)
     if not result.is_turn or result.text is None:
-        await websocket.send_json(message)
+        await socket.send_json(message)
         return True
 
     started = perf_counter()
@@ -353,21 +373,22 @@ async def _handle_utterance(
         # The utterance itself was understood, so its outcome stays honest; only the
         # engine call failed, exactly as it would have for a typed turn.
         message["error"] = str(error)
-        await websocket.send_json(message)
+        await socket.send_json(message)
         return True
     except TurnOperationCapacityError:
         # Distinguishable from a transient engine fault: this session can accept no
         # further turns at all, spoken or typed, and reconnecting will not help.
         message["error"] = "turn-capacity-reached"
-        await websocket.send_json(message)
+        await socket.send_json(message)
         return True
     except (ConversationJournalError, RuntimeError, ValueError) as error:
         # A spoken turn must fail as visibly and as harmlessly as a typed one.
         message["error"] = type(error).__name__
-        await websocket.send_json(message)
+        await socket.send_json(message)
         return True
     engine_ms = (perf_counter() - started) * 1000
 
+    language = result.language or simulator_service.get_session(session_id).language
     message["transcript"] = result.text
     message["reply"] = turn.reply
     message["disposition"] = turn.disposition.value
@@ -377,9 +398,17 @@ async def _handle_utterance(
         pipeline.turn_taking.config.end_silence_ms + result.transcribe_ms + engine_ms,
         1,
     )
+    # Whether the browser should speak this reply itself. Announced with the reply rather
+    # than inferred from whether audio arrives, so the client never has to guess between
+    # "server audio is coming" and "server audio is late".
+    message["reply_audio"] = sender.enabled
     # The agent now holds the floor, so further buyer speech is an interruption. The
     # browser releases it again with a playback-finished control frame, and the machine
-    # reclaims it after `agent_floor_ms` if that frame never arrives.
+    # reclaims it after `agent_floor_ms` if that frame never arrives. Taken before the
+    # reply is announced, so speech arriving during synthesis is an interruption too.
     pipeline.agent_started_speaking()
-    await websocket.send_json(message)
+    await socket.send_json(message)
+    # Scheduled, not awaited: synthesis of a long reply was measured at 1,052 ms, and the
+    # caller is the only thing classifying buyer audio.
+    await sender.start(turn.reply, language)
     return True

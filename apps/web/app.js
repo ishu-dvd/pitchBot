@@ -1,4 +1,5 @@
 import { AudioTransport } from "/simulator/audio-transport.js";
+import { ReplyAudioPlayer } from "/simulator/reply-audio.js";
 
 let sessionId = null;
 const timeline = document.getElementById("timeline");
@@ -40,7 +41,16 @@ function speak(text, onFinished) {
 function stopSpeaking() {
   speechGeneration += 1;
   if ("speechSynthesis" in window) speechSynthesis.cancel();
+  player.stop();
 }
+
+// The floor is held by the server until playback ends, so this is the one place that
+// hands it back - whichever voice did the speaking.
+const player = new ReplyAudioPlayer(() => audio.sendControl("playback-finished"));
+// What the server said it would do for the reply currently in flight. Read when
+// `reply-audio-end` arrives, so a reply the server could not synthesise can still be
+// spoken by the browser rather than being silently dropped.
+let pendingReplyText = "";
 
 const OUTCOME_LABELS = {
   "no-speech-recognized": "No speech was recognised in that utterance",
@@ -49,11 +59,41 @@ const OUTCOME_LABELS = {
   "transcriber-unavailable": "Transcription was unavailable for this utterance",
 };
 
+function onReplyAudio(payload) {
+  if (payload.type === "reply-audio-begin") {
+    if (!player.begin(payload.sample_rate_hz)) {
+      // No WebAudio here, so the server's voice cannot be played at all. Speaking the
+      // text keeps the buyer hearing the answer and keeps the floor accounted for.
+      speak(pendingReplyText, () => audio.sendControl("playback-finished"));
+    }
+    return true;
+  }
+  if (payload.type !== "reply-audio-end") return false;
+  if (payload.aborted) {
+    // The buyer interrupted. The server has already handed the floor back, so playback
+    // stops without reporting that it finished.
+    player.stop();
+    return true;
+  }
+  if (payload.frame_count > 0) {
+    player.end();
+    return true;
+  }
+  // Synthesis produced nothing - it failed, or the reply was punctuation only. The reply
+  // text is already on screen; speaking it locally is strictly better than silence.
+  player.stop();
+  speak(pendingReplyText, () => audio.sendControl("playback-finished"));
+  return true;
+}
+
 function onSpeechMessage(payload) {
   if (payload.type === "ready") {
-    speech.textContent = payload.speech_input_available
+    const listening = payload.speech_input_available
       ? `Listening. Endpoint after ${payload.end_silence_ms} ms of silence.`
       : `Listening for turn-taking only; no transcriber is configured. Endpoint after ${payload.end_silence_ms} ms of silence.`;
+    speech.textContent = payload.speech_output_available
+      ? `${listening} Replies are spoken by the server.`
+      : listening;
     return;
   }
   if (payload.type === "ack") {
@@ -67,10 +107,16 @@ function onSpeechMessage(payload) {
     speech.textContent = `Interrupted after ${payload.speech_ms} ms of speech`;
     return;
   }
+  if (onReplyAudio(payload)) return;
   if (payload.type !== "utterance") return;
   if (payload.reply) {
     speech.textContent = `Heard: ${payload.transcript} (${payload.turn_latency_ms} ms)`;
-    speak(payload.reply, () => audio.sendControl("playback-finished"));
+    pendingReplyText = payload.reply;
+    // When the server is synthesising this reply, speaking it here as well would play
+    // two voices over each other. Its audio arrives on this same socket.
+    if (!payload.reply_audio) {
+      speak(payload.reply, () => audio.sendControl("playback-finished"));
+    }
     if (sessionId) {
       api(`/api/simulator/sessions/${sessionId}`)
         .then((body) => renderEvents(body.events))
@@ -82,9 +128,13 @@ function onSpeechMessage(payload) {
   speech.textContent = `${label} (${payload.speech_ms} ms speech, ${payload.frame_count} frames)`;
 }
 
-const audio = new AudioTransport(({ queueDepth, dropped }) => {
-  diagnostics.textContent = `Queue: ${queueDepth}, dropped: ${dropped}`;
-}, onSpeechMessage);
+const audio = new AudioTransport(
+  ({ queueDepth, dropped }) => {
+    diagnostics.textContent = `Queue: ${queueDepth}, dropped: ${dropped}`;
+  },
+  onSpeechMessage,
+  (frame) => player.push(frame),
+);
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
