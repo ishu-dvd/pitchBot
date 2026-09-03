@@ -192,7 +192,7 @@
 ## PR 19: Retrieval budgets, admission locking, projection fidelity, and paraphrase-resistant safety
 
 - **Branch:** `perf/retrieval-wallclock-deadline`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 19.
 - **Base:** Merged PR 18 commit `3ba645d`.
 - **Scope:** Clear the queued reliability and safety gaps in one reviewable change.
   1. Introduce a single `RetrievalDeadline` per search, shared across temporal graph projection, document materialization, tokenization/indexing, scoring, and ranking, reporting version-preserving timeouts when any step exhausts it.
@@ -207,7 +207,7 @@
 ## PR 20: Non-authoritative lead recall in the simulator turn path
 
 - **Branch:** `feat/simulator-lead-recall`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 20.
 - **Base:** Merged PR 19 commit `828eed4`.
 - **Scope:** Wire the graph-aware lead retrieval built in PRs 14-17 into the simulator so a
   turn can surface what this lead already said, as context only.
@@ -254,7 +254,7 @@
 ## PR 21: Streaming speech turn-taking in the simulator
 
 - **Branch:** `feat/speech-turn-taking`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 21.
 - **Base:** Merged PR 20 commit `f0e7862`.
 - **Scope:** Close the largest customer-experience gap on the audio path. The browser already
   spoke replies, but spoken input was dead: audio bytes were counted and discarded, no
@@ -317,7 +317,7 @@
 ## PR 22: Speech-path liveness and durable-turn responsiveness fixes
 
 - **Branch:** `fix/speech-reliability`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 22.
 - **Base:** Merged PR 21 commit `5e572c1`.
 - **Scope:** Close four defects found by an adversarial concurrency and state-machine audit of
   PRs 19-21. Two of them refute claims PR 21 makes about itself, and the other two are
@@ -383,7 +383,7 @@
 ## PR 23: Multilingual safety parity in the conversation matcher
 
 - **Branch:** `fix/multilingual-safety-parity`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 23.
 - **Base:** Merged PR 22 commit `65f39cc`.
 - **Scope:** Close the four language-parity and obfuscation gaps a read-only safety audit
   reproduced against `detect_safety_signals()`. Every fix extends PR 19's template design
@@ -457,7 +457,7 @@
 ## PR 24: Synthetic voice-activity structural benchmark
 
 - **Branch:** `bench/synthetic-vad-corpus`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 24.
 - **Base:** Merged PR 23 commit `44a0eb6`.
 - **Note:** A sibling branch also numbers its entry "PR 22"; the orchestrator may need to
   renumber one on merge. This is the synthetic-VAD-corpus change.
@@ -541,7 +541,7 @@
 ## PR 25: Bounded lead-recall history reads
 
 - **Branch:** `perf/recall-history-bounds`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 25.
 - **Base:** Merged PR 24 commit `a511d26`.
 - **Scope:** Make the recall budget PRs 19-20 advertise mean something. PR 22 moved the
   durable journal off the event loop, so the loop is no longer the problem; the wall-clock
@@ -638,7 +638,7 @@
 ## PR 26: Remove the session capability from lead recall
 
 - **Branch:** `fix/recall-capability-leak`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 26.
 - **Base:** Merged PR 27 commit `7ee7a28`.
 - **Scope:** `RecalledClaim` promised, in its own docstring, that identifiers are "deliberately
   omitted so the browser never receives journal provenance handles", and then declared
@@ -727,7 +727,7 @@
 ## PR 27: Fail-closed, suite-aware evaluation gates
 
 - **Branch:** `fix/evaluation-gate-fail-closed`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 27.
 - **Base:** Merged PR 28 commit `090478f`.
 - **Scope:** Close audit finding B1. `README.md` advertised "strict gate validation" and
   `docs/BENCHMARKS.md` claimed authoritative "gate-consistency checks"; both were false, in two
@@ -816,7 +816,7 @@
 ## PR 28: Token-aware safety phrase matching
 
 - **Branch:** `fix/token-aware-phrase-matching`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 28.
 - **Base:** Merged PR 25 commit `ef6518c`.
 - **Scope:** Close PR 23's deferred finding C8. `_contains_any_form` matched literal safety
   phrases as raw substrings of the turn and of its space-stripped form, so a phrase fired
@@ -921,7 +921,7 @@
 ## PR 29: Remove inert safety-relaxation knobs
 
 - **Branch:** `chore/remove-inert-safety-knobs`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 29.
 - **Base:** Merged PR 26 commit `aaca22a`.
 - **Scope:** `config.py` declared five settings that `.env.example` and the README's
   "Foundation safety defaults" presented as active safety controls -
@@ -986,7 +986,7 @@
 ## PR 30: First real speech provider, and the corpus that cannot select one
 
 - **Branch:** `bench/webrtc-vad-provider`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged as PR 30.
 - **Base:** Merged PR 29 commit `8f72520`.
 - **Scope:** ADR-0004 blocks selecting any speech provider without a reproducible measured
   result; PR 24 built the corpus and `run-speech`, and PR 27 made the gate genuinely
@@ -1106,3 +1106,69 @@
   `configuration_sha256` returns to naming the mock unconditionally, and case timing returns
   to the 15.625 ms clock, so previously emitted digests differ across the revert. The corpus,
   its hashes, and the emitted artifact format are untouched either way.
+
+## PR 31: Restore user-facing status-documentation accuracy
+
+- **Branch:** `docs/status-accuracy`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 30 commit `5794df9`.
+- **Scope:** Nine PRs (21-29) merged after the user-facing documentation was last accurate,
+  so `README.md`, `docs/TEST_REPORTS.md`, and several `docs/PROGRESS.md` status lines had
+  drifted. No runtime code changes; every corrected claim was re-verified against the tree at
+  `8f72520`.
+  1. **`README.md` "Current status" rewritten** to describe what is implemented at `8f72520`,
+     adding graph-aware lead retrieval (PR 16), graph-retrieval evaluation (PR 17),
+     non-authoritative simulator lead recall (PR 20), streaming speech turn-taking (PR 21), the
+     synthetic voice-activity benchmark and `run-speech` (PR 24), and the unconditional
+     action-policy gates (PR 29). The deliberately-deferred paragraph was refreshed: concrete
+     speech-to-text/text-to-speech providers and any model-backed speech recognition or
+     synthesis remain deferred, even though a VAD turn-taking machine (with a deterministic
+     mock) and a synthetic VAD *structural* benchmark now exist.
+  2. **The false BM25/temporal claim was split, not deleted.** The README asserted "BM25 and
+     temporal knowledge views are not yet connected to the simulator or speech response path."
+     PR 20 wired graph-aware lead retrieval into the simulator turn path as non-authoritative,
+     display-only recall, so the simulator half is now false; the speech-response-path half is
+     still true. The claim now reads that BM25 and the temporal view are surfaced in the
+     simulator turn path as advisory, display-only recall run after the durable commit, and are
+     not used in reply generation, classification, or the speech response path — verified in
+     `SimulatorService._recall_context` (`src/pitchbot/simulator/service.py`), which runs recall
+     via `asyncio.to_thread` after the journal commit and skips it on any safety signal, a
+     non-`CONTINUE` disposition, or durable replay.
+  3. **`docs/PROGRESS.md` status lines corrected for PRs 19-29.** Each read `Status:
+     Implementation complete; awaiting review.` although every one has a merge commit on the
+     mainline (`git log`: PR 19 `828eed4` through PR 29 `8f72520`); each now reads `Merged as
+     PR N.` No other field of any entry was touched, so the diff is status-only.
+  4. **`docs/TEST_REPORTS.md` marked as maintained through PR 12**, with an explicit maintenance
+     note that per-PR validation from PR 13 onward is recorded in the `Scope` / `Safety
+     decisions` / `Test decisions` narrative of `PROGRESS.md` and enforced by the CI gates in
+     `.github/workflows/ci.yml` (ruff, mypy, pytest, Alembic migration check, benchmark manifest
+     and fail-closed evaluation/retrieval/VAD gates, `pip-audit`, Gitleaks). It was deliberately
+     not backfilled — reconstructed historical test counts for PRs 13-29 cannot be verified
+     against each PR's tree at merge time, and stating an unverifiable number would breach the
+     project's no-overstatement rule.
+  5. **`README.md` cross-reference corrected:** the inert `enable_real_time_audio` note pointed
+     at "PR 30, Deferred", but the entry that documents the flag's inertness and deferral is
+     PR 29's; the pointer now reads PR 29.
+- **Safety decisions:** No runtime behaviour changes — this PR touches only Markdown, and its
+  value is restoring the accuracy readers rely on. The repository's standard is honest
+  documentation with explicit `Deferred` sections, so stale or overstated status is a breach of
+  that standard rather than a cosmetic issue. Every "is implemented" claim was verified in code
+  before it was written, and every "not implemented" claim was re-verified so a since-shipped
+  capability is not still described as absent. Where a capability is partial — advisory recall,
+  VAD-only speech measurement, the inert audio flag — the narrower true statement was kept
+  rather than a tidier optimistic one.
+- **Validation:** `ruff check .`, `ruff format --check .`, and `mypy src tests` are clean and
+  `pytest` passes 485 tests at `8f72520`. The README's own instructions were executed: the
+  validation block (`ruff` / `ruff format` / `mypy` / `pytest` / `python -m pip_audit`, the last
+  reporting no known vulnerabilities and skipping the local editable package) and the
+  setup/endpoint checks (`uvicorn pitchbot.main:app`, then `GET /health` -> `{"status":"ok",...}`,
+  `GET /simulator/` -> 200 "PitchBot Simulator", `GET /` -> 307 redirect to `/simulator/`) all
+  behave as documented.
+- **Deferred:** No documentation change wires the inert `enable_real_time_audio` flag or alters
+  any gate. A stale "PR 30" reference in the `src/pitchbot/config.py` comment (the knob removal
+  is numbered PR 29 in git and this document) is source code and out of scope for a docs PR; it
+  is reported for a follow-up rather than edited here. Backfilling per-PR `TEST_REPORTS.md`
+  entries for PRs 13-29 is deliberately not done.
+- **Rollback:** Revert PR 31. It adds no schema migration, persistent state, runtime cache,
+  model, provider, retained buyer data, or external side effect; only Markdown is changed, so
+  reverting restores the prior (stale) documentation exactly.
