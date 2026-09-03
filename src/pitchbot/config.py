@@ -14,16 +14,20 @@ class Settings(BaseSettings):
     enable_telephony: bool = False
     enable_whatsapp: bool = False
     enable_external_network: bool = False
+    # INERT: nothing reads this flag. The audio socket in the simulator is always
+    # available, so the README's "real-time audio disabled by default" claim is a
+    # documented intention, not a code-enforced gate. Before any live channel ships
+    # this must either gate the audio socket or be removed. See docs/PROGRESS.md
+    # (PR 30, Deferred). The safety-relaxation knobs (require_ai_disclosure,
+    # require_dnd_check, require_calling_hours, allowlist_enabled) were removed in
+    # PR 30 because the ActionPolicy enforces those gates unconditionally and a
+    # switch that disables a mandatory safety gate is strictly less safe than none.
     enable_real_time_audio: bool = False
     enable_hosted_demo: bool = False
     enable_durable_history: bool = False
     durable_history_digest_key: str = ""
 
-    allowlist_enabled: bool = True
     allowed_contacts: str = Field(default="")
-    require_ai_disclosure: bool = True
-    require_dnd_check: bool = True
-    require_calling_hours: bool = True
 
     lead_recall_top_k: int = 3
     lead_recall_deadline_ms: int = 150

@@ -41,6 +41,7 @@ All notable changes to PitchBot are documented here.
 
 ### Security
 
+- Removed four inert safety-relaxation settings (`require_ai_disclosure`, `require_dnd_check`, `require_calling_hours`, `allowlist_enabled`) that had zero consumers and were never wired. The action policy enforces AI-disclosure, contact-allowlist, DND, and calling-hours checks unconditionally, so any switch built from these settings could only have disabled a mandatory safety gate; removing them keeps the gates non-optional and documents them as always enforced. `enable_real_time_audio` is retained but recorded as currently inert — the README's "real-time audio disabled by default" claim is not code-enforced and the flag must be wired or removed before any live channel ships. No policy enforcement behaviour changed.
 - Added CI secret scanning.
 - Removed the originating session UUID from recalled lead claims on the simulator turn response. Recall spans a lead's earlier sessions, so `RecalledClaim.session_id` handed a browser a capability for a session it was never granted, contradicting both the model's own docstring and the documented rule that session UUIDs remain unguessable capabilities. Earlier calls stay distinguishable through a per-response `prior_session_ordinal` derived only from the observation time and rank already in the payload, so no part of any session identifier is disclosed. Breaking change to the turn response: `recall.claims[].session_id` is removed.
 - Excluded environment files, secrets, runtime data, logs, and artifacts from version control.

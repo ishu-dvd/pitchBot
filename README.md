@@ -97,6 +97,10 @@ python -m pip_audit
 
 ## Foundation safety defaults
 
-Telephony, WhatsApp, external network access, real-time audio, and hosted-demo behavior are disabled in `.env.example`. Never commit `.env`, credentials, phone numbers, personal audio, or live transcripts.
+Telephony, WhatsApp, external network access, and hosted-demo behavior are disabled by default in `.env.example`, and those flags gate their respective capabilities in code. Never commit `.env`, credentials, phone numbers, personal audio, or live transcripts.
+
+The AI-disclosure, contact-allowlist, DND, and calling-hours checks are enforced **unconditionally** by the action policy (`src/pitchbot/actions/policy.py`): each blocks a synthetic action outright — `DISCLOSURE_MISSING`, `NOT_ALLOWLISTED`, `DND_NOT_PASSED`, `CALLING_HOURS_NOT_PASSED` — and there is no configuration setting that can turn any of them off. Removing the never-wired `require_*`/`allowlist_enabled` toggles keeps it that way: a mandatory safety gate cannot be relaxed by editing `.env`.
+
+`PITCHBOT_ENABLE_REAL_TIME_AUDIO=false` remains in `.env.example`, but it is currently **inert** — no code reads it, so the "real-time audio disabled by default" claim is a documented intention, not a code-enforced gate. The simulator's audio socket is always available. This flag must be wired to gate the audio socket, or removed, before any live channel ships (see [PROGRESS.md](docs/PROGRESS.md), PR 30, Deferred).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [branching and merge gates](docs/BRANCHING_AND_GATES.md).
