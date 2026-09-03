@@ -1392,3 +1392,103 @@
   deliberately not re-exported from `pitchbot.adapters.__init__`. Reverting removes the
   adapter and the recorded license review and nothing else. Uninstalling the optional extra
   is sufficient to disable it without reverting anything.
+
+## PR 34: Opt-in faster-whisper speech-to-text, and why it is utterance-batch
+
+- **Branch:** `feat/faster-whisper-stt`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 33 commit `e1b1d87`.
+- **Scope:** The first provider that turns buyer audio into text, behind the **unchanged**
+  `SpeechToTextAdapter` contract. `docs/BENCHMARKS.md` gated faster-whisper on *"Model
+  license + measured benchmark required"*; this PR does both. **No STT provider is
+  selected** and no word-error-rate is claimed. The adapter is not wired into the
+  simulator's speech response path - `SpeechTurnPipeline` still accepts `transcriber=None`
+  and reports `transcriber-unavailable` by default.
+  1. **Licences reviewed rather than assumed (`KNOWN_MODEL_LICENSES`).** Package and
+     CTranslate2 are MIT, the `Systran/faster-whisper-*` weights are MIT, and the upstream
+     `openai/whisper-*` models they convert are Apache-2.0 - all permissive, so unlike the
+     Piper *voices* in PR 33 there is no commercial-use restriction. The check was still
+     performed and recorded, and chased to the upstream model, precisely because PR 33
+     found a non-commercial licence hiding behind a finetune. An unreviewed model
+     identifier is refused at construction rather than run.
+  2. **Weights are never downloaded by PitchBot.** `WhisperModel` fetches from Hugging Face
+     on first use by default; the adapter inverts that and passes `local_files_only=True`
+     unless the caller sets `allow_download=True`. A missing model raises a
+     `PermanentAdapterError` naming how to pre-fetch it, so neither a live call nor CI can
+     trigger a multi-hundred-megabyte download.
+  3. **The measurement that shaped the design: RTF is the wrong metric for Whisper.**
+     Whisper encodes a padded 30-second mel window, so cost is essentially constant per
+     call rather than proportional to audio. Measured with `small`, CPU/int8: 3.58s ->
+     2.09s, 7.15s -> 2.15s, 14.30s -> 2.10s, 28.61s -> 2.09s, 42.91s -> 3.93s. **Twelve
+     times the audio for 1.9x the time**, and that 1.9x appears only where the clip crosses
+     into a *second* window and costs almost exactly twice as much. An earlier reading of
+     "RTF 1.06" on a 1.7s Hindi clip was an artifact of dividing a fixed ~2.1s cost by a
+     short duration, not a throughput limit. The number that matters is **latency after
+     end-of-speech: ~2.1s, roughly constant** - long, since natural turn gaps are ~200ms -
+     and it is recorded as this model's floor rather than hidden behind a flattering RTF on
+     long clips.
+  4. **Therefore utterance-batch, not chunk-streamed.** Chopping audio into small chunks
+     would pay a full window pass per chunk. The adapter consumes one endpointed utterance
+     and transcribes it once; `SpeechTurnPipeline` already buffers exactly that way.
+  5. **Exactly one final chunk carries the complete transcript, and this is load-bearing.**
+     `SpeechTurnPipeline._best_transcript` keeps the **last final** transcript, so an
+     adapter emitting a final per segment would silently discard everything the buyer said
+     before the last segment. Non-final partials are emitted per decoded segment and are
+     *cumulative*, so any single partial is self-sufficient; Whisper never revises a
+     segment, so these are real rather than fabricated.
+  6. **Audio is refused rather than repaired.** Whisper expects 16 kHz mono. An utterance at
+     any other declared rate raises, because reinterpreting the rate does not fail - it
+     transcribes pitch-shifted, time-stretched speech and reports a plausible wrong
+     duration. The rate, size, and sample-alignment checks all run **before** the model
+     loads, so a malformed utterance never pays a load.
+  7. **Confidence carries information, and a language is never invented.** `confidence` is
+     `exp(avg_logprob)` - the geometric mean token probability the decoder produced -
+     aggregated across segments weighted by duration, so unlike the VAD adapter's fixed
+     constant it may be thresholded, which `MIN_TRANSCRIPT_CONFIDENCE` already does
+     (measured 0.735 on a clean utterance). Whisper labels *anything* with a language,
+     including silence - measured, two seconds of digital silence is reported as `en` at
+     probability 0.362 - so below `min_language_probability` the adapter reports `UNKNOWN`.
+     It never *infers* `LanguageCode.MIXED`, because deriving code-switching from a
+     single-label model would invent a distinction the model did not draw.
+  8. **Model size is a correctness constraint, not a speed preference.** Measured across
+     sizes: `tiny` returns romanised Latin for Hindi (105% WER) and `base` returns
+     Urdu/Arabic script (100% WER), while `small` returns correct Devanagari. They are
+     disqualified on *script*, which no threshold tuning fixes, so speed cannot be bought by
+     going smaller. `DEFAULT_MODEL_SIZE = "small"` and a test pins it.
+  9. **Loading is preloadable.** Model construction stalls the loop for the same GIL reason
+     as Piper voice loading, so `preload()` moves it to startup; decoding advances
+     segment-by-segment on a worker thread and keeps the loop responsive (measured worst
+     stall 19 ms during a full transcription).
+- **Verification:** 572 passed / 22 skipped with both extras and a cached model, up from
+  544. **563 passed / 31 skipped with `faster-whisper` uninstalled, zero failures** -
+  optionality was tested by actually removing the package. The absent-import branch is
+  covered even where the package is installed, by forcing the import to fail, and both
+  `_MODULE`-absent and `_NUMPY`-absent paths are exercised. `ruff check`,
+  `ruff format --check`, and `mypy` are clean over 103 source files in both states.
+  Transcription tests skip unless `PITCHBOT_WHISPER_MODEL` names a size already cached on
+  the machine; nothing is downloaded by a test run.
+- **Deferred:**
+  - **Chunking policy.** This PR deliberately uses the simplest correct policy - one
+    endpointed utterance, one call - because the 30-second-window measurement showed naive
+    chunking is pathological. Now that basic functionality exists, the policy itself is
+    worth revisiting for both latency and accuracy: (a) `vad_filter` / Silero pre-stripping
+    of silence, which can remove whole windows from a long utterance; (b) overlapping-window
+    partial hypotheses with a confirmed-prefix policy, which is how streaming Whisper
+    front-ends cut the ~2.1s post-endpoint wait, at the cost of repeated encoder passes;
+    (c) splitting utterances longer than 30s at natural pauses, since crossing a window
+    boundary doubles cost; (d) `condition_on_previous_text` across turns, which can improve
+    accuracy but risks hallucination loops and needs an eval before it is enabled; and
+    (e) the interaction with `SpeechTurnPipeline`'s 250 ms frames and 700 ms end-of-speech
+    budget, which together decide how much trailing silence is encoded. Each needs a
+    measured before/after on latency **and** accuracy, which needs the corpus below.
+  - **Wiring STT into the simulator speech path**, which is a transport and turn-taking
+    change rather than an adapter change.
+  - **Selecting a provider**, which ADR-0004 gates on reviewed consented or licensed human
+    audio. The numbers here come from synthesised speech and cannot separate recognition
+    quality from synthesis quality; they are a floor, not a WER claim.
+  - **A real STT corpus**, without which none of the above can be evaluated.
+- **Rollback:** Revert PR 34. It adds no schema migration, persistent state, runtime
+  dependency, provider selection, retained buyer data, or external side effect, changes no
+  public signature, and is not referenced by any existing code path - the module is
+  deliberately not re-exported from `pitchbot.adapters.__init__`. Uninstalling the optional
+  extra is sufficient to disable it without reverting anything.

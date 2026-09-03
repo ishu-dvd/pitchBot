@@ -46,6 +46,13 @@ Inclusion here is not selection. The benchmark PR must record repository revisio
 
 ## Reviewed speech providers
 
+- [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) — speech-to-text runtime,
+  reviewed 2026-09-03. **MIT**, as is CTranslate2. Landed as the optional `faster-whisper`
+  extra in PR 34. No provider selected.
+- [`Systran/faster-whisper-*`](https://huggingface.co/Systran/faster-whisper-small) — model
+  weights, **MIT**; the upstream [`openai/whisper-*`](https://huggingface.co/openai/whisper-small)
+  models they convert are **Apache-2.0**. Both permissive. Weights are never downloaded by
+  PitchBot: the adapter runs with `local_files_only=True` unless a caller opts in.
 - [`piper1-gpl`](https://github.com/OHF-Voice/piper1-gpl) — text-to-speech runtime, reviewed
   2026-09-03. **GPL-3.0-or-later**; bundles `espeak-ng` data. Landed as the optional
   `piper-tts` extra in PR 33 and never vendored or redistributed. No provider selected.

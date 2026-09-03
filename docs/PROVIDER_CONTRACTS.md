@@ -112,6 +112,50 @@ The adapter is **not** a selected provider and makes no quality claim. TTS natur
 intelligibility need the blinded human rubrics and consented audio described in
 [Benchmarks](BENCHMARKS.md).
 
+## Speech recognition
+
+`FasterWhisperSpeechToTextAdapter` (PR 34) is the first provider that turns buyer audio into
+text. The contract is unchanged: it implements
+`transcribe(AsyncIterator[AudioChunk]) -> AsyncIterator[TranscriptChunk]` as written.
+
+- **Optional dependency.** `pitchbot` imports, and the whole suite passes, with
+  `faster_whisper` absent; the module exposes `FASTER_WHISPER_AVAILABLE` so callers probe
+  rather than guarding an `ImportError`, and it is not re-exported from
+  `pitchbot.adapters.__init__`. Install with `pip install "pitchbot[faster-whisper]"`.
+- **Nothing is downloaded unless you say so.** `WhisperModel` fetches weights on first use
+  by default; the adapter passes `local_files_only=True` unless `allow_download=True` is
+  set explicitly, so a missing model raises an error naming how to pre-fetch it instead of
+  starting a large download mid-call or in CI.
+- **Licences are permissive and were checked, not assumed.** Package and CTranslate2 are
+  MIT, the `Systran/faster-whisper-*` weights are MIT, and the upstream `openai/whisper-*`
+  models are Apache-2.0. An unreviewed model identifier is refused at construction.
+- **Utterance-batch, not chunk-streamed.** Whisper encodes a padded 30-second window, so
+  cost is ~constant per call and chopping audio into small chunks would pay a full window
+  pass per chunk. The adapter consumes one endpointed utterance and transcribes it once.
+- **Exactly one final chunk carries the complete transcript.** This is load-bearing:
+  `SpeechTurnPipeline._best_transcript` keeps the **last final**, so a per-segment final
+  would silently discard everything said before the last segment. Non-final partials are
+  emitted per decoded segment and are *cumulative*, so any single partial is self-sufficient.
+- **Audio is refused rather than repaired.** Whisper expects 16 kHz mono; an utterance at
+  any other declared rate raises, because reinterpreting the rate does not fail — it
+  transcribes pitch-shifted, time-stretched speech and reports a plausible wrong duration.
+  The rate and size checks run **before** the model loads.
+- **`confidence` is a real quantity.** It is `exp(avg_logprob)` — the geometric mean token
+  probability the decoder produced — aggregated across segments weighted by duration. Unlike
+  the VAD adapter's fixed constant, this one carries information and may be thresholded;
+  the pipeline's `MIN_TRANSCRIPT_CONFIDENCE` does exactly that.
+- **A language is never invented.** Whisper labels anything, including silence (measured:
+  two seconds of digital silence reported as `en` at probability 0.362). Below
+  `min_language_probability` the adapter reports `UNKNOWN`. It never *infers*
+  `LanguageCode.MIXED`, because deriving code-switching from a single-label model would be
+  inventing a distinction the model did not draw; a caller may still declare it.
+- **Loading stalls the loop and must be preloaded**, for the same GIL reason as Piper. Call
+  `preload()` at startup. Decoding itself runs segment-by-segment on a worker thread.
+
+The adapter is **not** a selected provider and makes no word-error-rate claim. See
+[Benchmarks](BENCHMARKS.md) for the measurements and why synthesised speech cannot rank
+recognition quality.
+
 ## Streaming
 
 STT consumes an asynchronous stream of timestamped, sequenced audio chunks and produces an asynchronous transcript stream. TTS produces sequenced audio chunks. Provider implementations must preserve order, cancellation, and bounded buffering; those transport concerns are implemented in later milestones.

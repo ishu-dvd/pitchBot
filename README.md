@@ -17,6 +17,7 @@ The implemented application currently provides only:
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and a validation CLI, plus a deterministic, dependency-free synthetic voice-activity benchmark (`run-speech`) that regenerates a hash-verified corpus at run time and gates VAD structural F1 in CI. STT and TTS measurement remains blocked pending reviewed audio.
 - An optional `py-webrtcvad` adapter behind the voice-activity contract, measured against that corpus. **No voice-activity provider is selected:** it fails the suite threshold in every aggressiveness mode, while a trivial energy threshold scores perfectly on the same clips, so the synthetic corpus cannot yet rank an acoustic detector against an energy heuristic. The dependency is optional and absent by default.
 - An optional Piper adapter behind the text-to-speech contract — the first provider that actually produces speech. It streams one chunk per sentence off the event loop, always terminates a stream with exactly one final chunk, and can synthesise reproducibly. **No text-to-speech provider or voice is selected**, and the required license review returned a blocking finding: **no published Piper Hindi voice is cleared for commercial use**, and the commonly used `en_US-amy-low` is not either. The voice registry is deny-by-default, refusing non-commercial or unverifiable voices unless a caller explicitly opts in for local evaluation. Voices are operator-supplied and never downloaded; the Piper runtime is GPL-3.0-or-later and is never vendored.
+- An optional `faster-whisper` adapter behind the speech-to-text contract — the first provider that recognises speech. Licences are permissive throughout (package and weights MIT, upstream Whisper Apache-2.0) and weights are never downloaded: the adapter runs `local_files_only=True` unless a caller explicitly opts in. It is deliberately **utterance-batch rather than chunk-streamed**, because Whisper encodes a padded 30-second window, making cost roughly constant per call — measured, twelve times the audio costs 1.9x the time — so the number that matters is **~2.1 s latency after end-of-speech**, not real-time factor. Non-final partials are cumulative and exactly one final chunk carries the complete transcript. Audio at any rate other than 16 kHz is refused rather than silently reinterpreted, and a language is reported as `unknown` rather than guessed when detection is weak. **No speech-to-text provider is selected** and no word-error-rate is claimed: only synthesised speech is available, which cannot separate recognition quality from synthesis quality.
 - Versioned privacy-minimized evaluation snapshots, suite-aware fail-closed gate validation that returns a non-zero exit code and fails the build on a regression, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
@@ -27,7 +28,7 @@ The implemented application currently provides only:
 - Deny-by-default mock action policy with unconditional AI-disclosure, allowlist, DND, and calling-hours gates; minimized follow-ups; fake-time callback scheduling; and six-industry structured sample-deck previews.
 - CI, contribution, security, and branch-gate documentation.
 
-Durable simulator history requires an explicitly managed key and an Alembic-migrated database, and is off by default. BM25 retrieval and the temporal knowledge view are now surfaced in the simulator turn path as advisory, display-only lead recall, run after the durable commit; they are not used in reply generation, classification, or the speech response path. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, vector retrieval, speech-to-text providers and any model-backed speech recognition, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests. Text-to-speech now has an optional adapter, but no provider or voice is selected and it is not wired into the simulator's speech response path.
+Durable simulator history requires an explicitly managed key and an Alembic-migrated database, and is off by default. BM25 retrieval and the temporal knowledge view are now surfaced in the simulator turn path as advisory, display-only lead recall, run after the durable commit; they are not used in reply generation, classification, or the speech response path. In-memory timelines, callback/action state, consent/contact policy, and artifacts remain process-local. Model-backed extraction, vector retrieval, durable scheduling, binary deck rendering, deployment, telephony, and live WhatsApp are intentionally deferred to separately reviewed pull requests. Speech-to-text and text-to-speech now have optional adapters, but no provider is selected and neither is wired into the simulator's speech response path.
 
 ### Optional extras
 
@@ -36,8 +37,9 @@ test suite passes without either, and neither is re-exported from `pitchbot.adap
 the core import graph structurally cannot depend on them.
 
 ```powershell
-python -m pip install -e ".[webrtc-vad]"   # MIT AND BSD-3-Clause, ~19 KiB, no weights
-python -m pip install -e ".[piper-tts]"    # GPL-3.0-or-later; voices supplied separately
+python -m pip install -e ".[webrtc-vad]"      # MIT AND BSD-3-Clause, ~19 KiB, no weights
+python -m pip install -e ".[piper-tts]"       # GPL-3.0-or-later; voices supplied separately
+python -m pip install -e ".[faster-whisper]"  # MIT; model weights supplied separately
 ```
 
 The Piper extra installs a **GPL-3.0-or-later** runtime. PitchBot never vendors or
@@ -46,6 +48,11 @@ obligations of whatever they distribute. It installs **no voices**: each voice i
 file with its own license that the operator places on disk, and PitchBot never downloads
 one. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the full distribution and per-voice
 license review.
+
+The faster-whisper extra is permissively licensed throughout, but it likewise installs **no
+model weights**. The adapter runs with `local_files_only=True` unless a caller explicitly
+opts in, so a missing model is a clear error rather than a silent multi-hundred-megabyte
+download in the middle of a call — or in the middle of CI.
 
 ## Target architecture
 
