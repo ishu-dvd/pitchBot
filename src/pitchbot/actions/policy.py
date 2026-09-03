@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from uuid import UUID
 
 from pitchbot.actions.models import (
@@ -12,15 +13,16 @@ from pitchbot.actions.models import (
     FollowUpSummary,
 )
 from pitchbot.adapters.clock import Clock, SystemClock
-from pitchbot.domain import ActionType, JsonValue, LanguageCode, LeadTemperature
+from pitchbot.domain import ActionType, JsonValue, LanguageCode, LeadTemperature, business_types
+from pitchbot.domain import features as catalog_features
 
 _NEXT_STEPS = {
     "Review the synthetic preview",
     "Confirm requirements",
     "Review proposal",
 }
-_BUSINESS_TYPES = {"apparel", "toys", "books", "food", "import-export", "plastics"}
-_FEATURES = {"catalog", "online-payments", "inventory", "whatsapp", "multilingual"}
+_BUSINESS_TYPES = business_types()
+_FEATURES = catalog_features()
 _BUDGET = re.compile(r"(?:budget|बजट|₹|rs\.?|inr)[\w\s₹,.-]{1,90}", re.IGNORECASE)
 _TIMELINE = re.compile(
     r"(?:near-term|\d{1,3}\s+(?:day|days|week|weeks|month|months))",
@@ -95,7 +97,7 @@ def build_follow_up(
     )
 
 
-def _allowlisted_text(value: JsonValue | None, allowed: set[str]) -> str | None:
+def _allowlisted_text(value: JsonValue | None, allowed: AbstractSet[str]) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()

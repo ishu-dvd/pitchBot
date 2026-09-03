@@ -4,6 +4,7 @@ import asyncio
 
 from pitchbot.actions.models import DeckIndustry, DeckPreview, DeckRequest, DeckSlide
 from pitchbot.adapters import ArtifactAdapter, Clock, EphemeralOperationStore, SystemClock
+from pitchbot.domain import features as catalog_features
 
 _INDUSTRY_CONTENT: dict[DeckIndustry, tuple[str, tuple[str, ...]]] = {
     DeckIndustry.APPAREL: (
@@ -31,13 +32,7 @@ _INDUSTRY_CONTENT: dict[DeckIndustry, tuple[str, tuple[str, ...]]] = {
         ("Material and grade catalog", "Technical specifications", "Bulk inquiry workflow"),
     ),
 }
-_ALLOWED_FEATURES = {
-    "catalog",
-    "online-payments",
-    "inventory",
-    "whatsapp",
-    "multilingual",
-}
+_ALLOWED_FEATURES = catalog_features()
 
 
 class DeckService:

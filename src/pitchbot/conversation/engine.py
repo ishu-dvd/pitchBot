@@ -22,6 +22,7 @@ from pitchbot.conversation.planning import (
 )
 from pitchbot.conversation.rules import (
     ExtractionResult,
+    detect_intent,
     detect_safety_signals,
     extract_business_signals,
     is_repeated_turn,
@@ -221,7 +222,7 @@ class ConversationEngine:
             if understanding is not None:
                 state.understood_slot_keys.update(slot.value for slot in understanding.filled_now)
             plan = plan_reply(
-                self._understanding_for(state, accepted_facts, understanding),
+                self._understanding_for(state, accepted_facts, understanding, text=text),
                 repeated=repeated,
                 asked_counts=state.asked_slot_counts,
             )
@@ -412,29 +413,57 @@ class ConversationEngine:
         state: ConversationState,
         accepted_facts: list[RequirementFact],
         supplied: TurnUnderstanding | None,
+        *,
+        text: str,
     ) -> TurnUnderstanding:
         """Merge everything known about the slots, whatever found it.
 
         The rules and a model are additive, never exclusive: a model that reads a budget the
         regex missed must not also erase a business type the regex caught, and a slot either
         source has ever filled stays filled.
+
+        The buyer's **stance** is merged the same way, and that is a fix rather than a
+        refinement. It used to be taken from ``supplied`` alone, so a deployment without the
+        optional language model - the default, and the one every test runs in - could never
+        observe that a buyer had objected or agreed to buy. Reading it from the rules as
+        well means objection handling works with no extra installed at all; a model, when
+        present, still wins, because it can read a stance out of a sentence that matches no
+        phrase.
         """
 
         base = understanding_from_facts(
             state.facts_by_key,
             (fact.key for fact in accepted_facts),
+            business_type=ConversationEngine._business_type(state),
         )
         remembered = understanding_from_facts(state.understood_slot_keys)
+        detected = detect_intent(text)
         if supplied is None:
             return TurnUnderstanding(
                 known_slots=base.known_slots | remembered.known_slots,
                 filled_now=base.filled_now,
+                intent=detected,
+                business_type=base.business_type,
             )
         return TurnUnderstanding(
             known_slots=base.known_slots | remembered.known_slots | supplied.known_slots,
             filled_now=base.filled_now | supplied.filled_now,
-            intent=supplied.intent,
+            intent=supplied.intent or detected,
+            business_type=base.business_type,
         )
+
+    @staticmethod
+    def _business_type(state: ConversationState) -> str | None:
+        """The recorded vertical, as a catalogue key, or nothing.
+
+        Read from the accumulated facts rather than from this turn so that a buyer who
+        stated their business three turns ago can still be spoken to about it.
+        """
+
+        fact = state.facts_by_key.get("business_type")
+        if fact is None or not isinstance(fact.value, str):
+            return None
+        return fact.value
 
     @staticmethod
     def _reply(language: LanguageCode, key: str) -> str:

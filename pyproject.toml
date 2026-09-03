@@ -78,6 +78,18 @@ faster-whisper = ["faster-whisper>=1.0.0,<2"]
 # is licence-split (0.5B/1.5B Apache-2.0, 3B non-commercial); see `KNOWN_MODEL_LICENSES` in
 # `pitchbot.adapters.onnx_genai_model` and `docs/BENCHMARKS.md`.
 local-llm = ["onnxruntime-genai>=0.15.0,<1"]
+# Optional microphone capture. Never a runtime requirement: pitchbot imports, and the whole
+# test suite passes, with this absent - the voice loop is tested against a fake source, so
+# CI needs no audio hardware.
+#
+# `sounddevice` is MIT and bundles PortAudio, also MIT. Permissive with no distribution
+# obligation, unlike the `piper-tts` extra above. It is a pure-Python cffi binding with no
+# model weights, so installing it downloads nothing at import or capture time.
+#
+# This is the only extra that needs *hardware* rather than a download. A machine with no
+# input device installs it successfully and still cannot listen, so callers check
+# `pitchbot.speech.microphone.is_available()` rather than assuming the import implies a mic.
+microphone = ["sounddevice>=0.5,<1"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

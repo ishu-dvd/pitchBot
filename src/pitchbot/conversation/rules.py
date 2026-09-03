@@ -2,16 +2,27 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from hashlib import sha256
 from hmac import new as new_hmac
+from typing import Final
 from uuid import UUID
 
 from pitchbot.conversation.models import SafetySignal
 from pitchbot.conversation.state import ConversationState
-from pitchbot.domain import IntentEvidence, LanguageCode, RequirementFact, RequirementRevision
+from pitchbot.domain import (
+    BUSINESS_TYPES,
+    FEATURES,
+    INTENT_PHRASES,
+    INTENT_PRIORITY,
+    Intent,
+    IntentEvidence,
+    LanguageCode,
+    RequirementFact,
+    RequirementRevision,
+)
 
 _RULE_VERSION = "conversation-rules-v1"
 
@@ -840,36 +851,6 @@ _MERGE_STOPWORDS = frozenset(
     }
 )
 
-_BUSINESS_TYPES: dict[str, tuple[str, ...]] = {
-    "apparel": (
-        "apparel",
-        "clothing",
-        "clothes",
-        "garment",
-        "कपड़े",
-        "kapde",
-        "దుస్తులు",
-        "బట్టలు",
-    ),
-    "toys": ("toy", "toys", "खिलौने", "khilone", "బొమ్మలు"),
-    "books": ("book", "books", "किताब", "kitab", "పుస్తకాలు"),
-    "food": ("food", "restaurant", "bakery", "खाना", "restaurant", "ఆహారం", "బేకరీ", "రెస్టారెంట్"),
-    "import-export": ("import export", "import-export", "निर्यात", "आयात", "ఎగుమతి", "దిగుమతి"),
-    "plastics": ("plastic", "plastics", "प्लास्टिक", "ప్లాస్టిక్"),
-}
-_FEATURES: dict[str, tuple[str, ...]] = {
-    "catalog": ("catalog", "catalogue", "कैटलॉग", "కేటలాగ్"),
-    "online-payments": ("payment", "checkout", "pay online", "भुगतान", "చెల్లింపు"),
-    "inventory": ("inventory", "stock management", "इन्वेंटरी", "ఇన్వెంటరీ"),
-    "whatsapp": ("whatsapp", "व्हाट्सऐप", "వాట్సాప్"),
-    "multilingual": (
-        "multilingual",
-        "bilingual",
-        "hindi and english",
-        "हिंदी और अंग्रेजी",
-        "బహుభాషా",
-    ),
-}
 _POSITIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
     ("budget", 0.25, ("budget", "₹", "rs ", "rupees", "बजट", "బడ్జెట్", "రూపాయలు")),
     (
@@ -904,8 +885,41 @@ _NEGATIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
     ),
     ("no-need", -0.50, ("do not need", "don't need", "no website", "नहीं चाहिए", "అవసరం లేదు")),
 )
+_BUDGET_HEDGES: Final[tuple[str, ...]] = (
+    "around",
+    "about",
+    "roughly",
+    "approximately",
+    "approx",
+    "nearly",
+    "maybe",
+    "close to",
+    "up to",
+    "under",
+    "लगभग",
+    "करीब",
+    "तकरीबन",
+    "దాదాపు",
+    "సుమారు",
+    "వరకు",
+)
+"""Words people put between "budget is" and the number, in all three languages.
+
+Found by running the shipped sales script: *"Our budget is around 150000 rupees"* filled
+no slot, because the pattern required the digits to follow the cue with nothing but
+punctuation between. The buyer answered the question, the answer was discarded, the agent
+asked again, hit its ask limit and closed the conversation without a budget - the exact
+failure ``MAX_ASKS_PER_SLOT`` was introduced to bound, still happening one layer down.
+
+A closed list rather than "allow any two words" on purpose. A permissive gap would read
+*"budget is not decided, we sold 500 units last month"* as a budget of 500, which is worse
+than missing one: a wrong number here is quoted back to a buyer and shapes a proposal.
+"""
+
 _BUDGET_PATTERN = re.compile(
-    r"(?:budget(?:\s+is)?|बजट|బడ్జెట్|₹|rs\.?|inr)\s*[:=-]?\s*(₹|rs\.?|inr)?\s*"
+    r"(?:budget(?:\s+is)?|बजट|బడ్జెట్|₹|rs\.?|inr)\s*[:=-]?\s*"
+    r"(?:(?:" + "|".join(re.escape(hedge) for hedge in _BUDGET_HEDGES) + r")\s+)?"
+    r"(₹|rs\.?|inr)?\s*"
     r"([0-9][0-9,]*(?:\s*(?:k|lakh|लाख|లక్ష|లక్షల))?)",
     re.IGNORECASE,
 )
@@ -1013,6 +1027,33 @@ def normalized_turn_digest(
     ).hexdigest()
 
 
+def detect_intent(text: str) -> Intent | None:
+    """Read the buyer's stance from their own words, with no model and no dependency.
+
+    Until this existed, :class:`~pitchbot.domain.catalog.Intent` was produced *only* by the
+    optional local language model. Every deployment without that extra - which is the
+    default, and the configuration the whole test suite runs in - therefore had no way to
+    notice that a buyer had objected, stalled, or agreed to buy. The stance was structurally
+    unavailable, so no amount of work in the planner could have used it.
+
+    Detection is deliberately the same word-bounded vocabulary match the business signals
+    use, not the looser one safety matching uses. The balance is different in each
+    direction: over-matching a safety phrase costs a polite refusal, over-matching a stance
+    makes the agent answer a concern nobody raised. Priority resolves a turn that carries
+    more than one stance; see :data:`~pitchbot.domain.catalog.INTENT_PRIORITY`.
+
+    Returns ``None`` rather than ``EXPLORING`` when nothing matches, so a caller can tell
+    "the buyer is browsing" apart from "we learned nothing this turn" - the model path
+    already made that distinction and the rules must not collapse it.
+    """
+
+    normalized = normalize_text(text)
+    for intent in INTENT_PRIORITY:
+        if _contains_any(normalized, INTENT_PHRASES[intent]):
+            return intent
+    return None
+
+
 def extract_business_signals(
     *,
     state: ConversationState,
@@ -1024,12 +1065,12 @@ def extract_business_signals(
     normalized = normalize_text(text)
     candidates: dict[str, str] = {}
 
-    business_type = _match_named_value(normalized, _BUSINESS_TYPES)
+    business_type = _match_named_value(normalized, BUSINESS_TYPES)
     if business_type is not None:
         candidates["business_type"] = business_type
 
     features = tuple(
-        name for name, phrases in _FEATURES.items() if _contains_any(normalized, phrases)
+        name for name, phrases in FEATURES.items() if _contains_any(normalized, phrases)
     )
     if features:
         candidates["requested_features"] = ",".join(features)
@@ -1502,7 +1543,7 @@ def _assign_groups(
     return False
 
 
-def _match_named_value(text: str, choices: dict[str, tuple[str, ...]]) -> str | None:
+def _match_named_value(text: str, choices: Mapping[str, tuple[str, ...]]) -> str | None:
     for value, phrases in choices.items():
         if _contains_any(text, phrases):
             return value
