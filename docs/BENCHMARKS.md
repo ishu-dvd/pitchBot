@@ -12,6 +12,8 @@ PR 33 adds the first provider that **produces speech**: an opt-in Piper text-to-
 
 PR 34 adds the first provider that **recognises speech**: an opt-in `faster-whisper` adapter. Its licences are clean (see [faster-whisper license review](#faster-whisper-license-review-2026-09-03)), but measuring it produced a finding that changes how speech recognition must be integrated: **real-time factor is a misleading metric for Whisper**, because cost is essentially constant per padded 30-second window rather than proportional to audio. The number that matters is *latency after end-of-speech*, and it is roughly **2.1 s**. See [Measured result: faster-whisper](#measured-result-faster-whisper-cpu-int8). **No STT provider is selected** and no word-error-rate claim is made: the only speech available is synthesised, and round-trip measurement cannot separate recognition quality from synthesis quality.
 
+PR 36 measures the **second** local Whisper runtime, `whisper.cpp`, against the integrated one and extends coverage from two languages to six across five scripts. Two results matter. `whisper.cpp` runs locally with no accelerator but is **~1.7x slower** than the integrated runtime with no offsetting advantage, so it is **measured and not adopted**. And **character error rate without number normalisation is close to meaningless for this content**: a perfect Arabic transcription scored 52.4% CER purely because the model wrote digits where the reference wrote words. See [Local Whisper runtimes and language coverage](#local-whisper-runtimes-and-language-coverage-measured-2026-09-03).
+
 No audio file or model weight is committed. Planned STT/TTS corpus entries are test requirements, not evidence; synthetic VAD audio is regenerated from a seed and hash-verified rather than committed as a binary.
 
 ## Candidate review
@@ -21,7 +23,7 @@ Repository metadata was checked on 2026-08-31 using the GitHub API:
 | Candidate | Kind | Repository license reported | Gate |
 |---|---|---:|---|
 | faster-whisper | STT | MIT | **Reviewed 2026-09-03 (below). Adapter landed opt-in; no provider selected.** |
-| whisper.cpp | STT | MIT | Model license + measured benchmark required |
+| whisper.cpp | STT | MIT | **Measured 2026-09-03 (below). Runs locally; not adopted — slower than the integrated runtime with no offsetting advantage.** |
 | Silero VAD | VAD | MIT | Model artifact license + benchmark required |
 | py-webrtcvad | VAD | NOASSERTION | **License reviewed 2026-09-03 (below). Measured 2026-09-03; not selected.** |
 | llama.cpp | Model runtime | MIT | Model license + structured-output benchmark required |
@@ -244,6 +246,96 @@ the same class of problem as the VAD corpus measuring itself, below. These numbe
 disclosed when round-trip ASR is used; this is that disclosure. **No STT provider is
 selected**, and ADR-0004's gate is not satisfied, because that requires reviewed consented
 or licensed human audio which does not yet exist in this repository.
+
+### Local Whisper runtimes and language coverage, measured 2026-09-03
+
+Two open questions: is there a *second* local Whisper runtime worth using, and does the
+`small` model actually work beyond English and Hindi? Both were measured.
+
+- **Runtimes:** `faster-whisper` (CTranslate2, `int8`) vs `whisper.cpp`
+  (ggml via `pywhispercpp==1.5.1`, MIT, prebuilt `cp312`/`win_amd64` wheel, 487 MB
+  `ggml-small`, CPU only, no accelerator). Both at model size `small`, so the comparison is
+  about the **runtime**, not the model.
+- **Languages:** six across five scripts, synthesised with Piper and transcribed back.
+
+#### whisper.cpp runs locally, and is not adopted
+
+| | total inference, 6 clips | relative |
+|---|---:|---|
+| `faster-whisper` (CTranslate2, int8) | **13.98 s** | 1.00x |
+| `whisper.cpp` (ggml, default f16) | 23.27 s | 1.66x slower |
+
+It installs and runs cleanly on the target platform with a lightweight dependency set
+(`numpy`, `requests`, `tqdm`, `platformdirs` — no PyTorch), and its transcripts are
+essentially identical to the integrated runtime's. It is simply **slower here with no
+offsetting advantage**, so `faster-whisper` remains the integrated runtime and
+`whisper.cpp` is recorded as a viable fallback rather than a replacement.
+
+One caveat that keeps this honest: the ggml model used was the default **f16** build, while
+CTranslate2 ran **int8**. A quantised ggml model would narrow the gap and possibly close
+it. This is a measurement of the default configuration of each, not a claim about the
+ceiling of either.
+
+#### The `small` model gets the script right in every language tested
+
+Script correctness is the decisive signal, because the earlier size sweep showed that when
+a Whisper model is out of its depth it does not merely score badly — `tiny` emitted
+romanised Latin for Hindi and `base` emitted Urdu/Arabic script, which no threshold tuning
+fixes.
+
+| Language | Script | Script correct | CER | **CER, numbers normalised** |
+|---|---|---|---:|---:|
+| English | Latin | yes | 29.6% | **0.0%** |
+| Spanish | Latin | yes | 26.3% | **0.0%** |
+| Arabic | Arabic | yes | 28.6% | 15.0% |
+| Russian | Cyrillic | yes | 41.7% | 15.8% |
+| Hindi | Devanagari | yes | 57.9% | 27.3% |
+| Chinese | Han | yes | 83.3% | 62.5% |
+
+**All six produced the correct script in both runtimes.** So `small` is genuinely
+multilingual, and the wrong-script failure mode is a property of `tiny`/`base`, not of
+Whisper at this size.
+
+Quality nonetheless varies enormously. European languages are essentially perfect once
+number formatting is accounted for; Hindi is mediocre; **Chinese is poor** and would need
+its own evaluation before any claim is made about it.
+
+#### CER without number normalisation is close to meaningless here
+
+This is the finding with the widest consequences, and it was nearly missed.
+
+The reference sentences spell numbers as words ("fourteen thousand"); the model writes them
+as digits ("14,000"). Both are correct transcriptions of the same speech. Stripping numerals
+and number-words before scoring changes the picture completely:
+
+- English and Spanish go from ~29% and ~26% CER to **0.0%** — the recognition was perfect
+  and the entire error was formatting.
+- Arabic was scored at **52.4%** for `faster-whisper` and **4.8%** for `whisper.cpp`, which
+  looked like a large runtime disagreement. It was not: the two runtimes simply made
+  *different formatting choices* — one wrote `14.000`, the other wrote
+  `أربعة عشر الف` — and both recognised the speech correctly. Normalised, `faster-whisper`
+  scores **0.0%** on Arabic.
+
+`docs/BENCHMARKS.md` already requires that "WER/CER normalization is versioned and cannot be
+changed alongside a baseline without a reviewed delta". This measurement is the concrete
+justification for that rule: an unnormalised score made a **perfect** transcription look
+like a 52% failure, and would have ranked two runtimes apart that in fact agreed. Any future
+STT suite must define and version number normalisation *before* it reports a single number.
+
+#### What this is not
+
+**No STT provider is selected and no accuracy claim is made.** The audio is Piper-synthesised,
+so it cannot separate recognition quality from synthesis quality, and several of the voices
+used carry unresolved or unknown licences — they were used for local evaluation that
+distributes nothing and commits no audio. Two of the six (`ar_JO-kareem`, and both Russian
+and Chinese voices) report `Unknown` or unresolved licences on their model cards, which is a
+further data point for the voice-licensing finding in
+[Piper distribution and voice license review](#piper-distribution-and-voice-license-review-2026-09-03):
+Piper's published catalogue is **largely licence-unclear**, not merely non-commercial in the
+Hindi case.
+
+Reproduced by `probe_whisper_runtimes.py` / `probe_whisper_sidebyside.py`, which are
+development probes and are deliberately not committed.
 
 ### VAD candidate comparison, measured 2026-09-03
 
