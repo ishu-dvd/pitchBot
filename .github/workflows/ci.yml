@@ -31,6 +31,15 @@ jobs:
         run: mypy src tests
       - name: Tests
         run: pytest
+      - name: Optional speech provider
+        # Installed only here, after the suite has already passed without it, so "pitchbot
+        # works with no provider installed" stays a proven property rather than an
+        # assumption. The provider package is installed directly to leave the editable
+        # install and the locked runtime dependencies untouched; that the `webrtc-vad`
+        # extra actually declares it is asserted deterministically by the test suite.
+        run: |
+          pip install "webrtcvad-wheels>=2.0.14,<3"
+          pytest tests/test_webrtc_vad_adapter.py
       - name: Migration check
         env:
           PITCHBOT_DATABASE_URL: sqlite:///./migration-check.db

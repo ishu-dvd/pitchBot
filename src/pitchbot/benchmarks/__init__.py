@@ -62,12 +62,16 @@ from pitchbot.benchmarks.retrieval import (
     validate_retrieval_suite,
 )
 from pitchbot.benchmarks.speech import (
+    DetectorProfile,
+    VadFrameSource,
     VadSuite,
     VadSuiteCase,
     VadSuiteSegment,
+    mock_detector_profile,
     run_speech_evaluation,
     speech_gates_pass,
     validate_speech_suite,
+    webrtc_detector_profile,
 )
 
 __all__ = [
@@ -80,6 +84,7 @@ __all__ = [
     "CorpusAvailability",
     "CorpusItem",
     "CorpusManifest",
+    "DetectorProfile",
     "EvaluationCaseResult",
     "EvaluationCaseStatus",
     "EvaluationGateReport",
@@ -103,6 +108,7 @@ __all__ = [
     "SegmentSpec",
     "SourceType",
     "SyntheticClip",
+    "VadFrameSource",
     "VadSuite",
     "VadSuiteCase",
     "VadSuiteSegment",
@@ -111,6 +117,7 @@ __all__ = [
     "evaluate_gates",
     "gates_pass",
     "generate_clip",
+    "mock_detector_profile",
     "real_time_factor",
     "relative_duration_delta",
     "render_evaluation_report",
@@ -124,6 +131,7 @@ __all__ = [
     "validate_retrieval_suite",
     "validate_speech_suite",
     "vad_precision_recall_f1",
+    "webrtc_detector_profile",
     "write_evaluation_report",
     "word_error_rate",
 ]

@@ -31,6 +31,12 @@ dev = [
   "mypy>=1.11.2",
   "pre-commit>=3.8.0",
 ]
+# Optional speech provider. Never a runtime requirement: pitchbot imports, and the whole
+# test suite passes, with this absent. `webrtcvad-wheels` is the prebuilt-wheel
+# distribution of `py-webrtcvad` (MIT binding over BSD-3-Clause WebRTC C code); it is a
+# ~19 KiB CPU-only extension with no model weights, so installing it downloads nothing at
+# import, construction, or detection time.
+webrtc-vad = ["webrtcvad-wheels>=2.0.14,<3"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

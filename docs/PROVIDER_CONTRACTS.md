@@ -32,6 +32,35 @@ scripted decision list. It exists so endpointing and barge-in can be built and t
 before any acoustic model is licensed and benchmarked, and it must never appear in a
 benchmark claim.
 
+`WebRtcVoiceActivityDetector` (PR 30) is the first real provider behind this contract. The
+contract is unchanged: it implements `detect(AudioChunk) -> VoiceActivity` as written.
+
+- **Optional dependency.** `pitchbot` imports, and the whole suite passes, with `webrtcvad`
+  absent. `pitchbot.adapters.webrtc_vad` itself also imports cleanly without it and exposes
+  `WEBRTC_VAD_AVAILABLE`, so callers probe rather than guarding an `ImportError`; only
+  *constructing* the detector requires the package, and that raises `PermanentAdapterError`
+  naming the extra. The module is deliberately **not** re-exported from
+  `pitchbot.adapters.__init__`, so the core import graph structurally cannot depend on it.
+  Install with `pip install "pitchbot[webrtc-vad]"`.
+- **Frame constraints are refused, not repaired.** WebRTC accepts only mono 16-bit
+  little-endian PCM at 8/16/32/48 kHz in exactly 10/20/30 ms frames. A frame of any other
+  rate or length raises `PermanentAdapterError` rather than being resampled, padded, or
+  truncated, because each of those silently changes the signal being measured.
+- **`confidence` is not a posterior.** `webrtcvad` returns a single boolean per frame and
+  its GMM likelihood ratio is unreachable through the public API, so the adapter reports a
+  fixed constant for every frame. A number that varied with the decision would fabricate a
+  probability the library never produced. `is_speech` is the whole signal; this detector's
+  `confidence` must not be thresholded.
+- **No weights, no download.** The GMM parameters are compiled into the C extension, so
+  nothing is fetched at import, construction, or detection time, and no model or voice
+  license exists separately from the package license (`MIT AND BSD-3-Clause`).
+- **Stateful by design.** WebRTC adapts an internal noise model across frames, so an
+  instance must be fed one clip's frames in order and a fresh instance used per clip. The
+  benchmark runner constructs one detector per case.
+
+The adapter is **not** a selected provider. See [Benchmarks](BENCHMARKS.md) for the measured
+result and why the current corpus cannot select one.
+
 ## Streaming
 
 STT consumes an asynchronous stream of timestamped, sequenced audio chunks and produces an asynchronous transcript stream. TTS produces sequenced audio chunks. Provider implementations must preserve order, cancellation, and bounded buffering; those transport concerns are implemented in later milestones.
