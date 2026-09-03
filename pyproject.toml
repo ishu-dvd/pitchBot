@@ -37,6 +37,19 @@ dev = [
 # ~19 KiB CPU-only extension with no model weights, so installing it downloads nothing at
 # import, construction, or detection time.
 webrtc-vad = ["webrtcvad-wheels>=2.0.14,<3"]
+# Optional text-to-speech provider. Never a runtime requirement: pitchbot imports, and the
+# whole test suite passes, with this absent.
+#
+# `piper-tts` is **GPL-3.0-or-later** (it ships the GPL-3 text and bundles espeak-ng data),
+# unlike the permissive `webrtc-vad` extra above. PitchBot never vendors or redistributes
+# it and imports it only at runtime, so installing this extra is a deliberate act by the
+# operator, who then owns the resulting distribution obligations. Its runtime dependency
+# closure is just `onnxruntime` + `pathvalidate`; CPU-only, no accelerator.
+#
+# Voices are NOT installed by this extra and are never downloaded by PitchBot. Each voice
+# carries its own separate license, and most published Piper voices are non-commercial --
+# see `KNOWN_VOICE_LICENSES` in `pitchbot.adapters.piper_tts` and `docs/BENCHMARKS.md`.
+piper-tts = ["piper-tts>=1.7.0,<2"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

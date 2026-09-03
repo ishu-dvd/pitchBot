@@ -44,6 +44,23 @@ These portal links are not legal citations. The project must identify the applic
 
 Inclusion here is not selection. The benchmark PR must record repository revision, model license, model-card restrictions, resource use, accuracy, and latency on labeled hardware.
 
+## Reviewed speech providers
+
+- [`piper1-gpl`](https://github.com/OHF-Voice/piper1-gpl) — text-to-speech runtime, reviewed
+  2026-09-03. **GPL-3.0-or-later**; bundles `espeak-ng` data. Landed as the optional
+  `piper-tts` extra in PR 33 and never vendored or redistributed. No provider selected.
+- [`rhasspy/piper-voices`](https://huggingface.co/rhasspy/piper-voices) — voice weights,
+  each with its own license taken from its training data. Reviewed per voice on 2026-09-03;
+  **every published `hi_IN` voice is non-commercial or carries a license that could not be
+  retrieved**, and `en_US-amy-low` inherits CC BY-NC-SA 4.0 through its RyanSpeech base.
+  Commercially usable voices found: `en_US-joe-medium` (CC0-1.0),
+  `en_US-libritts_r-medium` and `en_GB-alba-medium` (CC BY 4.0). Full table in
+  [BENCHMARKS.md](BENCHMARKS.md).
+
+A voice's license follows its training data **through finetuning**, so a finetuned voice's
+base model has to be chased rather than trusting the voice's own card alone. An
+unretrievable license is recorded as not permitting commercial use.
+
 ## Evaluation and local observability
 
 - [OpenTelemetry documentation](https://opentelemetry.io/docs/what-is-opentelemetry/) — vendor-neutral future trace and metric contracts.

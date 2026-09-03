@@ -61,6 +61,57 @@ contract is unchanged: it implements `detect(AudioChunk) -> VoiceActivity` as wr
 The adapter is **not** a selected provider. See [Benchmarks](BENCHMARKS.md) for the measured
 result and why the current corpus cannot select one.
 
+## Speech synthesis
+
+`PiperTextToSpeechAdapter` (PR 33) is the first provider that produces speech. The contract
+is unchanged: it implements
+`synthesize(text, language) -> AsyncIterator[SynthesizedAudioChunk]` as written.
+
+- **Optional dependency.** `pitchbot` imports, and the whole suite passes, with `piper`
+  absent. `pitchbot.adapters.piper_tts` itself also imports cleanly without it and exposes
+  `PIPER_AVAILABLE`, so callers probe rather than guarding an `ImportError`. Like the VAD
+  adapter it is deliberately **not** re-exported from `pitchbot.adapters.__init__`, so the
+  core import graph structurally cannot depend on it. Install with
+  `pip install "pitchbot[piper-tts]"`.
+- **The runtime is GPL-3.0-or-later**, unlike every other dependency in this repository.
+  PitchBot never vendors or redistributes it and imports it only at runtime; installing the
+  extra is a deliberate operator action. See the distribution review in
+  [Benchmarks](BENCHMARKS.md).
+- **Voices are operator-supplied and never downloaded.** A voice is addressed by an explicit
+  filesystem path that must already exist, and the `.onnx.json` sidecar must sit beside it.
+  Piper's own downloader is never invoked; load and synthesis were verified with the
+  process's sockets disabled.
+- **License gate, deny by default.** Each voice carries its own license, taken from its
+  training data, and **most published Piper voices are non-commercial**. `PiperVoiceRegistry`
+  refuses a voice that does not permit commercial use, or whose license could not be
+  established, unless the caller passes `allow_non_commercial=True` for local evaluation.
+  `preload()` applies the same gate at startup, so a denied voice fails before first use.
+- **No fallback voice, ever.** Piper does not reject a language mismatch — feeding
+  Devanagari to an English voice produces confident, fluent, wrong audio. An unmapped
+  language therefore raises `PermanentAdapterError` naming the mapped languages rather than
+  being served by whichever voice happened to be configured.
+- **Exactly one chunk carries `is_final=True`.** Piper yields one chunk per sentence and
+  yields *nothing* for empty, whitespace-only, or punctuation-only text. A consumer waiting
+  on `is_final` to release a playback buffer would wait forever, so the adapter emits a
+  single empty final chunk in that case.
+- **The event loop is not blocked during synthesis**, because chunks are advanced one at a
+  time inside `asyncio.to_thread`. Audio therefore starts flowing after the first sentence
+  rather than after the whole utterance, which is what makes barge-in survivable.
+- **Loading a voice *does* stall the loop (~2.1 s) and must be preloaded.** Constructing the
+  ONNX session holds the GIL, so the worker thread cannot yield. Call `preload()` during
+  startup to convert an unpredictable mid-conversation freeze into a predictable startup
+  cost.
+- **Output is non-deterministic by default.** VITS samples its duration predictor, so the
+  same text twice is not byte-identical. `DETERMINISTIC_SYNTHESIS` makes it reproducible,
+  which any corpus item carrying an `audio_sha256` requires.
+- **Concurrency is unrestricted and that was measured**, not assumed: concurrent synthesis
+  through one loaded voice is byte-identical to serial, so the adapter holds no per-voice
+  lock.
+
+The adapter is **not** a selected provider and makes no quality claim. TTS naturalness and
+intelligibility need the blinded human rubrics and consented audio described in
+[Benchmarks](BENCHMARKS.md).
+
 ## Streaming
 
 STT consumes an asynchronous stream of timestamped, sequenced audio chunks and produces an asynchronous transcript stream. TTS produces sequenced audio chunks. Provider implementations must preserve order, cancellation, and bounded buffering; those transport concerns are implemented in later milestones.
