@@ -327,18 +327,10 @@ class EvaluationRun(BenchmarkModel):
             raise ValueError("failed evaluations require a run failure code")
         return self
 
-    def gates_pass(self) -> bool:
-        if self.status is not EvaluationRunStatus.COMPLETED or not self.cases:
-            return False
-        all_metrics = (*self.metrics, *(metric for case in self.cases for metric in case.metrics))
-        gating_results = [
-            result for metric in all_metrics if (result := metric.meets_threshold()) is not None
-        ]
-        return (
-            bool(gating_results)
-            and all(case.status is EvaluationCaseStatus.PASSED for case in self.cases)
-            and all(gating_results)
-        )
+    # Deliberately no gates_pass() here. This model is a transport contract and cannot
+    # know which metrics its suite exists to measure, so any gate it could implement
+    # would pass artifacts missing every one of them. Gating lives in
+    # pitchbot.benchmarks.gates, which takes the suite's declaration of a complete result.
 
 
 class BenchmarkResult(BenchmarkModel):

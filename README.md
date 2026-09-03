@@ -14,7 +14,7 @@ The implemented application currently provides only:
 - Provider-neutral contracts, deterministic in-memory mocks, and resilience primitives.
 - A same-origin browser simulator with deterministic sessions, previews, replay, and bounded microphone transport.
 - Versioned speech/runtime candidate and corpus manifests with reproducible metrics and validation CLI.
-- Versioned privacy-minimized evaluation snapshots, strict gate validation, and dependency-free local HTML reports.
+- Versioned privacy-minimized evaluation snapshots, suite-aware fail-closed gate validation that fails the build on a regression, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
 - Dependency-free BM25 retrieval over privacy-validated current structured facts with provenance and portable multilingual evaluation.

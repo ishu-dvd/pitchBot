@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pitchbot.benchmarks.cli import main
+from pitchbot.benchmarks.gates import gates_pass
 from pitchbot.benchmarks.retrieval import (
     RetrievalSuite,
     _run_case,
@@ -40,7 +41,8 @@ def test_retrieval_evaluation_emits_only_minimized_metrics() -> None:
         git_revision="abcdef1",
     )
 
-    assert run.gates_pass() is True
+    assert gates_pass(run) is True
+    assert gates_pass(run, validate_retrieval_suite(SUITE_PATH).gate_spec()) is True
     assert len(run.cases) == 6
     assert {metric.name for metric in run.metrics} == {
         "retrieval.mean_recall_at_k",

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from pitchbot.benchmarks.cli import main
 from pitchbot.benchmarks.evaluation import render_evaluation_report, validate_evaluation_run
+from pitchbot.benchmarks.gates import gates_pass
 from pitchbot.benchmarks.models import (
     EvaluationCaseResult,
     EvaluationCaseStatus,
@@ -29,15 +30,24 @@ def _evaluation_run(
     failure_codes: tuple[str, ...] = (),
     industry: str = "apparel",
 ) -> EvaluationRun:
+    """A complete artifact for a reviewed suite.
+
+    It is shaped as a ``pitchbot-bm25-baseline`` result rather than an invented suite because
+    since PR 27 the gate is suite-aware: it asks the reviewed spec for that ``suite_id`` what a
+    complete artifact contains. An artifact for a suite nobody has declared cannot be checked
+    against anything and fails closed, so a fixture from an imaginary suite would only ever
+    exercise that one branch.
+    """
+
     started_at = datetime(2026, 9, 1, tzinfo=UTC)
     return EvaluationRun(
         run_id="local-eval-1",
         status=EvaluationRunStatus.COMPLETED,
         git_revision="1234567",
-        suite_id="realtime-conversation",
+        suite_id="pitchbot-bm25-baseline",
         suite_version="1.0",
         suite_manifest_sha256="c" * 64,
-        corpus_id="conversation-cases",
+        corpus_id="synthetic-structured-facts",
         corpus_version="1.0",
         corpus_manifest_sha256="a" * 64,
         configuration_sha256="b" * 64,
@@ -58,6 +68,33 @@ def _evaluation_run(
                 direction=MetricDirection.AT_MOST,
                 threshold=200,
             ),
+            EvaluationMetric(
+                name="retrieval.mean_recall_at_k",
+                value=1.0,
+                unit="ratio",
+                direction=MetricDirection.AT_LEAST,
+                threshold=1.0,
+            ),
+            EvaluationMetric(
+                name="retrieval.mean_reciprocal_rank",
+                value=1.0,
+                unit="ratio",
+                direction=MetricDirection.AT_LEAST,
+                threshold=0.75,
+            ),
+            EvaluationMetric(
+                name="retrieval.timeout_rate",
+                value=0.0,
+                unit="ratio",
+                direction=MetricDirection.AT_MOST,
+                threshold=0.0,
+            ),
+            EvaluationMetric(
+                name="retrieval.p95_latency_ms",
+                value=100,
+                unit="ms",
+                direction=MetricDirection.INFORMATIONAL,
+            ),
         ),
         cases=(
             EvaluationCaseResult(
@@ -67,6 +104,28 @@ def _evaluation_run(
                 industry=industry,
                 persona="direct-buyer",
                 duration_ms=100,
+                metrics=(
+                    EvaluationMetric(
+                        name="retrieval.recall_at_k",
+                        value=1.0,
+                        unit="ratio",
+                        direction=MetricDirection.AT_LEAST,
+                        threshold=1.0,
+                    ),
+                    EvaluationMetric(
+                        name="retrieval.reciprocal_rank",
+                        value=1.0,
+                        unit="ratio",
+                        direction=MetricDirection.AT_LEAST,
+                        threshold=0.5,
+                    ),
+                    EvaluationMetric(
+                        name="retrieval.latency_ms",
+                        value=100,
+                        unit="ms",
+                        direction=MetricDirection.INFORMATIONAL,
+                    ),
+                ),
                 failure_codes=failure_codes,
             ),
         ),
@@ -74,12 +133,14 @@ def _evaluation_run(
 
 
 def test_evaluation_gate_status_requires_passing_cases_and_gates() -> None:
-    assert _evaluation_run().gates_pass()
-    assert not _evaluation_run(metric_value=201).gates_pass()
-    assert not _evaluation_run(
-        case_status=EvaluationCaseStatus.FAILED,
-        failure_codes=("wrong-disposition",),
-    ).gates_pass()
+    assert gates_pass(_evaluation_run())
+    assert not gates_pass(_evaluation_run(metric_value=201))
+    assert not gates_pass(
+        _evaluation_run(
+            case_status=EvaluationCaseStatus.FAILED,
+            failure_codes=("wrong-disposition",),
+        )
+    )
 
 
 def test_evaluation_contract_rejects_inconsistent_or_unbounded_results() -> None:

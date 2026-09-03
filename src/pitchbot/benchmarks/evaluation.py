@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from pitchbot.benchmarks.gates import evaluate_gates
 from pitchbot.benchmarks.manifest import load_json_model
 from pitchbot.benchmarks.models import EvaluationMetric, EvaluationRun
 
@@ -48,7 +49,13 @@ def render_evaluation_report(run: EvaluationRun) -> str:
             "</tr>"
         )
     metric_rows = [_metric_row(metric) for metric in run.metrics]
-    gate_status = "pass" if run.gates_pass() else "fail or incomplete"
+    # The label must come from the same suite-aware gate the CLI exits on; deriving it from
+    # anything weaker would let the report advertise a pass the build already rejected.
+    gate_report = evaluate_gates(run)
+    gate_status = "pass" if gate_report.passed else "fail"
+    gate_detail = (
+        "" if gate_report.passed else f"<br><small>{html.escape(gate_report.summary())}</small>"
+    )
     completed = run.completed_at.isoformat() if run.completed_at is not None else "in progress"
     return f"""<!doctype html>
 <html lang="en">
@@ -71,7 +78,7 @@ th {{ background: #e8edf4; }}
 <div class="summary">
 <div class="card"><strong>Run</strong><br>{html.escape(run.run_id)}</div>
 <div class="card"><strong>Status</strong><br>{html.escape(run.status.value)}</div>
-<div class="card"><strong>Artifact gates</strong><br>{gate_status}</div>
+<div class="card"><strong>Artifact gates</strong><br>{gate_status}{gate_detail}</div>
 <div class="card"><strong>Cases</strong><br>{len(run.cases)}</div>
 </div>
 <p>Revision: <code>{html.escape(run.git_revision)}</code><br>

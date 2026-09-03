@@ -38,6 +38,13 @@ from pitchbot.benchmarks.audio import (
     frames_to_intervals,
     generate_clip,
 )
+from pitchbot.benchmarks.gates import (
+    SPEECH_GATE_SPEC,
+    AggregateKind,
+    EvaluationGateSpec,
+    MetricFoldRule,
+    gates_pass,
+)
 from pitchbot.benchmarks.manifest import canonical_manifest_sha256, load_json_model
 from pitchbot.benchmarks.metrics import real_time_factor, vad_precision_recall_f1
 from pitchbot.benchmarks.models import (
@@ -53,27 +60,6 @@ from pitchbot.benchmarks.models import (
 from pitchbot.domain import LanguageCode
 
 _CAPTURE_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
-
-# Metrics every honest VAD artifact must carry. run-speech gates on the *presence* of these
-# names, not merely on some metric passing, so an artifact stripped of its VAD metrics fails
-# closed instead of sneaking through the shared, non-suite-aware EvaluationRun.gates_pass().
-_REQUIRED_CASE_METRICS = frozenset(
-    {
-        "speech.vad_f1",
-        "speech.vad_precision",
-        "speech.vad_recall",
-        "speech.real_time_factor",
-    }
-)
-_REQUIRED_RUN_METRICS = frozenset(
-    {
-        "speech.vad_mean_f1",
-        "speech.vad_min_f1",
-        "speech.mean_real_time_factor",
-        "speech.p95_real_time_factor",
-        "speech.peak_python_kib",
-    }
-)
 
 
 class SpeechSuiteModel(BaseModel):
@@ -128,6 +114,42 @@ class VadSuite(SpeechSuiteModel):
                         f"segment duration must be a multiple of frame_ms: {case.case_id}"
                     )
         return self
+
+    def _slice_folds(self) -> tuple[MetricFoldRule, ...]:
+        """One mean-F1 fold per language, condition, and vertical slice this suite covers.
+
+        The slice names are data, not code: adding a vertical to the corpus adds its gate.
+        """
+
+        groups: dict[str, set[str]] = {}
+        for case in self.cases:
+            for prefix, key in (
+                ("lang", case.language.value),
+                ("cond", case.condition),
+                ("vert", case.vertical),
+            ):
+                groups.setdefault(f"speech.vad_f1.{prefix}.{key}", set()).add(case.case_id)
+        return tuple(
+            MetricFoldRule(
+                name,
+                "speech.vad_f1",
+                AggregateKind.MEAN,
+                case_ids=frozenset(case_ids),
+            )
+            for name, case_ids in sorted(groups.items())
+        )
+
+    def gate_spec(self) -> EvaluationGateSpec:
+        """The reviewed VAD gate narrowed to this suite's identity, cases, and slices."""
+
+        slice_folds = self._slice_folds()
+        return SPEECH_GATE_SPEC.for_suite(
+            suite_id=self.suite_id,
+            corpus_id=self.corpus_id,
+            case_ids=frozenset(case.case_id for case in self.cases),
+            extra_run_metrics=frozenset(fold.run_metric for fold in slice_folds),
+            extra_folds=slice_folds,
+        )
 
 
 def _clip_spec(case: VadSuiteCase, suite: VadSuite) -> ClipSpec:
@@ -439,42 +461,19 @@ def run_speech_evaluation(
     )
 
 
-def _required_run_metric_names(suite: VadSuite) -> set[str]:
-    names = set(_REQUIRED_RUN_METRICS)
-    for case in suite.cases:
-        names.add(f"speech.vad_f1.lang.{case.language.value}")
-        names.add(f"speech.vad_f1.cond.{case.condition}")
-        names.add(f"speech.vad_f1.vert.{case.vertical}")
-    return names
-
-
 def speech_gates_pass(run: EvaluationRun, suite: VadSuite) -> bool:
     """Suite-aware, fail-closed gate for a VAD run.
 
-    The shared ``EvaluationRun.gates_pass()`` is non-suite-aware: it flattens whatever
-    metrics happen to be present and passes as long as at least one gating metric passes, so
-    an artifact missing every VAD metric can still "pass". run-speech does not inherit that.
-    This gate additionally requires that the run corresponds to the reviewed suite, that
-    every case and every required run metric is present, and only then that all cases passed
-    and every gating metric met its threshold. Any missing required metric fails closed.
+    PR 24 hand-rolled this because the shared gate was fail-open. The shared gate now takes
+    the suite's own declaration of a complete artifact, so this is a thin narrowing of it and
+    the duplicated threshold fold is gone. Nothing was given up: ``VadSuite.gate_spec()``
+    still requires the run to match the reviewed suite and corpus, to carry exactly the
+    reviewed case set, and to carry every required per-case and per-slice metric before any
+    case status or threshold is consulted - and it additionally checks that the mean, min,
+    p95, and per-slice aggregates agree with the per-case results they summarize.
     """
 
-    if run.status is not EvaluationRunStatus.COMPLETED or not run.cases:
-        return False
-    if run.suite_id != suite.suite_id or run.corpus_id != suite.corpus_id:
-        return False
-    if {case.case_id for case in run.cases} != {case.case_id for case in suite.cases}:
-        return False
-    if not _required_run_metric_names(suite) <= {metric.name for metric in run.metrics}:
-        return False
-    for case in run.cases:
-        if case.status is not EvaluationCaseStatus.PASSED:
-            return False
-        if not _REQUIRED_CASE_METRICS <= {metric.name for metric in case.metrics}:
-            return False
-    all_metrics = (*run.metrics, *(metric for case in run.cases for metric in case.metrics))
-    gating = [result for metric in all_metrics if (result := metric.meets_threshold()) is not None]
-    return bool(gating) and all(gating)
+    return gates_pass(run, suite.gate_spec())
 
 
 def _hardware_label(
