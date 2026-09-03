@@ -29,9 +29,13 @@ from pitchbot.benchmarks.retrieval import (
     validate_retrieval_suite,
 )
 from pitchbot.benchmarks.speech import (
+    DETECTOR_PROFILE_BUILDERS,
+    DetectorProfile,
+    VadSuite,
     load_speech_suite,
     run_speech_evaluation,
     validate_speech_suite,
+    webrtc_detector_profile,
 )
 
 
@@ -41,6 +45,27 @@ def _gate_line(report: EvaluationGateReport) -> str:
     if report.passed:
         return "artifact-gates=pass"
     return f"artifact-gates=fail; reasons={report.summary()}"
+
+
+def _speech_detector_profile(suite: VadSuite, detector: str, webrtc_mode: int) -> DetectorProfile:
+    """Resolve the named detector, keeping provenance attached to the factory."""
+
+    if detector == "webrtc":
+        return webrtc_detector_profile(suite, mode=webrtc_mode)
+    return DETECTOR_PROFILE_BUILDERS[detector](suite)
+
+
+def _detector_line(profile: DetectorProfile) -> str:
+    """The ADR-0004 identity of what was measured, in full rather than as a digest."""
+
+    configuration = profile.as_configuration()
+    return (
+        f"detector={configuration['detector_id']} algorithm={configuration['algorithm']} "
+        f"package={configuration['package']}=={configuration['package_version']} "
+        f"license={configuration['license']} weights={configuration['model_weights']} "
+        f"frame-source={configuration['frame_source']} "
+        f"settings={json.dumps(configuration['settings'], sort_keys=True)}"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +117,22 @@ def build_parser() -> argparse.ArgumentParser:
     speech_run.add_argument("--run-id", required=True)
     speech_run.add_argument("--git-revision", required=True)
     speech_run.add_argument("--max-rtf", type=float, default=None)
+    speech_run.add_argument(
+        "--detector",
+        choices=sorted(DETECTOR_PROFILE_BUILDERS),
+        default="mock",
+        help=(
+            "which detector to measure; 'webrtc' needs the optional webrtc-vad extra "
+            "and is scored on the clip's real PCM rather than the byte-length proxy"
+        ),
+    )
+    speech_run.add_argument(
+        "--webrtc-mode",
+        type=int,
+        choices=(0, 1, 2, 3),
+        default=2,
+        help="webrtcvad aggressiveness; ignored unless --detector webrtc",
+    )
     speech_run.add_argument("--force", action="store_true")
     commands.add_parser("environment")
     return parser
@@ -191,10 +232,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "run-speech":
         vad_suite = load_speech_suite(args.path)
+        profile = _speech_detector_profile(vad_suite, args.detector, args.webrtc_mode)
+        print(_detector_line(profile))
         run = run_speech_evaluation(
             args.path,
             run_id=args.run_id,
             git_revision=args.git_revision,
+            detector_profile=profile,
             max_real_time_factor=args.max_rtf,
         )
         write_text_atomically(

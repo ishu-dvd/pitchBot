@@ -982,3 +982,127 @@
   change to `Settings`: `require_ai_disclosure`, `require_dnd_check`, `require_calling_hours`,
   and `allowlist_enabled` are removed, but no in-repo code read them, so nothing breaks.
   Reverting restores the four dead settings and their misleading documentation exactly.
+
+## PR 30: First real speech provider, and the corpus that cannot select one
+
+- **Branch:** `bench/webrtc-vad-provider`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 29 commit `8f72520`.
+- **Scope:** ADR-0004 blocks selecting any speech provider without a reproducible measured
+  result; PR 24 built the corpus and `run-speech`, and PR 27 made the gate genuinely
+  fail-closed, so the measurement machinery finally exists. This is the first PR in which a
+  real model enters the system - and the first in which the harness is pointed at a real
+  candidate and returns a verdict about the harness.
+  1. **A `py-webrtcvad` adapter behind the unchanged contract
+     (`pitchbot/adapters/webrtc_vad.py`).** `detect(AudioChunk) -> VoiceActivity` is
+     implemented as written; `contracts.py` is untouched, which is what ADR-0002 anticipated.
+     The dependency is **optional**: the module resolves `webrtcvad` through `importlib` at
+     import and exposes `WEBRTC_VAD_AVAILABLE`, so it imports cleanly when the extension is
+     absent and only *construction* raises - a `PermanentAdapterError` naming the extra. It
+     is deliberately **not** re-exported from `pitchbot.adapters.__init__`, so the core
+     import graph structurally cannot acquire a dependency on it. WebRTC's real frame
+     constraints (mono 16-bit PCM, 8/16/32/48 kHz, exactly 10/20/30 ms) are **refused, not
+     repaired**: resampling or padding would change the signal being measured. `confidence`
+     is a fixed constant, because `webrtcvad` exposes one boolean per frame and no posterior,
+     and a number that varied with the decision would be fabricated.
+  2. **The runner feeds a real detector real audio (`benchmarks/speech.py`,
+     `benchmarks/audio.py`).** The corpus's `frames` are *not* PCM - they are truncated byte
+     strings whose length stands in for a variable-bitrate codec, which is what the byte-size
+     mock classifies on. A new `VadFrameSource` selects between that proxy and
+     `SyntheticClip.pcm_frames`, a slice of the bytes the committed `audio_sha256` already
+     covers, and the source is carried on the detector profile rather than as a free flag so
+     it cannot be mismatched. The corpus's declared `frame_ms: 20` at `sample_rate_hz: 16000`
+     is 640 bytes, which WebRTC accepts directly, so nothing was resampled and the audio
+     scored is byte-for-byte the hashed audio.
+  3. **The artifact records what was actually measured.** `configuration_sha256` hardcoded
+     `"mock-voice-activity-detector"`, so a run with an injected detector produced a digest
+     claiming the placeholder. A `DetectorProfile` now carries detector id, algorithm,
+     package, exact version, license, weights, frame source, and settings into that hash, and
+     `run-speech` prints the whole thing, because a reviewer checking an ADR-0004 claim needs
+     the version and license, not a digest of them. An unlabelled `detector_factory` is
+     profiled as `custom` so it cannot borrow the mock's identity.
+  4. **`--detector webrtc --webrtc-mode {0,1,2,3}` on `run-speech`.** Defaults are unchanged
+     (`mock`, proxy frames, gate passes, exit `0`), so nothing existing moved.
+- **The finding - no provider is selected.** `py-webrtcvad` **fails** the suite's
+  `min_f1 = 0.85` gate in every aggressiveness mode: mean F1 0.8736 / 0.8758 / 0.8949 /
+  0.9036 and min F1 0.7937 / 0.7937 / 0.8276 / 0.8276 for modes 0-3, with two to four cases
+  failing and `run-speech` exiting non-zero. That is **not** evidence the detector is poor,
+  and it is reported as a corpus finding rather than tuned away:
+  - **Recall is 1.0000 on every case in every mode.** The detector never missed speech. The
+    entire deficit is precision.
+  - **Every false positive is WebRTC's speech-tail hangover**, plus a ~4-frame warm-up while
+    its adaptive noise model settles. Per-frame inspection shows the false positives are
+    contiguous 80-120 ms runs immediately *after* a speech segment ends. Holding briefly past
+    end-of-speech is the behaviour that stops a real VAD clipping the tail of a word; against
+    "silence" that is digital zero it can only ever cost precision.
+  - **A twelve-line RMS energy threshold scores a perfect 1.0000 mean and min F1 on this
+    corpus** - better than the real detector, with no model, no dependency and no license.
+    The corpus's speech is uniform noise at amplitude 8,000 and its non-speech is 0-300, so
+    speech-vs-non-speech here *is* an amplitude decision.
+  - **Nothing in the corpus can separate an acoustic model from an energy threshold.** It
+    contains no non-speech at speech energy - PR 24 documented avoiding that deliberately,
+    reasoning that a byte-size placeholder could not reject a loud broadband burst. Measured
+    here, neither can WebRTC: amplitude-8,000 white noise and a 440 Hz pure tone are called
+    speech in 100% of frames in every mode. Real VADs reject *low-energy stationary* noise.
+  So the number measures the corpus, not the model. Ranking candidates on it would select
+  the trivial threshold and reject every real acoustic VAD, which is the self-fulfilling
+  evaluation ADR-0004 exists to prevent. **`min_f1` on this suite is a harness regression
+  gate and is not a provider ranking.** `py-webrtcvad` remains a candidate in good standing
+  and can be re-measured with no further code once an adequate corpus exists.
+- **Safety decisions:** The generator was **not** touched to make the candidate score well,
+  and no threshold was relaxed - `min_f1` is still `0.85`, the gate still fails, and
+  `run-speech` still exits non-zero on it, which is the honest result. The corpus, its seeds,
+  and its committed hashes are byte-identical; `validate-speech-suite` verifies all eight.
+  Nothing was added to the artifact schema, so every existing artifact stays valid. The
+  dependency is optional and stays that way: the pre-existing suite was run with the
+  extension **uninstalled** and returns exactly **479 passed**, `pitchbot` imports, and
+  `ruff`/`mypy` are clean in that state too - the adapter imports `webrtcvad` through
+  `importlib` precisely so `mypy` reports the same thing with and without the extra, rather
+  than untyped-import when present and missing-import when absent. CI installs the extra only
+  *after* the suite has already passed without it. The candidate needs no credentials, no
+  hosted inference, and no download: the GMM parameters are compiled into a 19.4 KiB C
+  extension, so there is no separate model license and no runtime fetch, and a test blocks
+  socket access to keep it that way. License was manually reviewed from the `LICENSE` inside
+  the wheel - MIT binding over BSD-3-Clause WebRTC C code - closing the `NOASSERTION` item
+  `docs/BENCHMARKS.md` had left open. Silero VAD was rejected before measurement on cost, not
+  quality, and the reasoning is recorded with measured numbers rather than asserted: 27.6 MiB
+  sdist requiring `torch>=1.12` whose own `cp312`/`win_amd64` wheel is 118.4 MiB, versus
+  19.4 KiB with zero dependencies, on a box with 8 logical CPUs and no accelerator.
+- **Performance:** `py-webrtcvad` is unambiguously cheap enough for the target hardware:
+  **real-time factor 0.000655 mean / 0.000704 p95** for a single corpus pass (~1,500x real
+  time; 0.000576 amortised over 20 repetitions, 163.2 s of audio in 0.094 s) and **60.2 KiB
+  peak Python allocation** for a whole run, single-threaded and CPU-only. It costs roughly
+  twice the byte-length placeholder (0.000324 mean, 27.4 KiB) - three orders of magnitude
+  inside real time either way. Measuring that exposed a defect in the runner: cases were
+  timed with `time.monotonic_ns`, whose Windows resolution is **15.625 ms**, so a
+  sub-millisecond pass quantised every `speech.real_time_factor` to zero and `--max-rtf` -
+  the only gate that can reject a candidate too heavy for the box - had nothing to check.
+  The runner now uses `time.perf_counter_ns` (monotonic, ~200 ns observed here), which is
+  what makes the per-case numbers above exist at all. Labeled hardware: Windows 11
+  (10.0.26200), AMD64 Family 25 Model 1, 16 logical CPUs, no accelerator, Python 3.12.10 -
+  more logical CPUs than the 8-CPU target on record, which does not affect the conclusion
+  for a single-threaded detector running 1,500x faster than real time.
+- **Deferred:** Selecting a VAD provider, which needs a corpus that can rank one. Concretely
+  that corpus needs spectrally speech-like speech (formants, harmonicity, an amplitude
+  envelope) rather than uniform noise; non-speech *at speech energy* - loud stationary
+  broadband, hum, music, impulsive noise - labeled non-speech; a noise floor that is not
+  digital zero; and either boundary tolerance in the metric or a declared hangover budget
+  scored against the 700 ms endpointing budget the suite already documents rather than as a
+  20 ms precision error. Reviewed real consented or licensed audio is required for anything
+  claiming to rank quality. Silero VAD is registered but unmeasured. STT and TTS stay blocked;
+  no `wer`, `cer`, or naturalness metric is emitted and `speech-cases.json` is untouched.
+  `run-retrieval` and `run-graph-retrieval` still time with `monotonic_ns` and have the same
+  resolution defect - their budgets are tens to hundreds of milliseconds so the effect is
+  smaller, and fixing them is outside this PR's scope. `run-speech --detector webrtc`
+  surfaces a missing extension as an unhandled `PermanentAdapterError` traceback whose last
+  line carries the install command; that matches the house rule that integrity failures raise
+  rather than degrade, but a friendlier CLI message is a reasonable follow-up. Measured
+  start/end endpointing latency and false-start counts still need a selected detector.
+- **Rollback:** Revert PR 30. It adds no schema migration, persistent state, committed
+  binary, model weight, credential, network call, or external side effect, and selects no
+  provider, so nothing downstream depends on it. The optional extra, the adapter module, and
+  `--detector` disappear; `run-speech` returns to the mock on proxy frames with unchanged
+  defaults. Two behaviour changes do not revert cleanly and are deliberate: the artifact's
+  `configuration_sha256` returns to naming the mock unconditionally, and case timing returns
+  to the 15.625 ms clock, so previously emitted digests differ across the revert. The corpus,
+  its hashes, and the emitted artifact format are untouched either way.

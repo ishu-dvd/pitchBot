@@ -19,10 +19,12 @@ import os
 import platform
 import re
 import tracemalloc
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from time import monotonic_ns
+from time import perf_counter_ns
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -57,9 +59,61 @@ from pitchbot.benchmarks.models import (
     EvaluationRunStatus,
     MetricDirection,
 )
-from pitchbot.domain import LanguageCode
+from pitchbot.domain import JsonValue, LanguageCode
 
 _CAPTURE_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+class VadFrameSource(StrEnum):
+    """Which representation of a generated clip a detector is fed.
+
+    The generator emits two views of the same audio, and they are not interchangeable.
+    ``ENCODED_LENGTH_PROXY`` is a stream of truncated byte strings whose *length* tracks
+    frame energy, standing in for a variable-bitrate codec; it is what the byte-size
+    ``MockVoiceActivityDetector`` classifies on, and it is not decodable audio.
+    ``PCM`` is the mono 16-bit sample data itself, which is what a real acoustic detector
+    consumes. Feeding one to a detector built for the other does not degrade a score, it
+    is simply invalid input - so the frame source is a property of the detector profile
+    rather than a free-floating flag, and cannot be mismatched by accident.
+    """
+
+    ENCODED_LENGTH_PROXY = "encoded-length-proxy"
+    PCM = "pcm"
+
+
+@dataclass(frozen=True, slots=True)
+class DetectorProfile:
+    """What detector a run measured, in the detail ADR-0004 requires to be captured.
+
+    The identity is hashed into ``configuration_sha256``, so two runs of the same corpus
+    with different detectors, versions, or settings are provably distinct artifacts. It is
+    also printed by ``run-speech``, because a reviewer checking an ADR-0004 claim needs the
+    exact package version and license, not a digest of them.
+    """
+
+    detector_id: str
+    algorithm: str
+    package: str
+    package_version: str
+    license: str
+    model_weights: str
+    frame_source: VadFrameSource
+    factory: Callable[[], VoiceActivityDetector]
+    settings: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def as_configuration(self) -> dict[str, JsonValue]:
+        """The canonical, JSON-serialisable description that is hashed and printed."""
+
+        return {
+            "algorithm": self.algorithm,
+            "detector_id": self.detector_id,
+            "frame_source": self.frame_source.value,
+            "license": self.license,
+            "model_weights": self.model_weights,
+            "package": self.package,
+            "package_version": self.package_version,
+            "settings": dict(self.settings),
+        }
 
 
 class SpeechSuiteModel(BaseModel):
@@ -192,16 +246,78 @@ def _default_detector_factory(suite: VadSuite) -> Callable[[], VoiceActivityDete
     return lambda: MockVoiceActivityDetector(speech_threshold_bytes=threshold)
 
 
+def mock_detector_profile(suite: VadSuite) -> DetectorProfile:
+    """The shipped byte-size placeholder. Not a provider, and never a benchmark claim."""
+
+    return DetectorProfile(
+        detector_id="mock-voice-activity-detector",
+        algorithm="encoded-frame-byte-length-heuristic",
+        package="pitchbot",
+        package_version="in-repo",
+        license="in-repo",
+        model_weights="none",
+        frame_source=VadFrameSource.ENCODED_LENGTH_PROXY,
+        factory=_default_detector_factory(suite),
+        settings={"speech_threshold_bytes": suite.speech_threshold_bytes},
+    )
+
+
+def webrtc_detector_profile(suite: VadSuite, *, mode: int = 2) -> DetectorProfile:
+    """The py-webrtcvad GMM detector, measured on the clip's real PCM.
+
+    Importing the adapter is safe without the optional extension; constructing the
+    detector is what requires it, and the factory is only called by the runner.
+    """
+
+    from pitchbot.adapters.webrtc_vad import (
+        ALGORITHM,
+        LICENSE,
+        MODEL_WEIGHTS,
+        PROVIDER_ID,
+        WebRtcVoiceActivityDetector,
+        installed_distribution,
+    )
+
+    distribution = installed_distribution()
+    package, version = distribution if distribution is not None else (PROVIDER_ID, "not-installed")
+    sample_rate_hz = suite.sample_rate_hz
+    return DetectorProfile(
+        detector_id=PROVIDER_ID,
+        algorithm=ALGORITHM,
+        package=package,
+        package_version=version,
+        license=LICENSE,
+        model_weights=MODEL_WEIGHTS,
+        frame_source=VadFrameSource.PCM,
+        factory=lambda: WebRtcVoiceActivityDetector(mode=mode, sample_rate_hz=sample_rate_hz),
+        settings={"mode": mode, "sample_rate_hz": sample_rate_hz},
+    )
+
+
+DETECTOR_PROFILE_BUILDERS: Mapping[str, Callable[[VadSuite], DetectorProfile]] = {
+    "mock": mock_detector_profile,
+    "webrtc": webrtc_detector_profile,
+}
+
+
+def _clip_frames(clip: SyntheticClip, frame_source: VadFrameSource) -> tuple[bytes, ...]:
+    if frame_source is VadFrameSource.PCM:
+        return clip.pcm_frames
+    return clip.frames
+
+
 def _detect_clip(
     clip: SyntheticClip,
     suite: VadSuite,
     detector: VoiceActivityDetector,
     clock: Callable[[], int],
+    frame_source: VadFrameSource,
 ) -> tuple[list[bool], float, bool]:
     predicted: list[bool] = []
     error = False
+    frames = _clip_frames(clip, frame_source)
     started = clock()
-    for index, frame in enumerate(clip.frames):
+    for index, frame in enumerate(frames):
         chunk = AudioChunk(
             data=frame,
             captured_at=_CAPTURE_EPOCH,
@@ -225,9 +341,10 @@ def _run_vad_case(
     *,
     detector_factory: Callable[[], VoiceActivityDetector],
     clock: Callable[[], int],
+    frame_source: VadFrameSource,
 ) -> EvaluationCaseResult:
     detector = detector_factory()
-    predicted, processing_seconds, error = _detect_clip(clip, suite, detector, clock)
+    predicted, processing_seconds, error = _detect_clip(clip, suite, detector, clock, frame_source)
     rtf = real_time_factor(processing_seconds, clip.audio_seconds)
     if error:
         precision = recall = f1 = 0.0
@@ -289,13 +406,21 @@ def _score_cases(
     clips: tuple[SyntheticClip, ...],
     detector_factory: Callable[[], VoiceActivityDetector],
     clock: Callable[[], int],
+    frame_source: VadFrameSource,
 ) -> tuple[float, tuple[EvaluationCaseResult, ...]]:
     already_tracing = tracemalloc.is_tracing()
     if not already_tracing:
         tracemalloc.start()
     try:
         results = tuple(
-            _run_vad_case(case, clip, suite, detector_factory=detector_factory, clock=clock)
+            _run_vad_case(
+                case,
+                clip,
+                suite,
+                detector_factory=detector_factory,
+                clock=clock,
+                frame_source=frame_source,
+            )
             for case, clip in zip(suite.cases, clips, strict=True)
         )
         peak_bytes = 0 if already_tracing else tracemalloc.get_traced_memory()[1]
@@ -359,17 +484,48 @@ def run_speech_evaluation(
     run_id: str,
     git_revision: str,
     detector_factory: Callable[[], VoiceActivityDetector] | None = None,
-    clock: Callable[[], int] = monotonic_ns,
+    detector_profile: DetectorProfile | None = None,
+    clock: Callable[[], int] = perf_counter_ns,
     max_real_time_factor: float | None = None,
 ) -> EvaluationRun:
+    """Score ``path``'s corpus with one detector and emit an ``EvaluationRun``.
+
+    ``detector_profile`` carries both the factory and the provenance, and is the way a
+    real provider is measured. ``detector_factory`` remains supported for ad-hoc detectors
+    that have no provenance to record - it is profiled as ``custom`` on the proxy frames,
+    so an unlabelled detector cannot be mistaken for a labelled provider in the artifact's
+    configuration hash. Supplying both is a caller error.
+
+    The default clock is ``perf_counter_ns``, not ``monotonic_ns``. Both are monotonic
+    nanosecond counters, but on Windows ``monotonic`` has a 15.625 ms resolution while a
+    per-case VAD pass costs well under a millisecond, so every ``speech.real_time_factor``
+    quantised to 0 or to a whole tick - which silently emptied the one gate ``--max-rtf``
+    exists to enforce. ``perf_counter`` is the documented clock for short intervals and
+    measures ~200 ns here.
+    """
+
+    if detector_factory is not None and detector_profile is not None:
+        raise ValueError("supply detector_profile or detector_factory, not both")
     suite = load_speech_suite(path)
     clips = verify_and_build_clips(suite)
     manifest_hash = canonical_manifest_sha256(path)
-    factory = detector_factory or _default_detector_factory(suite)
+    if detector_factory is not None:
+        profile = DetectorProfile(
+            detector_id="custom",
+            algorithm="unspecified",
+            package="unspecified",
+            package_version="unspecified",
+            license="unspecified",
+            model_weights="unspecified",
+            frame_source=VadFrameSource.ENCODED_LENGTH_PROXY,
+            factory=detector_factory,
+        )
+    else:
+        profile = detector_profile if detector_profile is not None else mock_detector_profile(suite)
     configuration_hash = hashlib.sha256(
         json.dumps(
             {
-                "detector": "mock-voice-activity-detector",
+                "detector": profile.as_configuration(),
                 "frame_ms": suite.frame_ms,
                 "generator_version": GENERATOR_VERSION,
                 "max_real_time_factor": max_real_time_factor,
@@ -384,7 +540,13 @@ def run_speech_evaluation(
         ).encode()
     ).hexdigest()
     started_at = datetime.now(UTC)
-    peak_python_kib, case_results = _score_cases(suite, clips, factory, clock)
+    peak_python_kib, case_results = _score_cases(
+        suite,
+        clips,
+        profile.factory,
+        clock,
+        profile.frame_source,
+    )
     completed_at = datetime.now(UTC)
 
     f1_values = [_metric_value(item, "speech.vad_f1") for item in case_results]
@@ -488,14 +650,19 @@ def _hardware_label(
 
 
 __all__ = [
+    "DETECTOR_PROFILE_BUILDERS",
+    "DetectorProfile",
     "SegmentKind",
+    "VadFrameSource",
     "VadSuite",
     "VadSuiteCase",
     "VadSuiteSegment",
     "build_case_clip",
     "load_speech_suite",
+    "mock_detector_profile",
     "run_speech_evaluation",
     "speech_gates_pass",
     "validate_speech_suite",
     "verify_and_build_clips",
+    "webrtc_detector_profile",
 ]

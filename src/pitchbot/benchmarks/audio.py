@@ -133,6 +133,23 @@ class SyntheticClip:
     def truth_intervals(self) -> tuple[Interval, ...]:
         return frames_to_intervals(self.frame_is_speech, self.spec.frame_ms)
 
+    @property
+    def pcm_frames(self) -> tuple[bytes, ...]:
+        """The same clip as raw mono 16-bit PCM frames, one per entry of ``frames``.
+
+        ``frames`` are a *variable-bitrate length proxy*: truncated byte strings whose
+        length tracks energy, which is what the byte-size mock detector consumes and is
+        not decodable audio. A real acoustic detector needs the samples themselves, so it
+        is fed this view instead. This is a slice of the bytes ``generate_clip`` already
+        produced - no resampling, requantisation, or regeneration - so the committed
+        ``audio_sha256`` still describes exactly what a detector was scored on.
+        """
+
+        width = self.spec.samples_per_frame * _SAMPLE_WIDTH_BYTES
+        return tuple(
+            self.pcm[index * width : (index + 1) * width] for index in range(len(self.frames))
+        )
+
 
 def frames_to_intervals(flags: tuple[bool, ...], frame_ms: int) -> tuple[Interval, ...]:
     """Merge contiguous speech frames into second-based intervals for the VAD metric."""
