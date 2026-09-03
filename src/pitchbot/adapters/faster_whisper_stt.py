@@ -70,6 +70,7 @@ from __future__ import annotations
 import array
 import asyncio
 import importlib
+import logging
 import math
 import sys
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -81,6 +82,9 @@ from typing import Any, Final
 from pitchbot.adapters.contracts import AudioChunk, SpeechToTextAdapter, TranscriptChunk
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.domain import LanguageCode
+from pitchbot.speech.scripts import repair_telugu_transcript
+
+logger = logging.getLogger(__name__)
 
 
 def _import(name: str) -> ModuleType | None:
@@ -184,6 +188,7 @@ PR 33 found a non-commercial license hiding behind a finetune.
 _LANGUAGE_BY_WHISPER_CODE: Final[Mapping[str, LanguageCode]] = {
     "en": LanguageCode.ENGLISH,
     "hi": LanguageCode.HINDI,
+    "te": LanguageCode.TELUGU,
 }
 """Whisper reports one ISO code; anything outside this map becomes ``UNKNOWN``.
 
@@ -195,9 +200,24 @@ that declaration is reported as-is and Whisper runs in auto-detect.
 """
 
 _WHISPER_FORCEABLE: Final[frozenset[LanguageCode]] = frozenset(
-    {LanguageCode.ENGLISH, LanguageCode.HINDI}
+    {LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU}
 )
 """Only these can be forced on Whisper; ``MIXED``/``UNKNOWN`` are not Whisper languages."""
+
+_SCRIPT_REPAIRED: Final[frozenset[LanguageCode]] = frozenset({LanguageCode.TELUGU})
+"""Languages whose transcript Whisper writes in the wrong alphabet.
+
+Telugu is the measured case: ``small`` and ``medium`` both returned **100% Devanagari and
+0% Telugu letters** on every clip, while auto-detecting the language as ``te`` at 0.76-0.98
+confidence. The sounds are right and the script is Hindi's. Transliterating afterwards takes
+character error rate from 100% to 41%; the alternative fix, an ``initial_prompt`` script
+anchor, corrects the alphabet and destroys the words (CER 90-116%). See
+:mod:`pitchbot.speech.scripts` for the measurement and the mapping.
+
+Repair runs only when the caller **declared** the language, never on an auto-detected one.
+A detected label is a guess, and rewriting a Hindi transcript into Telugu on the strength
+of a guess would corrupt the language this project already supports.
+"""
 
 
 def require_faster_whisper() -> tuple[ModuleType, ModuleType]:
@@ -482,7 +502,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
                 # Cumulative, not per-segment: a consumer that reads a single partial must
                 # see everything said so far, because Whisper never revises a segment.
                 yield TranscriptChunk(
-                    text="".join(pieces).strip(),
+                    text=self._repair_script("".join(pieces).strip()),
                     language=self._resolve_language(info.language, info.language_probability),
                     confidence=self._segment_confidence(segment),
                     is_final=False,
@@ -494,12 +514,30 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         # Exactly one final chunk, carrying the complete text. SpeechTurnPipeline keeps the
         # last final transcript, so a per-segment final would discard everything before it.
         yield TranscriptChunk(
-            text="".join(pieces).strip(),
+            text=self._repair_script("".join(pieces).strip()),
             language=self._resolve_language(info.language, info.language_probability),
             confidence=min(1.0, max(0.0, confidence)),
             is_final=True,
             sequence=sequence,
         )
+
+    def _repair_script(self, text: str) -> str:
+        """Rewrite a declared-Telugu transcript that Whisper returned in Devanagari.
+
+        Applied to partials as well as the final chunk so a consumer never sees the text
+        change alphabet mid-turn, which would look like the model changing its mind about
+        the language rather than a transliteration being applied.
+        """
+
+        if self._language not in _SCRIPT_REPAIRED:
+            return text
+        repaired, changed = repair_telugu_transcript(text)
+        if changed:
+            logger.debug(
+                "transliterated declared-%s transcript from Devanagari",
+                self._language.value,
+            )
+        return repaired
 
 
 __all__ = [

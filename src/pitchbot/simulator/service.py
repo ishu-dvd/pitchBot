@@ -87,6 +87,7 @@ DISCLOSURES = {
     LanguageCode.ENGLISH: "Hello, I am PitchBot, an AI sales assistant. This is a simulation.",
     LanguageCode.HINDI: "नमस्ते, मैं पिचबॉट हूँ, एक एआई सेल्स असिस्टेंट। यह एक सिमुलेशन है।",
     LanguageCode.MIXED: "Namaste, main PitchBot hoon, ek AI sales assistant. Yeh simulation hai.",
+    LanguageCode.TELUGU: "నమస్కారం, నేను పిచ్‌బాట్, ఒక AI సేల్స్ అసిస్టెంట్. ఇది ఒక సిమ్యులేషన్.",
     LanguageCode.UNKNOWN: "Hello, I am PitchBot, an AI sales assistant. Please choose a language.",
 }
 

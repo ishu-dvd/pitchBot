@@ -1825,3 +1825,58 @@
   dependency; every new setting defaults to the previous behaviour. Reverting returns the
   fixed per-language reply, which is a regression in relevance but not in safety.
 
+
+## PR 40: Speak Telugu, and let a person actually try it
+
+- **Change:** Telugu becomes the third supported language, chosen and shaped by
+  measurement rather than by assumption, and `pitchbot-talk` makes the whole product
+  reachable from a terminal for the first time.
+- **Why:** Two gaps. The project could be *measured* but not *used* -- nothing let a person
+  hold a conversation with it and see why it replied as it did, which is the only way to
+  judge whether it is any good. And adding a language turned out to be far less mechanical
+  than the phrase tables suggested.
+- **Measured first, as required:** Piper's Telugu voices, faster-whisper on Telugu, and
+  three-language model comparison. Full results in `docs/BENCHMARKS.md`. The findings
+  that changed the design: two `te_IN` voices are **CC-BY-4.0**, making Telugu the only
+  Indic language this project can ship commercially; Whisper writes Telugu in **Devanagari
+  100% of the time** at both `small` and `medium` while naming the language correctly;
+  an `initial_prompt` script anchor fixes the alphabet and destroys the words; and
+  transliteration takes CER from 100% to 41%.
+- **Three bugs found by using it, not by testing it:**
+  1. **Telugu had no safety vocabulary.** `నాకు వద్దు, దయచేసి మళ్ళీ కాల్ చేయవద్దు` --
+     "don't call me again" -- was answered with the next qualifying question. Every test
+     passed, because every opt-out test was written in English or Hindi. A missing phrase
+     table raises `KeyError` on turn one; a missing *safety* vocabulary fails silently
+     and in the direction that keeps the conversation going.
+  2. **`booking form` was read as the *books* business.** Vocabulary matching was raw
+     substring, so `toyota` was *toys* too. A sales agent stating a false fact
+     confidently is a credibility failure, so this is fixed here rather than deferred.
+  3. **The CLI displayed per-turn facts as if they were cumulative**, making a working
+     conversation look like it kept forgetting. Caught before shipping a screenshot of a
+     bug that does not exist.
+- **Guard against recurrence:** `tests/test_language_coverage.py` drives every assertion
+  from `supported_languages()`, so a language added without opt-out detection, abuse
+  detection, a disclosure, safety replies or slot phrases fails at the point it is added.
+  Verified by deleting the Telugu opt-out phrases and confirming the suite reproduces the
+  original bug (`CONTINUE` instead of `STOP`).
+- **Vocabulary matching:** word-boundary plus a **restricted** suffix set. The existing
+  `_INFLECTIONAL_SUFFIXES` is correct for safety detection, where over-matching is the
+  safe bias, and wrong for business terms, where it is not: `ing` turns `book` into
+  `booking`. Splitting off the derivational endings keeps `payments` matching
+  `payment` and `किताबों` matching `किताब`.
+- **Phrase tables restructured:** one `LanguagePhrases` block per language instead of
+  four parallel maps. Half-adding a language is now unwriteable rather than merely untested
+  -- the omission that produced finding (1).
+- **Deferred:** Telugu ASR at 41% CER is usable for slot filling and **not** for showing a
+  buyer their own words; a second, non-synthetic Telugu corpus would test whether the
+  Devanagari result is a Whisper property or a Piper-synthesis artifact. Business
+  vocabulary is still 6 types and 5 features, so `furniture` and `salon` fill nothing;
+  budget still needs digits and timeline is still narrow, both now visible in the CLI's own
+  limitations table. Language detection does not exist -- the caller declares the language,
+  which is fine for the CLI and not for a real call. No model is selected; ADR-0004's gate
+  still needs the extraction corpus, and the three-language comparison strengthens rather
+  than resolves it, since neither model handled transliterated Telugu at all.
+- **Rollback:** Revert PR 40. No schema migration and no persistent state. The
+  `evaluation-run-v1` schema gains one enum value (`te`); reverting removes it, which is
+  backward-compatible for readers. Reverting restores the substring vocabulary matching,
+  which is a correctness regression, and removes Telugu entirely.

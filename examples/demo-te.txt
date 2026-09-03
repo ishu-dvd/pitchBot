@@ -1,0 +1,8 @@
+# Telugu buyer. Run: pitchbot-talk --language te --script examples/demo-te.txt
+# Add --speak to hear it, using the CC-BY-4.0 te_IN-venkatesh-medium voice.
+మేము ఆన్‌లైన్‌లో దుస్తులు అమ్ముతాము.
+వెబ్‌సైట్‌లో ఆన్‌లైన్ చెల్లింపు కావాలి.
+మా బడ్జెట్ 200000 రూపాయలు.
+
+# "I don't want it, please don't call again" - the conversation must close here.
+నాకు వద్దు, దయచేసి మళ్ళీ కాల్ చేయవద్దు.

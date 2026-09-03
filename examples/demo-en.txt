@@ -1,0 +1,12 @@
+# A buyer who answers cleanly, so each turn fills a slot and the agent moves on.
+# Run: pitchbot-talk --script examples/demo-en.txt
+We are an online clothing store.
+The site needs online payments and a catalogue.
+Our budget is 200000 rupees.
+We want to launch in 2 months.
+
+# The same buyer changes their mind, which the agent counts as a goal change.
+Actually we also sell toys now.
+
+# And finally asks not to be contacted. The conversation closes here and cannot reopen.
+Please do not call me again.

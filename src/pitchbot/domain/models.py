@@ -21,6 +21,7 @@ class DomainModel(BaseModel):
 class LanguageCode(StrEnum):
     ENGLISH = "en"
     HINDI = "hi"
+    TELUGU = "te"
     MIXED = "mixed"
     UNKNOWN = "unknown"
 
