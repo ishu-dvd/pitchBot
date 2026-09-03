@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     # available, so the README's "real-time audio disabled by default" claim is a
     # documented intention, not a code-enforced gate. Before any live channel ships
     # this must either gate the audio socket or be removed. See docs/PROGRESS.md
-    # (PR 30, Deferred). The safety-relaxation knobs (require_ai_disclosure,
+    # (PR 29, Deferred). The safety-relaxation knobs (require_ai_disclosure,
     # require_dnd_check, require_calling_hours, allowlist_enabled) were removed in
-    # PR 30 because the ActionPolicy enforces those gates unconditionally and a
+    # PR 29 because the ActionPolicy enforces those gates unconditionally and a
     # switch that disables a mandatory safety gate is strictly less safe than none.
     enable_real_time_audio: bool = False
     enable_hosted_demo: bool = False

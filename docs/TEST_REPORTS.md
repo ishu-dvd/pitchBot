@@ -1,5 +1,17 @@
 # Test Reports
 
+> **Maintenance note (PR 31):** These per-PR test reports are maintained through **PR 12** (the
+> most recent entries below cover PR 11's evaluation contracts and PR 12's durable conversation
+> journal). From **PR 13 onward**, per-PR validation is recorded instead in the `Scope` / `Safety
+> decisions` / `Test decisions` narrative of [PROGRESS.md](PROGRESS.md) and enforced by the CI
+> gates in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml): ruff lint/format, mypy,
+> pytest, an Alembic migration check, the benchmark manifest and fail-closed
+> evaluation/retrieval/VAD gates, `pip-audit`, and a Gitleaks secret scan. This document is
+> deliberately **not** backfilled for PRs 13-29 — reconstructed historical test counts cannot be
+> verified against each PR's tree at its merge time, and stating an unverifiable number would
+> violate the project's no-overstatement standard. For reference, the current tree at commit
+> `8f72520` passes ruff and mypy cleanly and 485 pytest tests.
+
 ## Foundation audit
 
 - **Date:** 2026-08-30
