@@ -371,6 +371,7 @@ class CallbackService:
                 if incarnation is not None:
                     self._cleanup_attempts.pop((callback_id, incarnation), None)
                 self._records.pop(callback_id, None)
+            self._release_failed_cancellations(callback_id_prefix)
             if isinstance(self._scheduler, EphemeralOperationStore):
                 self._scheduler.clear_operations(operation_key_prefix)
                 self._scheduler.clear_operations(f"cleanup:{callback_id_prefix}")
@@ -424,3 +425,24 @@ class CallbackService:
     def _record_failed_cancellation(self, idempotency_key: str, callback_id: str) -> None:
         self._operation_fingerprints[idempotency_key] = ("cancel", callback_id)
         self._failed_cancellations[idempotency_key] = callback_id
+
+    def _release_failed_cancellations(self, callback_id_prefix: str) -> None:
+        # A tombstone exists so a permanently-rejected cancellation key cannot be replayed
+        # against the callback it failed to cancel. That guarantee is only meaningful while
+        # the callback is still live, and cleanup keys are minted per session, so retaining
+        # the entry past teardown leaks one permanent pair per occurrence for the lifetime of
+        # the process. Reclaim only keys whose callback is absent from every live map, so a
+        # tombstone still outlives any resource it protects.
+        live_callback_ids = set(self._records)
+        live_callback_ids.update(
+            pending.request.callback_id for pending in self._pending_schedules.values()
+        )
+        reclaimable = tuple(
+            key
+            for key, callback_id in self._failed_cancellations.items()
+            if callback_id.startswith(callback_id_prefix) and callback_id not in live_callback_ids
+        )
+        for key in reclaimable:
+            self._failed_cancellations.pop(key, None)
+            self._operation_fingerprints.pop(key, None)
+            self._operation_results.pop(key, None)

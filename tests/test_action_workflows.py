@@ -1028,3 +1028,147 @@ async def test_cleanup_key_is_unique_across_callback_id_reuse() -> None:
         "cleanup:reused-cleanup-callback:1:1",
         "cleanup:reused-cleanup-callback:2:1",
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_cancellation_tombstone_is_reclaimed_with_the_callback() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[None, PermanentAdapterError("definitive cancellation failure"), None]
+    )
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="tombstone-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="tombstone-schedule",
+    )
+    await service.schedule(request, eligible_context())
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.cancel(request.callback_id, idempotency_key="tombstone-cancel")
+
+    assert service._failed_cancellations == {"tombstone-cancel": "tombstone-callback"}
+    with pytest.raises(CallbackConflictError, match="permanently failed"):
+        await service.cancel(request.callback_id, idempotency_key="tombstone-cancel")
+
+    await service.remove_by_prefix("tombstone-", "tombstone-")
+
+    assert service._records == {}
+    assert service._failed_cancellations == {}
+    assert service._operation_fingerprints == {}
+    assert service._operation_results == {}
+
+
+@pytest.mark.asyncio
+async def test_failed_cancellation_tombstone_survives_while_its_callback_does() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[None, PermanentAdapterError("definitive cancellation failure"), None]
+    )
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="retained-tombstone-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="retained-tombstone-schedule",
+    )
+    await service.schedule(request, eligible_context())
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.cancel(request.callback_id, idempotency_key="retained-tombstone-cancel")
+
+    # A teardown of an unrelated session must not reclaim a tombstone whose callback is live.
+    await service.remove_by_prefix("unrelated-callback-", "unrelated-operation-")
+
+    assert service._failed_cancellations == {
+        "retained-tombstone-cancel": "retained-tombstone-callback"
+    }
+    with pytest.raises(CallbackConflictError, match="permanently failed"):
+        await service.cancel(request.callback_id, idempotency_key="retained-tombstone-cancel")
+    assert service.get(request.callback_id).status is CallbackStatus.CANCELLATION_REQUIRED
+    assert await service.dispatch_due(lambda _: eligible_context()) == ()
+
+
+@pytest.mark.asyncio
+async def test_pending_schedule_cancellation_tombstone_is_reclaimed_with_the_callback() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = AcceptedThenPermanentCancelAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    request = CallbackRequest(
+        lead_id=uuid4(),
+        callback_id="pending-tombstone-callback",
+        run_at=clock.now() + timedelta(minutes=1),
+        timezone="UTC",
+        idempotency_key="pending-tombstone-operation",
+    )
+    pending = asyncio.create_task(service.schedule(request, eligible_context()))
+    await scheduler.accepted.wait()
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    with pytest.raises(PermanentAdapterError, match="definitive"):
+        await service.remove_by_prefix("pending-tombstone-", "pending-tombstone-operation")
+
+    assert service._failed_cancellations
+    await service.remove_by_prefix("pending-tombstone-", "pending-tombstone-operation")
+
+    assert service._pending_schedules == {}
+    assert service._failed_cancellations == {}
+    assert service._operation_fingerprints == {}
+    assert service._operation_results == {}
+
+
+@pytest.mark.asyncio
+async def test_callback_bookkeeping_does_not_grow_with_session_count() -> None:
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = MockSchedulerAdapter(
+        failures=[None, PermanentAdapterError("definitive cancellation failure"), None] * 6
+    )
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+        max_callbacks=1,
+    )
+    for session in range(6):
+        prefix = f"session-{session}-"
+        request = CallbackRequest(
+            lead_id=uuid4(),
+            callback_id=f"{prefix}callback",
+            run_at=clock.now() + timedelta(minutes=1),
+            timezone="UTC",
+            idempotency_key=f"{prefix}schedule",
+        )
+        await service.schedule(request, eligible_context())
+        with pytest.raises(PermanentAdapterError, match="definitive"):
+            await service.cancel(request.callback_id, idempotency_key=f"{prefix}cancel")
+        await service.remove_by_prefix(prefix, prefix)
+
+        assert service._records == {}
+        assert service._failed_cancellations == {}
+        assert service._operation_fingerprints == {}
+        assert service._operation_results == {}
+        assert service._pending_schedules == {}
+        assert service._pending_cancellations == {}
+        assert service._pending_schedule_cancellations == {}
+        assert service._callback_incarnations == {}
+        assert service._cleanup_attempts == {}
