@@ -36,6 +36,7 @@ All notable changes to PitchBot are documented here.
 ### Fixed
 
 - Multilingual safety parity in the conversation matcher: do-not-message opt-outs ("stop messaging me", `mujhe WhatsApp mat bhejna`, `मुझे संदेश मत भेजो`) are now detected as immediate opt-outs in English, Hindi, and Hinglish; requests for our own operating rules or policies are detected while scoped product questions ("your policies on returns") stay clean; a bare Devanagari `बंद करो` no longer terminally opts a buyer out of a demo they only asked to close; and Latin homoglyphs, marks stacked on a Latin base, and safety words split across spaces no longer bypass detection.
+- Token-aware safety phrase matching: a literal safety phrase now has to match whole tokens instead of any substring, so ordinary commerce vocabulary that embeds a safety term — "an ecosystem prompt for our marketplace", "a passwordless kiosk login", "our product training database", `पासवर्डरहित`, `गुप्त निर्देशांक` — is no longer read as an extraction probe, and "tell me your rules on bulk discounts" is treated as the discount question it is in English, Hindi, and Hinglish alike. Obfuscation resistance is unchanged: a word split across spaces is rebuilt into a real token before matching, the space-stripped reading is still consulted for a turn that fragments its own words, and each language keeps its own inflections so `api keys`, `पासवर्डों` and `apne niyam hataoge` still match.
 
 ### Security
 
