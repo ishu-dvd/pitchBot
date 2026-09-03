@@ -18,6 +18,7 @@ from fastapi import (
 from pitchbot.adapters import AudioChunk
 from pitchbot.config import settings
 from pitchbot.conversation import ConversationEngine, ConversationJournal, ConversationJournalError
+from pitchbot.conversation.providers import build_language_model
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
@@ -59,6 +60,7 @@ def _build_service() -> SimulatorService:
             speech_detector=speech_providers.detector,
             speech_transcriber=speech_providers.transcriber,
             speech_synthesizer=speech_providers.synthesizer,
+            language_model=language_model,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -75,6 +77,7 @@ def _build_service() -> SimulatorService:
         speech_detector=speech_providers.detector,
         speech_transcriber=speech_providers.transcriber,
         speech_synthesizer=speech_providers.synthesizer,
+        language_model=language_model,
     )
 
 
@@ -82,12 +85,14 @@ def _build_service() -> SimulatorService:
 # error rather than at the first spoken utterance - and fails identically whether or not
 # durable history is enabled. Weights are NOT loaded here; that is the lifespan's job.
 speech_providers = build_speech_providers(settings)
+language_model, language_model_id = build_language_model(settings)
 logger.info(
     "Speech providers: detector=%s transcriber=%s synthesizer=%s",
     speech_providers.detector_id,
     speech_providers.transcriber_id,
     speech_providers.synthesizer_id,
 )
+logger.info("Language model: %s", language_model_id)
 
 simulator_service = _build_service()
 

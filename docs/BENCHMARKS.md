@@ -811,3 +811,97 @@ through `faster-whisper` (`small`, CPU, int8) rather than by counting bytes:
 Verbatim modulo punctuation. The turn delivered 8 frames, 260,608 bytes and 5,909.5 ms of
 audio in **376 ms** of wall clock.
 
+
+## Local language model, measured 2026-09-03
+
+Hardware: 8 logical CPU cores, no accelerator, Windows, Python 3.12. Runtime
+`onnxruntime-genai` 0.15.2 (MIT). **No model is selected**; ADR-0004's gate is not
+satisfied, because that requires a reviewed extraction corpus which does not exist here.
+
+### Runtime choice was decided by a wheel, not by benchmarks
+
+`llama-cpp-python` (MIT) is the better inference engine, and PyPI hosts **only source
+tarballs for it -- no Windows wheel at any version ever published**. Installing it on a
+clean Windows box therefore attempts a CMake/MSVC build. `onnxruntime-genai` is MIT, ships
+a `cp312-win_amd64` wheel, and declares exactly `numpy` and `onnxruntime>=1.28` -- no
+PyTorch, and `onnxruntime` is already present for Piper and faster-whisper.
+
+### The dominant cost is compiling the grammar, not running the model
+
+| Stage | Guided | Unguided |
+| --- | --- | --- |
+| `og.Generator(model, params)` | **1,934 ms** | 3 ms |
+| `append_tokens` (prefill) | 110 ms | 103 ms |
+| decode (~30 tokens) | 293 ms | 573 ms |
+| **total per call** | **2,483 ms** | 678 ms |
+
+`set_guidance` itself costs 0 ms -- it stores a string. The grammar is compiled inside the
+generator constructor, is **independent of schema size** (a one-enum schema cost 1,801 ms
+against 1,915 ms for three), and is **never cached**: repeat calls paid it again.
+
+**`rewind_to(0)` costs ~1 ms and leaves guidance working**, so one generator can serve many
+turns. That single change took Qwen2.5-0.5B from 2,350 ms to **440 ms** per turn. The
+compile becomes a startup cost, exactly like loading model weights.
+
+`set_guidance(..., enable_ff_tokens=True)` -- which **defaults to False** -- lets the
+grammar emit tokens it has already forced without running the model: generated tokens fell
+from 39 to 25 and ~540 ms per turn, with identical answers. Note that fast-forwarded tokens
+never appear in `get_next_tokens()`, so a caller collecting per-step tokens silently loses
+most of the JSON; read `get_sequence(0)` instead.
+
+### Constrained decoding is not "asking for JSON"
+
+Unguided, the same prompt returned `"buyer_intent": "budget"` and
+`"next_question": "what would you like us to build?"` -- syntactically valid JSON, both
+values outside the enum. Guided, all ten turns were schema-valid. Constraint masks the
+logits so a violating token is unreachable; prompting only makes violation less likely, and
+a small model takes the offer. This is why no retry loop exists.
+
+### Two models, and a hard trade-off
+
+Scored on `acknowledge` -- which topic the buyer just gave information about -- over ten
+turns spanning English, romanised Hinglish, and Devanagari.
+
+| Model | Licence | On disk | Startup | Per turn | Valid JSON | Correct |
+| --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B-Instruct | Apache-2.0 | 0.88 GB | 3,638 ms | **950 ms** | 10/10 | **1/10** |
+| Phi-3.5-mini-instruct | MIT | 2.78 GB | 5,404 ms | **7,263 ms** | 10/10 | **10/10** |
+
+The fast model is unusable and the accurate one is slow. Prefill dominates Phi (4,302 ms of
+6,724 ms), but **latency cannot be bought back from the prompt**: shortening the system
+instruction cut prefill to 1,699 ms and accuracy from 4/4 to 1/4. In the running
+application, with generator reuse and fast-forward, a Phi turn costs **~5.2 s** against
+**~1 ms** with no model.
+
+### Weight licences reviewed
+
+| Model | Licence | Commercial use |
+| --- | --- | --- |
+| `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct` | Apache-2.0 | yes |
+| `Qwen/Qwen3-0.6B`, `Qwen/Qwen3-1.7B` | Apache-2.0 | yes |
+| `microsoft/Phi-3.5-mini-instruct`, `microsoft/Phi-4-mini-instruct` | MIT | yes |
+| `HuggingFaceTB/SmolLM2-*-Instruct` | Apache-2.0 | yes |
+| **`Qwen/Qwen2.5-3B-Instruct`** | qwen-research | **no** -- "FOR NON-COMMERCIAL PURPOSES ONLY" |
+| `meta-llama/Llama-3.2-1B/3B-Instruct` | llama3.2 | **recorded as denied** |
+| `google/gemma-2-2b-it` | gemma | **recorded as denied** |
+
+Two traps are worth stating plainly. **The Qwen2.5 family is licence-split**: 0.5B and 1.5B
+are Apache-2.0 while 3B is not, so a family name is not a licence. And **a quantised
+re-upload does not relicense what it converts**, so the gate reads the *upstream* model id,
+never the conversion repository the files came from. Llama and Gemma are denied not because
+their terms are unusable but because accepting them (attribution obligations, an
+additional-user threshold, use policies that must be passed into this product's own terms)
+is a product decision rather than an engineering one.
+
+### Hindi coverage is the weak point, again
+
+Among licence-clean candidates: SmolLM2 declares English only; Granite and Phi-4-mini
+enumerate language lists that **exclude** Hindi; Phi-3.5-mini says only "multilingual"
+without enumerating it. The one small model that officially names Hindi is Llama-3.2, which
+is licence-disqualified. Qwen3 (Apache-2.0) claims 100+ languages and is the best
+licence-clean option on paper.
+
+Empirically, though, Phi-3.5-mini read **Devanagari and romanised Hinglish correctly on all
+ten turns** despite not enumerating Hindi. Model-card language lists and measured behaviour
+disagree here, and neither should be trusted alone -- the same lesson as PR 36's finding
+that character error rate without number normalisation is close to meaningless.

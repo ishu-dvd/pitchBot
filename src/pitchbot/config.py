@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     speech_tts_allow_non_commercial: bool = False
     speech_tts_deterministic: bool = False
 
+    # --- Local language model ---------------------------------------------------------
+    # Off by default, and for a stronger reason than the speech providers: measured on this
+    # hardware a correct answer costs ~6.7 s per turn, on top of ~2.8 s of speech latency.
+    # The deterministic planner produces a relevant reply with no model at all, so this is
+    # an improvement to *understanding* for deployments that can afford it - not a
+    # dependency the conversation has.
+    llm_provider: str = "none"
+    llm_model_dir: str = ""
+    # The UPSTREAM model id, not the conversion repository the files came from: a quantised
+    # re-upload does not relicense the weights, and the licence gate reads this.
+    llm_model_id: str = ""
+    llm_allow_non_commercial: bool = False
+
     @model_validator(mode="after")
     def validate_speech_providers(self) -> Settings:
         """Reject an unrecognised provider name at import, not at first spoken turn.
@@ -143,6 +156,24 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"speech_tts_voices language {language.strip()!r} must be one of "
                     "'en', 'hi', 'mixed', 'unknown'"
+                )
+        valid_llm = {"none", "onnx-genai"}
+        if self.llm_provider not in valid_llm:
+            raise ValueError(
+                f"llm_provider must be one of {sorted(valid_llm)}, received {self.llm_provider!r}"
+            )
+        if self.llm_provider != "none":
+            # A model with no directory or no id can never answer, so accepting the
+            # configuration would produce a server that silently never consults it.
+            if not self.llm_model_dir.strip():
+                raise ValueError(
+                    "llm_model_dir must name the ONNX Runtime GenAI model directory when "
+                    "llm_provider is enabled"
+                )
+            if not self.llm_model_id.strip():
+                raise ValueError(
+                    "llm_model_id must name the upstream model, for example "
+                    "'Qwen/Qwen2.5-0.5B-Instruct', so its licence can be checked"
                 )
         return self
 
