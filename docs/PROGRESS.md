@@ -1670,7 +1670,7 @@
 ## PR 38: Speak the reply with the server's own voice
 
 - **Branch:** `feat/tts-response-path`
-- **Status:** Implementation complete; awaiting review.
+- **Status:** Merged.
 - **Base:** Merged PR 37 commit `067f32d`.
 - **Scope:** PR 37 made the *input* providers reachable but deliberately left
   text-to-speech out, because at that point nothing could call `synthesize`. That was
@@ -1747,4 +1747,81 @@
   dependency, and every new setting defaults to the previous behaviour, so reverting is
   behaviour-preserving for any deployment that has not opted in. A deployment that *has*
   opted in returns to the browser speaking the reply.
+
+
+## PR 39: Say something relevant, and run the first local language model
+
+- **Branch:** `feat/local-model-brain`
+- **Status:** Implementation complete; awaiting review.
+- **Base:** Merged PR 38 commit `63a0f43`.
+- **Scope:** PitchBot could hear (PR 37) and speak (PR 38), and said the **same sentence
+  every turn**. Every ordinary turn returned one fixed string per language - *"Thanks. What
+  matters most next: features, budget, timeline, or the decision process?"* - regardless of
+  what the buyer had said or how often they had already answered it. Meanwhile
+  `ModelAdapter` had existed since the contracts were written with **no implementation at
+  all**, only mocks. This PR closes both, and deliberately in that order.
+  1. **A deterministic reply planner (`conversation/planning.py`).** The fix for a fixed
+     reply is not a language model; it is reading state the engine already had. The planner
+     tracks four slots - business type, requested features, budget, timeline - acknowledges
+     what was just learned, and asks for the highest-value missing one. It costs nothing,
+     needs no dependency, works offline, and improves **every** deployment.
+  2. **It stops asking.** Running it immediately exposed a worse loop than the one being
+     fixed: the shipped budget extractor is a regex that requires digits, so *"our budget is
+     around two lakh rupees"* fills no slot and the agent asked for the budget on every
+     remaining turn. A slot is now abandoned after two attempts, because "unanswerable by
+     this buyer" and "unextractable from their answer" look identical from here.
+  3. **The first real `ModelAdapter` (`adapters/onnx_genai_model.py`).** A small
+     open-weight model, run locally on CPU, whose output is **structurally constrained** to
+     a registered JSON schema. It feeds the same planner, so the model improves
+     *understanding* and can never change how a reply is composed.
+  4. **Reachable, not another orphaned seam.** `llm_provider` is wired through a factory,
+     the service, and the engine, defaulting to `none` - the lesson of PR 37, where two
+     adapters shipped that nothing could construct.
+- **Measured (2026-09-03, 8-core CPU, no accelerator):**
+
+  | Finding | Value | Why it decided the design |
+  | --- | --- | --- |
+  | `llama-cpp-python` Windows wheel on PyPI | **none, any version** | Installing means a CMake/MSVC source build; `onnxruntime-genai` (MIT, numpy + onnxruntime, no PyTorch) ships a cp312 wheel |
+  | Grammar compile inside `og.Generator(...)` | **1,767-1,934 ms**, schema-size independent, never cached | Recompiled per call it is 82% of a turn |
+  | `rewind_to(0)` reusing one generator | **~1 ms**, guidance still correct | Per-turn 2,350 ms -> **440 ms** (5.3x) |
+  | `enable_ff_tokens=True` (defaults to **False**) | 39 -> 25 generated tokens, ~540 ms saved, identical answers | Grammar-forced braces and field names should not be paid for |
+  | Constrained vs prompted JSON | unguided returned `"buyer_intent": "budget"` and a free-text `next_question` | Constraint makes a violating token unreachable; no retry loop is needed |
+  | Qwen2.5-0.5B (Apache-2.0, 0.88 GB) | **950 ms/turn, 1/10 correct** | Fast and unusable |
+  | Phi-3.5-mini (MIT, 2.78 GB) | **7,287 ms/turn, 10/10 correct** | Correct and slow; `ff` + reuse bring it to ~5.2 s in the running app |
+  | Shortening the system prompt | prefill 4,302 -> 1,699 ms, accuracy **4/4 -> 1/4** | Latency cannot be bought back from the prompt; the instruction is doing real work |
+
+- **Licence findings, which mirror PR 33's voice review:** the **Qwen2.5 family is
+  licence-split** - 0.5B and 1.5B are Apache-2.0 while **3B is "FOR NON-COMMERCIAL PURPOSES
+  ONLY"** - so a family name is not a licence, and a quantised re-upload does not relicense
+  what it converts. Llama-3.2 and Gemma are recorded as denied (additional-user thresholds,
+  mandatory attribution, and use policies that must be passed into this product's own terms
+  are product decisions, not engineering ones). And on Hindi the licence-clean options are
+  weak: SmolLM2 is English-only, Granite and Phi-4-mini enumerate language lists that
+  exclude Hindi, and the one model officially naming Hindi is licence-disqualified. Phi-3.5
+  does not enumerate Hindi either, yet **empirically read Devanagari and romanised Hinglish
+  correctly on 10/10 turns** - a card-versus-behaviour gap worth recording rather than
+  trusting in either direction.
+- **Verification:** The decisive check is the same conversation run twice. Rules only, the
+  agent asks for the budget, is told *"around two lakh rupees"*, and asks again. With the
+  model it answers *"Thanks for being straight about the budget. When would you like this
+  live?"* and completes discovery in four turns with no repeats. Running that also exposed
+  a real defect in this PR's own design - a model-found slot was recomputed from the rules'
+  facts on the next turn and lost, so the agent asked for the budget again one turn later;
+  slot knowledge from either source now accumulates in conversation state. Cost is honest:
+  **~1 ms/turn without a model, ~5.2 s/turn with one.** 686 passed / 19 skipped, up from
+  649; **686 / 19 with `onnxruntime-genai` uninstalled - identical**, and `mypy` reports
+  identically in both states. `ruff check`, `ruff format --check`, `mypy` clean over 115
+  files.
+- **Deferred:** **No model is selected**, and ADR-0004's gate is not satisfied - that needs
+  a reviewed extraction corpus, which does not exist here. ~5.2 s/turn is too slow for the
+  *spoken* path (on top of ~2.8 s of speech latency) and is why this is opt-in rather than
+  default; making it viable needs either a smaller model that is actually accurate or
+  speculative execution off the reply path, and both need the corpus first. The model
+  currently reports only `acknowledge` and `buyer_intent`; extracting fact *values* is the
+  obvious next step and is exactly what would let it replace, rather than supplement, the
+  regex extractors. Slot vocabulary and ask order are English-sales-shaped and should become
+  data.
+- **Rollback:** Revert PR 39. No schema migration, no persistent state, no runtime
+  dependency; every new setting defaults to the previous behaviour. Reverting returns the
+  fixed per-language reply, which is a regression in relevance but not in safety.
 

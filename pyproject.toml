@@ -61,6 +61,22 @@ piper-tts = ["piper-tts>=1.7.0,<2"]
 # unless a caller explicitly opts in, so a missing model is a clear error rather than a
 # silent multi-hundred-megabyte download mid-call or in CI.
 faster-whisper = ["faster-whisper>=1.0.0,<2"]
+# Optional local language model. Never a runtime requirement: the reply planner produces a
+# relevant, slot-driven reply from the rules alone, so a deployment without this is fully
+# functional and simply reads code-mixed input less well.
+#
+# `onnxruntime-genai` is MIT and depends only on numpy and onnxruntime, which the speech
+# extras above already bring -- no PyTorch. It was chosen over `llama-cpp-python` (also MIT,
+# better raw inference) for one decisive reason: llama-cpp-python publishes **no Windows
+# wheel on PyPI at any version**, so installing it means a CMake and MSVC source build,
+# which is not something a local-first product can ask of an operator.
+#
+# Model weights are NOT included and are never downloaded. They are operator-supplied ONNX
+# Runtime GenAI directories, and the weight licence is checked against the **upstream**
+# model id -- a quantised re-upload does not relicense what it converts. The Qwen2.5 family
+# is licence-split (0.5B/1.5B Apache-2.0, 3B non-commercial); see `KNOWN_MODEL_LICENSES` in
+# `pitchbot.adapters.onnx_genai_model` and `docs/BENCHMARKS.md`.
+local-llm = ["onnxruntime-genai>=0.15.0,<1"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

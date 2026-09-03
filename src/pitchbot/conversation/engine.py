@@ -14,6 +14,12 @@ from pitchbot.conversation.models import (
     ConversationStateCheckpoint,
     SafetySignal,
 )
+from pitchbot.conversation.planning import (
+    TurnUnderstanding,
+    plan_reply,
+    render_reply,
+    understanding_from_facts,
+)
 from pitchbot.conversation.rules import (
     ExtractionResult,
     detect_safety_signals,
@@ -86,7 +92,17 @@ class ConversationEngine:
         text: str,
         language: LanguageCode,
         source_span_id: UUID | None = None,
+        understanding: TurnUnderstanding | None = None,
     ) -> ConversationResult:
+        """Advance one turn.
+
+        ``understanding`` is an optional richer reading of this turn, produced elsewhere -
+        today by an opt-in local model. It only ever influences which slot is acknowledged
+        and asked for. It is accepted *after* safety detection has already run below, so it
+        cannot affect an opt-out, an abuse redirect, or a refused extraction attempt: those
+        paths return before it is consulted.
+        """
+
         state = self._get_state(session_id)
         state.ensure_turn_capacity()
         if state.stopped:
@@ -195,19 +211,34 @@ class ConversationEngine:
         if state.goal_change_count >= state.max_goal_changes:
             signals.append(SafetySignal.EXCESSIVE_GOAL_CHANGES)
             disposition = ConversationDisposition.REVIEW
-            reply_key = "clarify_goals"
-        elif repeated:
-            disposition = ConversationDisposition.CONTINUE
-            reply_key = "repeated"
+            reply = self._reply(language, "clarify_goals")
         else:
             disposition = ConversationDisposition.CONTINUE
-            reply_key = "continue"
+            # The reply is planned from the slots this conversation has actually filled,
+            # rather than being one fixed sentence. `understanding` lets a caller supply a
+            # richer reading of the turn; with none, the engine's own extracted facts are
+            # used, which is the default and needs no model.
+            if understanding is not None:
+                state.understood_slot_keys.update(slot.value for slot in understanding.filled_now)
+            plan = plan_reply(
+                self._understanding_for(state, accepted_facts, understanding),
+                repeated=repeated,
+                asked_counts=state.asked_slot_counts,
+            )
+            if plan.ask is not None:
+                # Counted here, not in the planner, because only the engine knows a reply
+                # was actually sent. A plan that is computed and discarded must not make
+                # the agent believe it has already asked.
+                state.asked_slot_counts[plan.ask.value] = (
+                    state.asked_slot_counts.get(plan.ask.value, 0) + 1
+                )
+            reply = render_reply(plan, language, repeated=repeated)
 
         classification = self._classify(state)
         state.phase = self._phase_for(classification)
         return self._result(
             state,
-            reply=self._reply(language, reply_key),
+            reply=reply,
             language=language,
             disposition=disposition,
             signals=signals,
@@ -377,6 +408,35 @@ class ConversationEngine:
         )
 
     @staticmethod
+    def _understanding_for(
+        state: ConversationState,
+        accepted_facts: list[RequirementFact],
+        supplied: TurnUnderstanding | None,
+    ) -> TurnUnderstanding:
+        """Merge everything known about the slots, whatever found it.
+
+        The rules and a model are additive, never exclusive: a model that reads a budget the
+        regex missed must not also erase a business type the regex caught, and a slot either
+        source has ever filled stays filled.
+        """
+
+        base = understanding_from_facts(
+            state.facts_by_key,
+            (fact.key for fact in accepted_facts),
+        )
+        remembered = understanding_from_facts(state.understood_slot_keys)
+        if supplied is None:
+            return TurnUnderstanding(
+                known_slots=base.known_slots | remembered.known_slots,
+                filled_now=base.filled_now,
+            )
+        return TurnUnderstanding(
+            known_slots=base.known_slots | remembered.known_slots | supplied.known_slots,
+            filled_now=base.filled_now | supplied.filled_now,
+            intent=supplied.intent,
+        )
+
+    @staticmethod
     def _reply(language: LanguageCode, key: str) -> str:
         replies = _REPLIES.get(language, _REPLIES[LanguageCode.ENGLISH])
         return replies[key]
@@ -406,12 +466,6 @@ _REPLIES: dict[LanguageCode, dict[str, str]] = {
             "I heard several changes. To avoid assuming, please confirm the single most "
             "important website goal."
         ),
-        "repeated": (
-            "I have noted that point. What outcome would make the website useful for your business?"
-        ),
-        "continue": (
-            "Thanks. What matters most next: features, budget, timeline, or the decision process?"
-        ),
     },
     LanguageCode.HINDI: {
         "opt_out": ("समझ गया। मैं बातचीत समाप्त कर रहा हूँ और दोबारा संपर्क न करने का अनुरोध दर्ज करूँगा।"),
@@ -425,8 +479,6 @@ _REPLIES: dict[LanguageCode, dict[str, str]] = {
             "सकता। वेबसाइट की ज़रूरतों पर मदद कर सकता हूँ।"
         ),
         "clarify_goals": ("कई बदलाव बताए गए हैं। कृपया वेबसाइट का एक सबसे महत्वपूर्ण लक्ष्य स्पष्ट करें।"),
-        "repeated": ("मैंने यह बात दर्ज कर ली है। वेबसाइट से आपके व्यवसाय को कौन सा परिणाम चाहिए?"),
-        "continue": "धन्यवाद। आगे किस पर बात करें: फीचर, बजट, समयसीमा या निर्णय प्रक्रिया?",
     },
     LanguageCode.MIXED: {
         "opt_out": (
@@ -443,11 +495,6 @@ _REPLIES: dict[LanguageCode, dict[str, str]] = {
         ),
         "clarify_goals": (
             "Kaafi changes aaye hain. Please ek sabse important website goal confirm karein."
-        ),
-        "repeated": "Yeh point note ho gaya. Website se aapko sabse useful outcome kya chahiye?",
-        "continue": (
-            "Thanks. Next features, budget, timeline, ya decision process mein se kya "
-            "discuss karein?"
         ),
     },
 }

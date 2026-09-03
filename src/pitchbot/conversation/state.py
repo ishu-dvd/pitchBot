@@ -26,6 +26,24 @@ class ConversationState:
     evidence: deque[IntentEvidence] = field(default_factory=deque)
     classifications: deque[Classification] = field(default_factory=deque)
     goal_change_count: int = 0
+    asked_slot_counts: dict[str, int] = field(default_factory=dict)
+    """How many times the agent has asked for each slot.
+
+    Bounded by construction: there are four slots, so this cannot grow with turn count.
+    It exists because a buyer who does not answer a question must not be asked it forever -
+    which is the same "says the same thing every turn" failure the planner was added to fix,
+    just one level down.
+    """
+
+    understood_slot_keys: set[str] = field(default_factory=set)
+    """Slots a richer understanding reported as filled, which the extractors missed.
+
+    Without this the improvement lasts exactly one turn. The shipped budget regex needs
+    digits, so a model reading *"around two lakh rupees"* fills the budget slot for that
+    turn - and then the next turn rebuilds the slot set from the rules' facts alone, the
+    budget is missing again, and the agent asks for it a second time. Also bounded by the
+    number of slots.
+    """
 
     def __post_init__(self) -> None:
         capacities = (

@@ -21,6 +21,7 @@ from pitchbot.actions import (
 from pitchbot.adapters import (
     AdapterError,
     Clock,
+    ModelAdapter,
     SpeechToTextAdapter,
     SystemClock,
     TextToSpeechAdapter,
@@ -44,6 +45,9 @@ from pitchbot.conversation import (
     JournalHistoryUnavailableError,
     JournalOperationConflictError,
 )
+from pitchbot.conversation.model_understanding import ModelTurnUnderstanding
+from pitchbot.conversation.planning import TurnUnderstanding
+from pitchbot.conversation.rules import detect_safety_signals
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.knowledge import (
     FactClaimStatus,
@@ -170,6 +174,7 @@ class SimulatorService:
         speech_detector: VoiceActivityDetector | None = None,
         speech_transcriber: SpeechToTextAdapter | None = None,
         speech_synthesizer: TextToSpeechAdapter | None = None,
+        language_model: ModelAdapter | None = None,
         turn_taking: TurnTakingConfig | None = None,
     ) -> None:
         if (
@@ -229,6 +234,11 @@ class SimulatorService:
         # speaks replies with its own Web Speech API voice, so absence here is a working
         # fallback rather than a missing capability.
         self._speech_synthesizer = speech_synthesizer
+        # Understanding is optional and additive: with no model the planner reads the same
+        # facts the rules already extract, which is what shipped before.
+        self._understanding = (
+            ModelTurnUnderstanding(language_model) if language_model is not None else None
+        )
         self._turn_taking = turn_taking or TurnTakingConfig()
         # Recall reads the same journal the turn was just committed to, so it is only
         # available when durable history is enabled and lead identifiers are stable. The
@@ -400,10 +410,12 @@ class SimulatorService:
             conversation_checkpoint = self._conversation.checkpoint(session_id)
             if not replaying_durable_turn:
                 self._ensure_conversation_open(session_id)
+                understanding = await self._understand(session_id, request)
                 outcome = self._conversation.process_turn(
                     session.session_id,
                     text=request.text,
                     language=request.language,
+                    understanding=understanding,
                 )
             session.language = request.language
             self._append_event(
@@ -566,6 +578,34 @@ class SimulatorService:
         """True when an endpointed utterance can actually become a buyer turn."""
 
         return self._speech_transcriber is not None
+
+    @property
+    def language_model_available(self) -> bool:
+        """True when a local model reads each turn before the reply is planned."""
+
+        return self._understanding is not None
+
+    async def _understand(
+        self,
+        session_id: UUID,
+        request: TurnRequest,
+    ) -> TurnUnderstanding | None:
+        """Read this turn with the model, if one is configured.
+
+        Skipped for a turn the rules will short-circuit anyway. That check is an
+        optimisation and is deliberately *not* the authority: the engine runs safety
+        detection again and returns before it ever looks at understanding, so a
+        disagreement here can only waste several seconds, never admit a flagged turn.
+        """
+
+        if self._understanding is None or detect_safety_signals(request.text):
+            return None
+        snapshot = self._conversation.snapshot(session_id)
+        return await self._understanding.understand(
+            request.text,
+            request.language,
+            (fact.key for fact in snapshot.facts),
+        )
 
     @property
     def speech_output_available(self) -> bool:
