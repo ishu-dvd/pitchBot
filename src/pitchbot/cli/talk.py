@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import platform
 import shutil
 import subprocess
 import sys
@@ -113,9 +112,13 @@ def play_wav(path: Path) -> str | None:
     Shelling out rather than adding an audio dependency is deliberate: this exists so a
     person can *hear* the product, and making them install a sound library first would
     defeat the point.
+
+    The Windows branch tests ``sys.platform`` rather than ``platform.system()`` because
+    only the former is narrowed by type checkers - on Linux ``winsound`` is a stub with no
+    attributes, so a runtime-only check type-checks on Windows and fails in CI.
     """
 
-    if platform.system() == "Windows":
+    if sys.platform == "win32":
         import winsound
 
         winsound.PlaySound(str(path), winsound.SND_FILENAME)
