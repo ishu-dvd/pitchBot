@@ -4,6 +4,7 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 from hmac import new as new_hmac
 from uuid import UUID
@@ -38,6 +39,15 @@ _OPT_OUT_PHRASES = (
     "कॉल मत",
     "फोन मत",
     "दोबारा कॉल मत",
+    # Telugu negates a verb with the `-వద్దు` suffix rather than a separate particle, so
+    # the unit that carries the refusal is the whole verb. A bare "వద్దు" is deliberately
+    # absent for the same reason "बंद करो" is: on its own it declines whatever was last
+    # offered - a demo, a callback slot, a document - and opt-out cannot be undone.
+    "కాల్ చేయవద్దు",
+    "ఫోన్ చేయవద్దు",
+    "సంప్రదించవద్దు",
+    "కాల్ చేయకండి",
+    "నా నంబర్ తీసివేయండి",
 )
 _ABUSE_TERMS = (
     "idiot",
@@ -48,6 +58,9 @@ _ABUSE_TERMS = (
     "चुप रह",
     "bakwas",
     "bewakoof",
+    "మూర్ఖుడు",
+    "వెధవ",
+    "నోరు మూసుకో",
 )
 _INTERNAL_INFO_PHRASES = (
     "api key",
@@ -828,36 +841,72 @@ _MERGE_STOPWORDS = frozenset(
 )
 
 _BUSINESS_TYPES: dict[str, tuple[str, ...]] = {
-    "apparel": ("apparel", "clothing", "clothes", "garment", "कपड़े", "kapde"),
-    "toys": ("toy", "toys", "खिलौने", "khilone"),
-    "books": ("book", "books", "किताब", "kitab"),
-    "food": ("food", "restaurant", "bakery", "खाना", "restaurant"),
-    "import-export": ("import export", "import-export", "निर्यात", "आयात"),
-    "plastics": ("plastic", "plastics", "प्लास्टिक"),
+    "apparel": (
+        "apparel",
+        "clothing",
+        "clothes",
+        "garment",
+        "कपड़े",
+        "kapde",
+        "దుస్తులు",
+        "బట్టలు",
+    ),
+    "toys": ("toy", "toys", "खिलौने", "khilone", "బొమ్మలు"),
+    "books": ("book", "books", "किताब", "kitab", "పుస్తకాలు"),
+    "food": ("food", "restaurant", "bakery", "खाना", "restaurant", "ఆహారం", "బేకరీ", "రెస్టారెంట్"),
+    "import-export": ("import export", "import-export", "निर्यात", "आयात", "ఎగుమతి", "దిగుమతి"),
+    "plastics": ("plastic", "plastics", "प्लास्टिक", "ప్లాస్టిక్"),
 }
 _FEATURES: dict[str, tuple[str, ...]] = {
-    "catalog": ("catalog", "catalogue", "कैटलॉग"),
-    "online-payments": ("payment", "checkout", "pay online", "भुगतान"),
-    "inventory": ("inventory", "stock management", "इन्वेंटरी"),
-    "whatsapp": ("whatsapp", "व्हाट्सऐप"),
-    "multilingual": ("multilingual", "bilingual", "hindi and english", "हिंदी और अंग्रेजी"),
+    "catalog": ("catalog", "catalogue", "कैटलॉग", "కేటలాగ్"),
+    "online-payments": ("payment", "checkout", "pay online", "भुगतान", "చెల్లింపు"),
+    "inventory": ("inventory", "stock management", "इन्वेंटरी", "ఇన్వెంటరీ"),
+    "whatsapp": ("whatsapp", "व्हाट्सऐप", "వాట్సాప్"),
+    "multilingual": (
+        "multilingual",
+        "bilingual",
+        "hindi and english",
+        "हिंदी और अंग्रेजी",
+        "బహుభాషా",
+    ),
 }
 _POSITIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
-    ("budget", 0.25, ("budget", "₹", "rs ", "rupees", "बजट")),
-    ("timeline", 0.25, ("this week", "this month", "days", "weeks", "जल्दी", "इस महीने")),
+    ("budget", 0.25, ("budget", "₹", "rs ", "rupees", "बजट", "బడ్జెట్", "రూపాయలు")),
+    (
+        "timeline",
+        0.25,
+        ("this week", "this month", "days", "weeks", "जल्दी", "इस महीने", "ఈ వారం", "ఈ నెల"),
+    ),
     (
         "decision",
         0.30,
-        ("ready to start", "let's start", "lets start", "send proposal", "शुरू करें", "proposal bhejo"),
+        (
+            "ready to start",
+            "let's start",
+            "lets start",
+            "send proposal",
+            "शुरू करें",
+            "proposal bhejo",
+            "ప్రారంభిద్దాం",
+        ),
     ),
-    ("next-step", 0.20, ("demo", "meeting", "callback", "call back", "sample", "डेमो", "नमूना")),
+    (
+        "next-step",
+        0.20,
+        ("demo", "meeting", "callback", "call back", "sample", "डेमो", "नमूना", "డెమో"),
+    ),
 )
 _NEGATIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
-    ("rejection", -0.70, ("not interested", "no interest", "interested nahi", "रुचि नहीं")),
-    ("no-need", -0.50, ("do not need", "don't need", "no website", "नहीं चाहिए")),
+    (
+        "rejection",
+        -0.70,
+        ("not interested", "no interest", "interested nahi", "रुचि नहीं", "ఆసక్తి లేదు"),
+    ),
+    ("no-need", -0.50, ("do not need", "don't need", "no website", "नहीं चाहिए", "అవసరం లేదు")),
 )
 _BUDGET_PATTERN = re.compile(
-    r"(?:budget(?:\s+is)?|बजट|₹|rs\.?|inr)\s*[:=-]?\s*(₹|rs\.?|inr)?\s*([0-9][0-9,]*(?:\s*(?:k|lakh|लाख))?)",
+    r"(?:budget(?:\s+is)?|बजट|బడ్జెట్|₹|rs\.?|inr)\s*[:=-]?\s*(₹|rs\.?|inr)?\s*"
+    r"([0-9][0-9,]*(?:\s*(?:k|lakh|लाख|లక్ష|లక్షల))?)",
     re.IGNORECASE,
 )
 _TIMELINE_PATTERN = re.compile(
@@ -1046,8 +1095,51 @@ def _extract_evidence(
     return tuple(evidence)
 
 
+_DERIVATIONAL_SUFFIXES = frozenset({"ing", "ed", "ic", "ity"})
+"""English endings that build a *different* word, not another form of the same one.
+
+Splitting these out matters only for the business vocabulary. Safety matching deliberately
+accepts them - `hataoge` must match `hatao` - because there the cost of missing a phrase is
+higher than the cost of over-matching. Vocabulary extraction has the opposite balance: a
+missed feature only means the agent asks again, while a wrong business type means it states
+something false about the buyer. `booking` reading as the *books* business, and `toyota` as
+*toys*, are the two that were actually shipped.
+"""
+
+_VOCABULARY_SUFFIXES = _INFLECTIONAL_SUFFIXES - _DERIVATIONAL_SUFFIXES
+"""Number and case endings only, for matching business terms."""
+
+
+@lru_cache(maxsize=1024)
+def _vocabulary_pattern(phrase: str) -> re.Pattern[str]:
+    """Match ``phrase`` as a whole term, allowing only number and case inflection.
+
+    Anchors are added only where the phrase itself begins or ends in a word character, so
+    entries like ``"₹"``, ``"rs "`` and ``"import export"`` keep working: a ``\\b`` next to
+    a symbol or a space asserts the opposite of what is wanted and would silently stop
+    matching. Python's ``\\b`` is Unicode-aware, so Devanagari and Telugu bound on the same
+    rule as Latin with no per-script special case.
+    """
+
+    prefix = r"\b" if phrase[:1].isalnum() else ""
+    if not phrase[-1:].isalnum():
+        return re.compile(prefix + re.escape(phrase))
+    ordered = sorted(_VOCABULARY_SUFFIXES, key=len, reverse=True)
+    endings = "|".join(re.escape(suffix) for suffix in ordered)
+    return re.compile(f"{prefix}{re.escape(phrase)}(?:{endings})?\\b")
+
+
 def _contains_any(text: str, phrases: Iterable[str]) -> bool:
-    return any(phrase in text for phrase in phrases)
+    """Whether any phrase appears in ``text`` as a whole term.
+
+    Plain substring matching read ``"a booking form"`` as the *books* business type and
+    told a furniture buyer the agent thought they sold books - a wrong fact, stated
+    confidently, by a product whose value is being believed. Word boundaries plus a
+    restricted suffix set fix that without losing ``payments`` for ``payment`` or
+    ``किताबों`` for ``किताब``.
+    """
+
+    return any(_vocabulary_pattern(phrase).search(text) for phrase in phrases)
 
 
 def _contains_any_form(

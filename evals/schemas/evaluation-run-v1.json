@@ -272,6 +272,7 @@
       "enum": [
         "en",
         "hi",
+        "te",
         "mixed",
         "unknown"
       ],

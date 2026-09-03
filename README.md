@@ -22,6 +22,8 @@ The implemented application currently provides only:
 - The reply can now be **spoken by the server**, over the same socket that carries the buyer's speech, instead of by the browser's own `speechSynthesis` — whose voices vary by browser and OS, frequently lack Hindi, and on several platforms are produced by a *remote* service. `PITCHBOT_SPEECH_TTS_PROVIDER` defaults to `none`, so that fallback is unchanged unless a voice is configured. Piper emits one chunk per *sentence* (measured 80 KB to 352 KB, the largest carrying 7.99 s of audio), which is both too large to write and impossible to abandon part-way, so the stream is re-cut into 32 KB sample-aligned frames that barge-in can actually stop. Synthesis runs at **~19x realtime** once the voice is resident, so the reply is delivered long before it finishes playing — but it runs as a background task rather than inline, because the 1,052 ms a long reply costs would otherwise blind the interruption detector on every turn. Verified by closing the loop: PCM received over the WebSocket, fed back through `faster-whisper`, returned the reply verbatim. **No text-to-speech provider or voice is selected**, and no reviewed Piper Hindi voice permits commercial use.
 - The agent now **plans what to say** instead of returning one fixed sentence per language every turn. A deterministic planner reads the four slots the conversation has filled — business type, requested features, budget, timeline — acknowledges what was just learned, and asks for the most useful missing one, abandoning a slot after two unanswered attempts. It needs no model, costs ~1 ms, and works offline. The rendered reply is composed of fixed phrases only, so no buyer text can reach the agent's own words.
 - An optional **local language model** behind the previously unimplemented text model contract, run on CPU through `onnxruntime-genai` (MIT, no PyTorch; chosen because `llama-cpp-python` publishes no Windows wheel on PyPI at any version). Its output is **structurally constrained** to a JSON schema rather than parsed out of prose. It improves *understanding* of code-mixed input and feeds the same planner, so it can never change how a reply is composed. **No model is selected**: measured on an 8-core CPU, a 0.5B model answers in 950 ms but scored 1/10, while a 3.8B model scored 10/10 at ~5.2 s per turn — too slow for the spoken path, so it is off by default. Licence review found the Qwen2.5 family is **licence-split** (0.5B/1.5B Apache-2.0, 3B non-commercial) and that Hindi coverage among licence-clean small models is weak.
+- **Telugu**, added as a third language and shaped entirely by measurement. Two Piper `te_IN` voices are **CC-BY-4.0**, which makes Telugu the only Indic language this project can currently ship a voice for — every published Hindi voice is non-commercial or unresolved. Whisper transcribes Telugu speech into **Devanagari 100% of the time** at both `small` and `medium` while naming the language `te` at 0.76–0.98 confidence: it hears correctly and writes in the wrong alphabet. Transliterating the result back takes character error rate from 100% to **41%** — enough to fill slots, not enough to quote a buyer's words back. The `initial_prompt` script anchor that appears to fix this is deliberately unused: it corrects the alphabet and destroys the words (CER 90–116%). Adding the language also exposed that **Telugu had no safety vocabulary at all** — a buyer asking not to be contacted was answered with the next qualifying question — which is now guarded by tests driven from the supported-language set rather than a hard-coded list.
+- **`pitchbot-talk`**, an interactive terminal conversation, which is the first way to actually *use* the product rather than measure it. It runs the real engine and prints why each reply was chosen: known slots, missing slots, phase, lead temperature, turn latency. It needs no optional extra; `--speak` adds Piper synthesis played through the operating system's own audio player, and `--understand` adds the local model. See [`docs/TRY_IT_LOCALLY.md`](docs/TRY_IT_LOCALLY.md).
 - Versioned privacy-minimized evaluation snapshots, suite-aware fail-closed gate validation that returns a non-zero exit code and fails the build on a regression, and dependency-free local HTML reports.
 - Deterministic English/Hindi/Hinglish conversation safety, bounded discovery, requirement revisions, and evidence-grounded Hot/Warm/Cold/Review classification.
 - Default-off simulator conversation journaling with restart recovery, bounded minimized replay, idempotent operations, incremental state transitions, optimistic concurrency, and privacy lifecycle compatibility.
@@ -118,6 +120,18 @@ python -m uvicorn pitchbot.main:app --reload
 
 Open `http://127.0.0.1:8000/health` to confirm the API is running.
 Open `http://127.0.0.1:8000/simulator/` for the synthetic browser simulator.
+
+### Talk to it
+
+To hold a conversation from a terminal instead — no server, no downloads, no extras:
+
+```powershell
+pitchbot-talk
+pitchbot-talk --language te --script examples/demo-te.txt
+```
+
+[`docs/TRY_IT_LOCALLY.md`](docs/TRY_IT_LOCALLY.md) walks through this end to end, including
+adding a voice, adding transcription, adding a model, and the measured limitations of each.
 
 ## Validation
 

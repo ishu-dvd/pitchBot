@@ -1,0 +1,9 @@
+# Hindi buyer. Run: pitchbot-talk --language hi --script examples/demo-hi.txt
+# Note: every published Piper hi_IN voice is non-commercial, so --speak works for
+# evaluation only. See docs/BENCHMARKS.md.
+हम कपड़े ऑनलाइन बेचते हैं।
+वेबसाइट पर भुगतान और कैटलॉग चाहिए।
+हमारा बजट 200000 है।
+
+# "Please don't call me again" - the conversation closes here.
+मुझे दोबारा कॉल मत कीजिए।

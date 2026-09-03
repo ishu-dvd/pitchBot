@@ -179,62 +179,107 @@ def plan_reply(
     return ReplyPlan(acknowledge=acknowledge, ask=ask, intent=understanding.intent)
 
 
-_ACKNOWLEDGE: Final[Mapping[LanguageCode, Mapping[Slot, str]]] = {
-    LanguageCode.ENGLISH: {
-        Slot.BUSINESS_TYPE: "Thanks, that helps me picture the business.",
-        Slot.REQUESTED_FEATURES: "Noted on what the site needs to do.",
-        Slot.BUDGET: "Thanks for being straight about the budget.",
-        Slot.TIMELINE: "Understood on the timing.",
-    },
-    LanguageCode.HINDI: {
-        Slot.BUSINESS_TYPE: "धन्यवाद, इससे आपका व्यवसाय समझने में मदद मिली।",
-        Slot.REQUESTED_FEATURES: "वेबसाइट में क्या चाहिए, वह नोट कर लिया।",
-        Slot.BUDGET: "बजट साफ़ बताने के लिए धन्यवाद।",
-        Slot.TIMELINE: "समय-सीमा समझ गया।",
-    },
-}
+@dataclass(frozen=True, slots=True)
+class LanguagePhrases:
+    """Every fixed phrase one language needs, in one place.
 
-_ASK: Final[Mapping[LanguageCode, Mapping[Slot, str]]] = {
-    LanguageCode.ENGLISH: {
-        Slot.BUSINESS_TYPE: "What does your business sell?",
-        Slot.REQUESTED_FEATURES: "What should the website let your customers do?",
-        Slot.BUDGET: "What budget range are you working with?",
-        Slot.TIMELINE: "When would you like this live?",
-    },
-    LanguageCode.HINDI: {
-        Slot.BUSINESS_TYPE: "आपका व्यवसाय क्या बेचता है?",
-        Slot.REQUESTED_FEATURES: "वेबसाइट पर आपके ग्राहक क्या कर पाएँ?",
-        Slot.BUDGET: "आपका अनुमानित बजट कितना है?",
-        Slot.TIMELINE: "यह वेबसाइट कब तक चालू करनी है?",
-    },
-}
+    Held as a single object rather than as four parallel ``Mapping[LanguageCode, ...]``
+    tables because parallel tables let a language be *half* added: filling three of them
+    and forgetting the fourth type-checks, passes every existing test, and produces a
+    ``KeyError`` only for the buyer who reaches the missing branch. Adding Telugu did
+    exactly that during development. One block per language makes the omission impossible
+    to write, and :func:`supported_languages` makes it impossible to ship unnoticed.
+    """
 
-_CLOSING: Final[Mapping[LanguageCode, str]] = {
-    LanguageCode.ENGLISH: (
-        "That covers what I need. Would a short demo or a written proposal help more?"
+    acknowledge: Mapping[Slot, str]
+    ask: Mapping[Slot, str]
+    closing: str
+    repeated: str
+
+    def __post_init__(self) -> None:
+        missing = [
+            slot for slot in ASK_ORDER if slot not in self.acknowledge or slot not in self.ask
+        ]
+        if missing:
+            raise ValueError(f"language phrases missing slots: {[s.value for s in missing]}")
+
+
+_PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
+    LanguageCode.ENGLISH: LanguagePhrases(
+        acknowledge={
+            Slot.BUSINESS_TYPE: "Thanks, that helps me picture the business.",
+            Slot.REQUESTED_FEATURES: "Noted on what the site needs to do.",
+            Slot.BUDGET: "Thanks for being straight about the budget.",
+            Slot.TIMELINE: "Understood on the timing.",
+        },
+        ask={
+            Slot.BUSINESS_TYPE: "What does your business sell?",
+            Slot.REQUESTED_FEATURES: "What should the website let your customers do?",
+            Slot.BUDGET: "What budget range are you working with?",
+            Slot.TIMELINE: "When would you like this live?",
+        },
+        closing=("That covers what I need. Would a short demo or a written proposal help more?"),
+        repeated="I have that noted.",
     ),
-    LanguageCode.HINDI: "मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
+    LanguageCode.HINDI: LanguagePhrases(
+        acknowledge={
+            Slot.BUSINESS_TYPE: "धन्यवाद, इससे आपका व्यवसाय समझने में मदद मिली।",
+            Slot.REQUESTED_FEATURES: "वेबसाइट में क्या चाहिए, वह नोट कर लिया।",
+            Slot.BUDGET: "बजट साफ़ बताने के लिए धन्यवाद।",
+            Slot.TIMELINE: "समय-सीमा समझ गया।",
+        },
+        ask={
+            Slot.BUSINESS_TYPE: "आपका व्यवसाय क्या बेचता है?",
+            Slot.REQUESTED_FEATURES: "वेबसाइट पर आपके ग्राहक क्या कर पाएँ?",
+            Slot.BUDGET: "आपका अनुमानित बजट कितना है?",
+            Slot.TIMELINE: "यह वेबसाइट कब तक चालू करनी है?",
+        },
+        closing="मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
+        repeated="यह मैंने दर्ज कर लिया है।",
+    ),
+    LanguageCode.TELUGU: LanguagePhrases(
+        acknowledge={
+            Slot.BUSINESS_TYPE: "ధన్యవాదాలు, మీ వ్యాపారం అర్థమైంది.",
+            Slot.REQUESTED_FEATURES: "వెబ్‌సైట్‌లో ఏమి కావాలో నమోదు చేసుకున్నాను.",
+            Slot.BUDGET: "బడ్జెట్ స్పష్టంగా చెప్పినందుకు ధన్యవాదాలు.",
+            Slot.TIMELINE: "సమయం గురించి అర్థమైంది.",
+        },
+        ask={
+            Slot.BUSINESS_TYPE: "మీ వ్యాపారం ఏమి అమ్ముతుంది?",
+            Slot.REQUESTED_FEATURES: "వెబ్‌సైట్‌లో మీ కస్టమర్లు ఏమి చేయగలగాలి?",
+            Slot.BUDGET: "మీ బడ్జెట్ ఎంత అనుకుంటున్నారు?",
+            Slot.TIMELINE: "ఇది ఎప్పటికి సిద్ధంగా ఉండాలి?",
+        },
+        closing=("నాకు కావలసిన సమాచారం వచ్చింది. ఒక చిన్న డెమో మంచిదా లేక రాతపూర్వక ప్రతిపాదనా?"),
+        repeated="అది నేను నమోదు చేసుకున్నాను.",
+    ),
 }
 
-_REPEATED: Final[Mapping[LanguageCode, str]] = {
-    LanguageCode.ENGLISH: "I have that noted.",
-    LanguageCode.HINDI: "यह मैंने दर्ज कर लिया है।",
-}
+
+def supported_languages() -> frozenset[LanguageCode]:
+    """Languages the planner can actually speak, as opposed to ones the enum names.
+
+    ``LanguageCode`` will always list more members than there are phrase sets - ``MIXED``
+    and ``UNKNOWN`` are routing states, not languages anyone writes sentences in. Exposing
+    the real set lets a caller check before promising a buyer a language, and lets a test
+    assert completeness without hard-coding the list it is checking.
+    """
+
+    return frozenset(_PHRASES)
 
 
 def _table(language: LanguageCode) -> LanguageCode:
-    """Hindi and mixed share the Hindi phrasing; everything else falls back to English.
+    """Which phrase set answers this language.
 
     ``MIXED`` is code-switched Hindi-English, and a buyer writing Hinglish reads Hindi
-    fluently, so answering in Hindi is right. ``UNKNOWN`` gets English because guessing
-    Hindi for an unidentified language would be a worse failure than being formal.
+    fluently, so answering in Hindi is right. ``UNKNOWN`` gets English because guessing an
+    Indic language for unidentified text would be a worse failure than being formal. Any
+    language with its own phrase set answers in itself.
     """
 
-    return (
-        LanguageCode.HINDI
-        if language in (LanguageCode.HINDI, LanguageCode.MIXED)
-        else (LanguageCode.ENGLISH)
-    )
+    if language in _PHRASES:
+        return language
+    return LanguageCode.HINDI if language is LanguageCode.MIXED else LanguageCode.ENGLISH
 
 
 def render_reply(plan: ReplyPlan, language: LanguageCode, *, repeated: bool = False) -> str:
@@ -245,23 +290,25 @@ def render_reply(plan: ReplyPlan, language: LanguageCode, *, repeated: bool = Fa
     it is why a prompt-injected turn cannot be reflected into the agent's own words.
     """
 
-    table = _table(language)
+    phrases = _PHRASES[_table(language)]
     parts: list[str] = []
     if repeated:
-        parts.append(_REPEATED[table])
+        parts.append(phrases.repeated)
     elif plan.acknowledge is not None:
-        parts.append(_ACKNOWLEDGE[table][plan.acknowledge])
-    parts.append(_CLOSING[table] if plan.ask is None else _ASK[table][plan.ask])
+        parts.append(phrases.acknowledge[plan.acknowledge])
+    parts.append(phrases.closing if plan.ask is None else phrases.ask[plan.ask])
     return " ".join(parts)
 
 
 __all__ = [
     "ASK_ORDER",
     "Intent",
+    "LanguagePhrases",
     "ReplyPlan",
     "Slot",
     "TurnUnderstanding",
     "plan_reply",
     "render_reply",
+    "supported_languages",
     "understanding_from_facts",
 ]

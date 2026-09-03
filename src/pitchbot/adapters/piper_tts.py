@@ -269,15 +269,24 @@ KNOWN_VOICE_LICENSES: Final[Mapping[str, VoiceLicense]] = {
     "hi_IN-pratham-medium": CC_BY_NC_SA_4_0,
     "hi_IN-priyamvada-medium": CC_BY_NC_SA_4_0,
     "hi_IN-rohan-medium": IITM_INDICTTS_UNRESOLVED,
+    # --- Telugu: the only Indic language Piper serves under a commercial license --------
+    # Both are trained on ai4bharat/indicvoices_r, whose HF dataset card states
+    # ``license: cc-by-4.0``. Verified against the upstream dataset, not only the voice
+    # MODEL_CARD, because a voice card restating a license is not evidence of one.
+    "te_IN-padmavathi-medium": CC_BY_4_0,
+    "te_IN-venkatesh-medium": CC_BY_4_0,
+    # Trained from the IITM IndicTTS corpus, the same unresolved license as hi_IN-rohan.
+    "te_IN-maya-medium": IITM_INDICTTS_UNRESOLVED,
 }
 """Voice-weight licenses reviewed on 2026-09-03 from each voice's upstream MODEL_CARD.
 
 Adding a language is a **data** change - a row here plus a voice file - and never a code
-change, which is the property the project's direction requires. The Hindi rows are the
-important ones: at review time Piper published exactly three ``hi_IN`` voices and **none
-of them is cleared for commercial use**, so a bilingual commercial deployment cannot be
-served by Piper's published Hindi voices today. That is a finding, not a gap in this
-adapter, and it is recorded in ``docs/BENCHMARKS.md``.
+change, which is the property the project's direction requires. The Indic rows carry the
+finding: at review time Piper published exactly three ``hi_IN`` voices and **none of them
+is cleared for commercial use**, while two of the three ``te_IN`` voices are CC-BY-4.0.
+Telugu, the third language added, is therefore the *only* Indic language this project can
+speak commercially today - the opposite of what the language order would suggest. Both
+findings are recorded in ``docs/BENCHMARKS.md``.
 """
 
 

@@ -905,3 +905,105 @@ Empirically, though, Phi-3.5-mini read **Devanagari and romanised Hinglish corre
 ten turns** despite not enumerating Hindi. Model-card language lists and measured behaviour
 disagree here, and neither should be trusted alone -- the same lesson as PR 36's finding
 that character error rate without number normalisation is close to meaningless.
+
+## Telugu, measured 2026-09-04
+
+Telugu was added as the third language. Every claim below is from a probe on this machine
+(8 logical CPUs, Windows, Python 3.12, CPU only), and the headline result is the opposite
+of what the language order suggests.
+
+### Telugu is the only Indic language Piper can speak commercially
+
+Piper publishes three `te_IN` voices. Two are trained on `ai4bharat/indicvoices_r`,
+whose Hugging Face dataset card states `license: cc-by-4.0` -- verified against the
+upstream dataset, not only the voice card.
+
+| Voice | Dataset | Licence | Commercial |
+| --- | --- | --- | --- |
+| `te_IN-padmavathi-medium` | ai4bharat/indicvoices_r | CC-BY-4.0 | **yes**, with attribution |
+| `te_IN-venkatesh-medium` | ai4bharat/indicvoices_r | CC-BY-4.0 | **yes**, with attribution |
+| `te_IN-maya-medium` | IITM IndicTTS | unresolved | no (recorded conservatively) |
+
+Set against PR 33's Hindi finding -- all three `hi_IN` voices non-commercial or
+unresolved -- Telugu is today the **only** Indic language this project can ship with a
+voice. That was not predictable from the language's size or priority, and it is the kind of
+thing only a licence review surfaces.
+
+Synthesis performance matches the other voices: 16.3-21.7x realtime, 107-154 ms per
+sentence, one chunk per sentence, 2.5 s voice load.
+
+### Whisper hears Telugu and writes Hindi
+
+The decisive Telugu finding. faster-whisper transcribes Telugu speech into **Devanagari**:
+
+| Model | Telugu letters | Devanagari letters | CER | ms/clip | Auto-detected language |
+| --- | --- | --- | --- | --- | --- |
+| `small` | 0.0% | 100.0% | 100.0% | 2,570 | `te` at 0.90-0.95 |
+| `medium` | 0.0% | 100.0% | 100.7% | 7,408 | `te` at 0.76-0.98 |
+
+Not a detection failure -- the model names the language correctly and confidently, then
+spells it in the wrong alphabet. `medium` costs 2.9x more and fixes nothing.
+
+The sounds are right. `मा बजजे त्रेंड लक्षला रूपायलू` read aloud is
+`మా బడ్జెట్ రెండు లక్షల రూపాయలు` -- "our budget is two lakh rupees".
+
+### The obvious fix makes it worse
+
+Whisper conditions on `initial_prompt`, so a Telugu anchor should force the script. It
+does, and it destroys the words:
+
+| Anchor | Telugu letters | CER |
+| --- | --- | --- |
+| none | 0.0% | **100.0%** |
+| `తెలుగు.` | 100.0% | 115.8% |
+| `ఇది తెలుగు సంభాషణ.` | 100.0% | 95.2% |
+| domain sentence | 100.0% | 90.5% |
+
+Anchoring converts a *recoverable* failure into an unrecoverable one, while improving the
+one metric anybody would check first. It is not used.
+
+### Transliteration recovers 59% of what was lost
+
+Devanagari (U+0900) and Telugu (U+0C00) are parallel Brahmic blocks, so the repair is a
+character mapping with no dependency, no model and no network.
+
+| | CER |
+| --- | --- |
+| Whisper output as returned | 100.0% |
+| After transliteration | **41.0%** |
+
+Enough to match keywords and fill slots; **not** enough to quote a buyer's words back, and
+`pitchbot.speech.scripts` makes no such claim.
+
+### A constant offset is wrong, and looks right
+
+The blocks are parallel, so `+0x300` nearly works -- which is the danger. Auditing every
+assigned codepoint found the shift wrong for **53 of 153**: Hindi's Perso-Arabic nukta
+letters (क़ ख़ ग़ ज़ फ़) land on Telugu *fraction digits* and `SIGN TUUMU`, and eighteen
+more land on unassigned codepoints. The first probe missed this because the four test
+sentences happened to use only the safe core.
+
+Deriving the table by matching Unicode *character names* fixes those and introduces a
+subtler bug: Devanagari is Indo-Aryan and does not contrast short and long e/o, so its
+plain `E` **is** the long vowel, while Telugu spends the unqualified name on the short
+one. Name-matching therefore shortens every e and o -- `బడ్జెట్` for `బడ్జేట్`, a
+different word. The shipped table is name-derived plus an explicit table for both classes.
+
+### Which local model understands three languages
+
+Same task as PR 39 -- classify which slot a buyer turn filled -- extended to Telugu, and to
+Telugu **as the pipeline actually delivers it** after transliteration.
+
+| Model | en | hi | te | te (from ASR) | mean latency |
+| --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B-Instruct | 2/4 | 1/4 | 2/4 | **0/2** | 515 ms |
+| Phi-3.5-mini-instruct | **4/4** | 3/4 | 2/4 | **0/2** | 5,531 ms |
+
+Three things follow. Accuracy degrades monotonically `en > hi > te`. So does latency --
+Phi costs 4,519 ms in English and 6,715 ms in Telugu for the same task, because Telugu
+consumes more tokens per character. And **neither model classified a single transliterated
+Telugu turn correctly**, which is the only input the spoken path can produce.
+
+The conclusion is the same one PR 39 reached for a different reason: the model is not what
+makes Telugu work. The deterministic planner and the rule extractors are, and they run in
+under 15 ms.
