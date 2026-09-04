@@ -143,3 +143,48 @@ All notable changes to PitchBot are documented here.
   offers no mid-inference stop, so one pass finishes and is discarded.
 - Telugu is untouched. Transcription there is 37,692 ms; 1.6 s is 4% of it.
 - Rate limiting is per process, so N workers means N times the configured budget.
+
+### Added (PR 45)
+
+- Structured JSON logging with session and turn correlation ids carried in `contextvars`,
+  so a log line is attributable to one conversation. Nineteen log statements previously
+  carried no session at all.
+- **Redaction by field name in the formatter**, not by convention: `transcript`, `reply`,
+  `text`, `api_key` and similar are replaced with `[redacted]` while the key stays visible,
+  so a withheld value is distinguishable from an absent one. This service promises
+  `audio_retained: false`; leaking the same text into stdout through a convenience field
+  would have broken that promise somewhere nobody looks.
+- A dependency-free metrics registry with **bounded label cardinality** - labels come from
+  closed sets and a ceiling refuses new series rather than growing - exposed as Prometheus
+  text at an **authenticated** `/metrics`.
+- Per-stage turn timings (`detect_language`, `transcribe`, `plan`, `synthesize`, `total`),
+  because a single latency number hides the only term that has ever mattered.
+- Uvicorn's own loggers are routed through the same formatter at startup. Without this the
+  process emitted two formats at once, and the unstructured half was every request line.
+- `language-unsupported` as an utterance outcome, and `UnsupportedLanguageError`, which is
+  deliberately **not** an `AdapterError` because nothing failed.
+
+### Changed (PR 45)
+
+- An utterance whose language is confidently identified as one the transcriber cannot serve
+  is declined in ~1.7 s instead of transcribed over 37,533 ms into text nobody should act on.
+  Telugu is the measured case and the default; set
+  `PITCHBOT_SPEECH_STT_UNSUPPORTED_LANGUAGES=` to restore the previous behaviour. Telugu
+  **text** turns are unaffected.
+
+### Fixed (PR 45)
+
+- `/health` reported whether authentication was enforced from a name bound at import, so the
+  field meant to make an open server visible was a snapshot of startup that could be wrong
+  rather than visibly stale. Found by a test, not by review.
+
+### Deferred (PR 45)
+
+- Access-log lines carry no correlation id: uvicorn logs them after the request context has
+  exited, so correlating them needs middleware rather than a `contextvars` block.
+- `synthesize` is defined as a stage but not yet recorded; reply audio is produced by a
+  background task on the socket path.
+- Metrics are per process and in memory. Two workers report two independent registries, and a
+  restart loses history - fine for a scrape target, not a substitute for a time-series store.
+- Telugu below the confidence floor still costs 37.7 s, because refusing on an uncertain guess
+  would silence a buyer the model might have understood.

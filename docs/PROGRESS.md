@@ -2179,3 +2179,76 @@ short-secret refusal are each load-bearing.
   small and synthesised; a real corpus (backlog item 3) would settle it properly.
 - **`enable_real_time_audio` is still inert.** Authentication does not change that, and it must
   be wired or removed before any live channel.
+
+## PR 45 - Make the system explain itself, and stop pretending about Telugu
+
+Three items, clubbed: the productised latency measurement surface, observability, and the
+Telugu decision.
+
+### The service could not be observed
+
+No structlog, no metrics, no tracing. Nineteen log statements, none carrying a session, so the
+transcription warning, the recall timeout and the reply-audio failure belonging to one turn
+were indistinguishable from three unrelated ones. And `docs/BENCHMARKS.md` was explicit that
+the shipped `turn_latency_ms` must not be published as a benchmark, because it was measured,
+sent to one browser, and discarded.
+
+Shipped: correlation ids in `contextvars`; JSON logs; per-stage turn timings; a
+dependency-free metrics registry exposed as Prometheus text at an authenticated `/metrics`.
+
+Two design constraints did most of the work.
+
+**Redaction is structural, not procedural.** Buyer content is stripped by the formatter based
+on field name. This service promises `audio_retained: false`, and structured logging makes it
+a one-line mistake to undo that by attaching "a bit of context" to a warning. The key is kept
+so `transcript: [redacted]` is distinguishable from the field never being set.
+
+**Label cardinality is bounded by construction.** Labels come from closed sets and a ceiling
+refuses new series rather than growing, counting the refusals so a labelling bug is visible
+instead of fatal - the same failure the rate limiter avoids by keying on credentials.
+
+### Telugu was measured before it was retracted
+
+The recorded note said `small` "loops badly on Telugu". A loop is a generation problem with
+standard controls, so it was worth testing before retracting a language.
+
+It **is** a loop: `no_repeat_ngram_size=3` takes 37,533 ms to **2,216 ms**, a 16.9x speedup.
+
+And it does not matter. Every one of six configurations returns nonsense - the reference
+"మేము రిటైల్ షాప్ నడుపుతాము" came back as "మరింరIsn claiming the jammals from the charity
+sponsor". Whisper `small` cannot transcribe Telugu; the 37 seconds was the model flailing, and
+the knob buys two seconds of nonsense instead of thirty-seven.
+
+Nor can the knob be kept for the languages that work. On deliberately repetitive English a
+buyer who said "50,000 rupees" twice had the second occurrence rewritten to "50 thousand
+rupees", because the trigram was forbidden. The budget extractor reads numbers out of exactly
+those strings and already misses hedged variants.
+
+So Telugu speech is now **declined** - in the ~1.7 s identification costs, with the outcome
+`language-unsupported`, which is the treatment this project already gives an unconfigured
+transcriber. Only on a confident identification; an uncertain guess still transcribes. Telugu
+text turns are untouched.
+
+### A bug the tests found
+
+`/health` reported whether authentication was enforced from a name bound at import, so the
+field whose entire purpose is making an open server visible was a startup snapshot that could
+be wrong rather than visibly stale. Found by writing the test, not by reading the code.
+
+Tests: 1052 -> **1104 passed, 19 skipped**; 1053 / 69 in the zero-extras clean venv. Five
+mutation checks confirm redaction, the cardinality ceiling, the decline, the `/metrics`
+dependency and the `/health` fix are each load-bearing. Verified against a live server: a real
+turn produced `pitchbot_turns_total{disposition="continue",language="en"} 1` with zero dropped
+series, and uvicorn's access lines came out as JSON.
+
+### Deferred
+
+- **Access logs carry no correlation id.** Uvicorn emits them after the request context has
+  exited, so correlating them needs middleware rather than a `contextvars` block.
+- **`synthesize` is defined but not recorded.** Reply audio is produced by a background task
+  on the socket path and has no timing hook yet.
+- **Metrics are per process and in memory.** Two workers report two registries and a restart
+  loses history: a scrape target, not a time-series store.
+- **Telugu below the confidence floor still costs 37.7 s**, because refusing on an uncertain
+  guess would silence a buyer the model might have understood.
+- **`enable_real_time_audio` is still inert.**

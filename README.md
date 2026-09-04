@@ -164,6 +164,40 @@ Each credential gets its own token bucket. Buckets are keyed by credential and n
 client address, which is attacker-chosen and unbounded — keying on it would turn the limiter
 into the memory exhaustion it exists to prevent. Limits are per process.
 
+### Observability
+
+Logs are JSON, one object per line, carrying the `session_id` and `turn_id` in scope. Uvicorn's
+own loggers are routed through the same formatter at startup, so the process does not emit two
+formats at once.
+
+**Buyer content is redacted by the formatter, not by convention.** Fields whose names contain
+`transcript`, `text`, `reply`, `api_key` and similar are replaced with `[redacted]`, with the
+key left visible so a withheld value is distinguishable from an absent one. This service
+promises `audio_retained: false`; a convenience field on a warning is the easiest way to break
+that promise somewhere nobody thinks to look, so it is prevented rather than reviewed for.
+
+`/metrics` serves Prometheus text and **requires a credential** — it reports which languages
+are being spoken, how many turns ran and how the service is performing, which is exactly the
+reconnaissance an anonymous caller wants. Turn stages are recorded separately
+(`detect_language`, `transcribe`, `plan`, `synthesize`, `total`) because a single latency
+number hides the only term that has ever mattered. Label values come from closed sets and a
+cardinality ceiling refuses new series rather than growing, so the registry cannot become the
+memory leak it was added to detect.
+
+### What PitchBot will not do in Telugu
+
+**Telugu speech is declined, not transcribed.** Whisper `small` returns nonsense in every
+decoder configuration measured — the reference *"మేము రిటైల్ షాప్ నడుపుతాము"* came back as
+*"మరింరIsn claiming the jammals from the charity sponsor"* — and takes **37,533 ms** to do it.
+A `no_repeat_ngram_size=3` fix gives a 16.9× speedup and still returns nonsense, while
+rewriting legitimate repetition in English, so it was rejected.
+
+An utterance whose language is confidently identified as Telugu is therefore declined in
+~1.7 s with the outcome `language-unsupported`, which is the treatment this project already
+gives an unconfigured transcriber. **Telugu text turns still work** — the conversation engine,
+its phrasing and its script repair are unaffected. Set
+`PITCHBOT_SPEECH_STT_UNSUPPORTED_LANGUAGES=` to restore the previous behaviour.
+
 See:
 
 - [Compliance and privacy gates](docs/COMPLIANCE_AND_PRIVACY.md)

@@ -136,3 +136,31 @@ def test_non_local_environment_starts_with_a_credential() -> None:
 
 def test_local_environment_may_run_open() -> None:
     assert Settings(app_env="local", api_keys="").api_keys == ""
+
+
+@pytest.mark.usefixtures("enforcing")
+def test_metrics_endpoint_requires_a_credential(client: TestClient) -> None:
+    """An open /metrics would undo the boundary: it reports traffic, languages and timings.
+
+    It also lives outside the simulator router, so it does not inherit that router's
+    dependency and has to declare its own - which is exactly the kind of thing that gets
+    forgotten.
+    """
+
+    assert client.get("/metrics").status_code == 401
+    authorised = client.get("/metrics", headers={"X-API-Key": SECRET})
+    assert authorised.status_code == 200
+    assert "pitchbot_metrics_dropped_series_total" in authorised.text
+
+
+def test_metrics_endpoint_is_open_when_nothing_is_configured(client: TestClient) -> None:
+    assert client.get("/metrics").status_code == 200
+
+
+@pytest.mark.usefixtures("enforcing")
+def test_health_stays_open_so_a_probe_can_reach_it(client: TestClient) -> None:
+    """Liveness must not need a secret, or an orchestrator cannot restart a wedged server."""
+
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["authentication_enforced"] is True

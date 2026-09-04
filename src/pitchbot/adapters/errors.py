@@ -40,3 +40,25 @@ class DeliberationPreempted(RuntimeError):
     logs with warnings during entirely normal operation and would hide a real adapter
     failure among them.
     """
+
+
+class UnsupportedLanguageError(RuntimeError):
+    """The buyer's language is one this transcriber is known not to be able to transcribe.
+
+    Not an :class:`AdapterError`, for the same reason :class:`DeliberationPreempted` is not:
+    nothing failed. The adapter identified the language, recognised it as one it cannot
+    serve, and declined before spending the CPU - which is a correct outcome and must not be
+    logged as a fault or reported to the caller as "the transcriber is unavailable", because
+    the transcriber is available and working.
+
+    Measured 2026-09-05: Whisper ``small`` on Telugu returns nonsense in every decoder
+    configuration tried and takes 37,533 ms to do it. Declining in ~1.7 s and saying which
+    language was heard is strictly better than either outcome.
+    """
+
+    def __init__(self, language: str) -> None:
+        super().__init__(
+            f"this transcriber cannot transcribe {language!r}; the utterance was declined "
+            "rather than transcribed into text that cannot be trusted"
+        )
+        self.language = language

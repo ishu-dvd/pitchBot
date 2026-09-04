@@ -9,6 +9,10 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     log_level: str = "INFO"
+    # JSON lines carrying session and turn correlation ids. Off in `local` would be nicer to
+    # read by hand, but a format that differs between a developer's machine and production is
+    # a format whose redaction nobody has actually seen work, so it is on everywhere.
+    log_json: bool = True
     database_url: str = "sqlite:///./data/pitchbot.db"
 
     enable_telephony: bool = False
@@ -90,6 +94,19 @@ class Settings(BaseSettings):
     # produce a broken transcript, it produces a fluent translation, and no confidence
     # signal distinguishes the two.
     speech_stt_early_detection_min_probability: float = 0.7
+    # Languages this transcriber is known not to be able to transcribe, so an utterance in
+    # one is declined instead of transcribed into text nobody should act on.
+    #
+    # Telugu is the measured case and the default. Whisper `small` returns nonsense in every
+    # decoder configuration tried -- "మేము రిటైల్ షాప్ నడుపుతాము" came back as "మరింరIsn
+    # claiming the jammals from the charity sponsor" -- and takes 37,533 ms to do it, which
+    # is also the worst latency number in this project. Understanding scores at or below
+    # guessing in Telugu and is already gated out separately.
+    #
+    # Only applied when the language was CONFIDENTLY identified by early detection, so an
+    # uncertain guess still transcribes. Set to empty to restore the previous behaviour.
+    # Telugu TEXT turns are unaffected; this is about speech only.
+    speech_stt_unsupported_languages: str = "te"
 
     # Text-to-speech is off by default, and for a different reason than the other two.
     # The browser client already speaks replies with the Web Speech API, so this is not a
@@ -152,6 +169,12 @@ class Settings(BaseSettings):
             raise ValueError("speech_stt_early_detection_seconds must not be negative")
         if not 0.0 <= self.speech_stt_early_detection_min_probability <= 1.0:
             raise ValueError("speech_stt_early_detection_min_probability must be between 0 and 1")
+        for entry in (item.strip() for item in self.speech_stt_unsupported_languages.split(",")):
+            if entry and entry not in {"en", "hi", "te", "mixed", "unknown"}:
+                raise ValueError(
+                    f"speech_stt_unsupported_languages entry {entry!r} must be one of "
+                    "'en', 'hi', 'te', 'mixed', 'unknown'"
+                )
         if self.speech_stt_language not in {"", "en", "hi", "mixed", "unknown"}:
             raise ValueError(
                 "speech_stt_language must be empty (auto-detect) or one of "

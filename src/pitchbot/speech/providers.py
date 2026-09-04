@@ -145,6 +145,14 @@ def _stt_language(value: str) -> LanguageCode | None:
     return LanguageCode(value) if value else None
 
 
+def _unsupported_languages(value: str) -> frozenset[LanguageCode]:
+    """Languages the transcriber declines rather than transcribes badly."""
+
+    return frozenset(
+        LanguageCode(entry) for entry in (item.strip() for item in value.split(",")) if entry
+    )
+
+
 def build_voice_activity_detector(settings: Settings) -> tuple[VoiceActivityDetector, str]:
     """The configured detector, or a startup error naming what is missing."""
 
@@ -187,6 +195,7 @@ def build_speech_to_text(settings: Settings) -> tuple[SpeechToTextAdapter | None
         allow_download=settings.speech_stt_allow_download,
         language=_stt_language(settings.speech_stt_language),
         early_detection_min_probability=settings.speech_stt_early_detection_min_probability,
+        unsupported_languages=_unsupported_languages(settings.speech_stt_unsupported_languages),
     )
     return adapter, f"{adapter.provenance().provider_id}:{adapter.model_size}"
 
