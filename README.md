@@ -119,9 +119,50 @@ move — asked for stance, one model answered `stalling` to every turn — and i
 all in Telugu, where every commercially-licensed model that fits this hardware scores at or
 below guessing. Numbers in [Benchmarks](docs/BENCHMARKS.md).
 
+### The language is decided before the buyer stops
+
+Transcription is **88–98%** of the silence between a buyer finishing a sentence and hearing a
+reply, and the default configuration was paying for it twice: with no language declared,
+Whisper encodes the audio once to identify the language and again to decode it — 3,857 ms
+against 2,235 ms when the language is already known.
+
+Guessing the language instead was measured and rejected. Forcing the wrong one does not
+produce a damaged transcript, it produces a **fluent translation**: Hindi audio decoded as
+English came back as *"We run a retail shop and our budget is 50,000 rupees"* at confidence
+0.616, higher than the *correct* Telugu transcript scored (0.316). No threshold separates
+those.
+
+So the detection pass is not made cheaper — it is made **earlier**. It runs on the first
+2.0 s of speech while the buyer is still talking, and by the endpoint the language is already
+known. End to end this takes English from **3,983 ms to 2,407 ms** and Hindi from 4,844 ms to
+3,389 ms, with identical transcripts. Below a 0.7 confidence floor, for a language outside
+`{en, hi, te}`, or for an utterance that ends before detection finishes, it falls back to
+exactly the previous behaviour.
+
 ## Safety and compliance
 
 When live capabilities are implemented, PitchBot must identify itself as an AI sales assistant. The target policy design blocks live outreach until consent/legal-basis, DND, calling-hour, suppression, recording, privacy, official-provider, usage-cap, and operator-approval gates pass. Unknown policy state must fail closed.
+
+### API access
+
+Every simulator endpoint and the audio socket require a credential, configured as
+comma-separated `name:secret` pairs in `PITCHBOT_API_KEYS`. Secrets must be at least 16
+characters — a short key is not weak authentication, it is the appearance of it.
+
+`PITCHBOT_APP_ENV=local` may run without one, so the local demo works as it always has.
+**Any other environment refuses to start without a credential**, because every endpoint is
+otherwise open to anyone who can reach the port, and a single turn costs seconds of CPU.
+`/health` reports `authentication_enforced` so an open server is visible rather than assumed.
+
+Requests carry `X-API-Key`. The WebSocket cannot — browsers may not set headers on one — so
+it accepts the key as a subprotocol: `new WebSocket(url, ["pitchbot.v1", "pitchbot.key.<secret>"])`.
+A query parameter was rejected: it would be written to every access log and proxy trace the
+connection passes through. The bundled web UI reads a key from `?key=…` once and keeps it in
+`sessionStorage`.
+
+Each credential gets its own token bucket. Buckets are keyed by credential and never by
+client address, which is attacker-chosen and unbounded — keying on it would turn the limiter
+into the memory exhaustion it exists to prevent. Limits are per process.
 
 See:
 
