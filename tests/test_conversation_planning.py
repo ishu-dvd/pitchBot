@@ -162,13 +162,26 @@ def test_every_language_renders_a_reply_for_every_slot(language: LanguageCode) -
     assert render_reply(ReplyPlan(acknowledge=None, ask=None), language).strip()
 
 
-def test_hinglish_is_answered_in_hindi() -> None:
-    """A buyer writing code-switched Hindi reads Hindi; answering in English is worse."""
+def test_hinglish_is_answered_in_hinglish() -> None:
+    """A buyer writing code-switched Hindi is answered in the register they used.
+
+    This used to redirect to the Hindi table, so *"aapka budget kitna hai"* came back in
+    formal Devanagari. The buyer can read that - it is not a comprehension failure - but
+    it is not the register they chose, and in an Indian B2B conversation switching someone
+    into literary Hindi reads as correcting them rather than answering them.
+
+    The mixing is deliberate, not a shortcut: `budget`, `website` and `proposal` stay
+    English because those are the words the buyer used. Translating them would be more
+    internally consistent and less like anything a person actually says.
+    """
 
     mixed = render_reply(ReplyPlan(acknowledge=None, ask=Slot.BUDGET), LanguageCode.MIXED)
     hindi = render_reply(ReplyPlan(acknowledge=None, ask=Slot.BUDGET), LanguageCode.HINDI)
 
-    assert mixed == hindi
+    assert mixed != hindi
+    # Romanised: no Devanagari at all, and the English business noun kept as-is.
+    assert not any("\u0900" <= character <= "\u097f" for character in mixed)
+    assert "budget" in mixed.lower()
 
 
 def test_an_unidentified_language_is_answered_in_english() -> None:

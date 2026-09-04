@@ -303,6 +303,19 @@ def test_the_engine_follows_a_buyer_who_switches() -> None:
 # --------------------------------------------------------------------------------------
 
 
+OPENING_TURNS: dict[LanguageCode, str] = {
+    LanguageCode.ENGLISH: "We run a shop",
+    LanguageCode.HINDI: "हमारी दुकान है",
+    LanguageCode.TELUGU: "మా దుకాణం ఉంది",
+}
+"""A first turn genuinely written in each language.
+
+Not a neutral-looking token: ``"ok"`` is Latin script and is therefore *English evidence*,
+so priming a Hindi session with it starts a vote to leave Hindi before the test has begun.
+The first turn counts like any other, which is the point of the test above it.
+"""
+
+
 @pytest.mark.parametrize(
     ("opening", "switch_to", "turns"),
     [
@@ -339,7 +352,7 @@ def test_a_buyer_who_never_mentions_it_still_moves_the_conversation(
     """
 
     engine, session = _session()
-    engine.process_turn(session, text="ok", language=opening)
+    engine.process_turn(session, text=OPENING_TURNS[opening], language=opening)
 
     first = engine.process_turn(session, text=turns[0], language=opening)
     assert first.language is opening
@@ -375,11 +388,12 @@ def test_a_buyer_can_switch_and_come_back_without_asking_either_time() -> None:
     assert back.language_switched
 
 
-def test_typing_hinglish_without_asking_is_answered_in_hindi() -> None:
+def test_typing_hinglish_without_asking_is_answered_in_hinglish() -> None:
     """Romanised code-switching is a switch too, and the commonest one typed.
 
     A buyer writing Latin-script Hindi cannot be told from an English speaker by script,
-    so the vocabulary signal is the only thing that separates them.
+    so the vocabulary signal is the only thing that separates them - and the reply comes
+    back in the same romanised register rather than in formal Devanagari.
     """
 
     engine, session = _session()
@@ -390,9 +404,7 @@ def test_typing_hinglish_without_asking_is_answered_in_hindi() -> None:
     )
     assert result.language is LanguageCode.MIXED
     assert result.language_switched
-    # `MIXED` has no phrase table of its own; a Hinglish writer reads Hindi fluently, so
-    # the reply is Hindi rather than a fourth, half-written vocabulary.
-    assert any("\u0900" <= character <= "\u097f" for character in result.reply)
+    assert not any("\u0900" <= character <= "\u097f" for character in result.reply)
 
 
 def test_a_transcriber_label_alone_can_move_a_conversation() -> None:
@@ -469,6 +481,42 @@ def test_a_switch_does_not_cost_the_conversation_its_place() -> None:
     known = {fact.key for fact in engine.snapshot(session).facts}
     assert "business_type" in known
     assert "budget_stated" in known
+
+
+def test_the_very_first_turn_counts_as_evidence_like_any_other() -> None:
+    """The opening language is a default, not a turn the buyer has to spend.
+
+    Seeding the session used to consume the first turn: a buyer speaking Hindi from the
+    start needed *three* turns to be heard rather than two, because turn one was swallowed
+    recording what the caller had already said. Found by asking what happens when someone
+    simply opens in another language, which is the ordinary way a call in the wrong
+    language begins.
+    """
+
+    engine, session = _session()
+    first = engine.process_turn(session, text="हमारी दुकान कपड़ों की है", language=LanguageCode.ENGLISH)
+    assert not first.language_switched
+
+    second = engine.process_turn(
+        session, text="हमें ऑनलाइन ऑर्डर चाहिए", language=LanguageCode.ENGLISH
+    )
+    assert second.language is LanguageCode.HINDI
+    assert second.language_switched
+
+
+def test_a_request_made_as_the_opening_turn_is_obeyed() -> None:
+    """Asking straight after the greeting is the most natural moment to ask.
+
+    While seeding returned early this was ignored outright - the one turn where a request
+    is most likely was the one turn that could not be heard.
+    """
+
+    engine, session = _session()
+    result = engine.process_turn(
+        session, text="please speak in hindi", language=LanguageCode.ENGLISH
+    )
+    assert result.language is LanguageCode.HINDI
+    assert result.language_switched
 
 
 def test_a_switch_is_acknowledged_in_the_language_switched_to() -> None:

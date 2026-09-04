@@ -1,0 +1,33 @@
+# A buyer who writes Hinglish - romanised Hindi with English business words - which is how
+# a large share of Indian B2B conversation actually happens in writing and on calls.
+#
+# Until this was handled the agent detected the switch and then answered in formal
+# Devanagari, because `mixed` redirected to the Hindi phrase table. The buyer can read
+# that; it is not a comprehension failure. It is a register failure, and switching someone
+# into literary Hindi when they wrote Hinglish reads as correcting them.
+#
+# Note which words stay English in the replies - budget, website, catalogue, proposal.
+# Those are the words the buyer used. Translating them would be more consistent and less
+# like anything a person says.
+#
+# Run: pitchbot-talk --script examples/hinglish.txt
+#
+# Turn 1 is English, so the conversation opens in English.
+We run an online toy store.
+
+# Turn 2 is the first Hinglish turn. One turn is not evidence, so nothing changes yet.
+Humein ek catalogue aur online payment chahiye.
+
+# Turn 3 is the second, so the switch lands and is acknowledged in Hinglish.
+Yeh hamare liye thoda mehanga lag raha hai.
+
+# Turn 4 is a stall, in Hinglish. Stance detection had no romanised entries at all before
+# this - safety worked in Hinglish and stance did not, so a Hinglish buyer could refuse
+# contact but could not object to a price.
+Main baad mein batata hoon.
+
+# Turn 5 fills the budget.
+Hamara budget 150000 rupaye hai.
+
+# Turn 6 agrees, so the agent closes instead of asking another question.
+Theek hai, shuru karte hain.

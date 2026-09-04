@@ -88,9 +88,21 @@ Both are replayable end to end:
 ```bash
 pitchbot-talk --script examples/switch-en-hi.txt      # implicit, and back again
 pitchbot-talk --script examples/switch-request-te.txt # asked for, twice
+pitchbot-talk --script examples/hinglish.txt          # Hinglish in, Hinglish back
 ```
 
 Pass `--fixed-language` to turn this off entirely.
+
+### Hinglish is its own language, not a detour through Hindi
+
+Type `aapka budget kitna hai` and the reply comes back romanised — *"Aapka budget kitna soch
+rahe hain?"* — rather than in formal Devanagari. That used to redirect to the Hindi table,
+which a Hinglish speaker can read perfectly well; it is a register mismatch, not a
+comprehension one, and being answered in literary Hindi reads as being corrected.
+
+Notice which words stay English: `budget`, `website`, `catalogue`, `proposal`, `demo`. Those
+are the words the buyer used, and translating them would be more consistent and less like
+anything a person says.
 
 ### Things worth trying
 
@@ -106,6 +118,7 @@ Pass `--fixed-language` to turn this off entirely.
 | `we are comparing another vendor` | a different objection gets a different answer |
 | `okay, let's start` | it **stops qualifying and closes**, even with slots unknown |
 | two Hindi sentences in a row | it **switches language** and says so, without being asked |
+| `aapka budget kitna hai, batao` | Hinglish in, **Hinglish back** - not formal Devanagari |
 | `can you speak in Hindi?` | a request switches immediately instead |
 | `we sell Hindi books online` | naming a language is **not** asking for it - nothing changes |
 | `మా బడ్జెట్ 200000 రూపాయలు` (with `--language te`) | Telugu extraction |
@@ -236,6 +249,17 @@ Tuning, if it cuts you off or never triggers:
 | --- | --- | --- |
 | `--vad-mode` | `2` | `3` in a noisy room, `1` if it is missing quiet speech |
 | `--whisper-model` | `small` | `medium` for better Hindi, at roughly 3× the latency |
+
+**It says something while it thinks.** The measured wait between you finishing a sentence and
+the reply becoming audible is about **4.5 seconds**, essentially all of it transcription. So
+after 700 ms it says one short thing — `Hmm.`, `अच्छा।`, `Achcha.`, `అలాగా.` — and at most one
+more after 2,500 ms. That takes the longest stretch of silence from ~4.2 s down to ~1.2 s,
+which is an ordinary conversational pause. `--no-backchannel` turns it off.
+
+It will never say "ok", "yes" or "theek hai" while thinking, however natural those sound. The
+filler is chosen *before* your sentence has been transcribed, so if you had just asked "so
+you'll do it for fifty thousand?", an agreeing filler would have committed the agent out loud
+to a number nobody quoted. It only ever acknowledges hearing you.
 
 **You cannot interrupt it.** There is no acoustic echo cancellation, so the microphone is
 paused for the whole reply — otherwise it would hear itself through your speakers and treat

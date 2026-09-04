@@ -1999,3 +1999,46 @@
   additive with defaults, so a reverted build reads `"1"` records and rejects `"2"` ones
   loudly on the version literal rather than dropping a language silently. No migration, no
   new dependency; switching needs no optional extra.
+
+## PR 42 addendum - thinking out loud, and Hinglish as its own language
+
+Two follow-ups landed in the same PR, both from asking what the conversation *feels* like
+rather than whether it works.
+
+### Backchannel
+- **Measured the gap first.** End of buyer speech to audible reply is **4,507 ms** (en) /
+  **4,553 ms** (hi), of which transcription is 3,982 / 4,453 ms. Planning is 1-25 ms and
+  reply synthesis with a resident voice is 92-501 ms. The first probe reloaded the Piper
+  voice per synthesis (~2.4 s) and inflated everything; discarded and redone.
+- **That decided the hook point.** The wait *is* transcription, so the filler starts on
+  `SpeechTurnPipeline.on_thinking`, fired immediately before awaiting the transcriber.
+  Waiting for the transcript would mean speaking into the last 500 ms of a 4,500 ms silence.
+- **Receipt, never assent.** The filler is chosen before the sentence is transcribed, so it
+  must be safe against anything the buyer might have said. "Ok"/"theek hai"/"haan" are
+  rejected: if the untranscribed sentence was a price proposal, an agreeing filler commits
+  the agent out loud. Tested across every language against an explicit assent set.
+- **Result:** longest contiguous silence 4,156 -> 1,428 ms (en), 4,304 -> 1,103 ms (hi).
+  Rendered `turn-en.wav` / `turn-hi.wav` in this folder for a human to listen to.
+- **Bug found by the clean-venv run:** the loop slept *to* a threshold then re-measured, and
+  the re-measurement could land a fraction below it, so the second filler silently never
+  fired on a timer that looked correct. Fixed by reporting the target as a floor.
+- **Telugu transcription measured at 37.7 s** for a 4.1 s clip - `small` loops. Recorded in
+  BENCHMARKS; no filler policy hides that, and it is the worst latency number here so far.
+
+### Hinglish
+- `MIXED` was a redirect to the Hindi table, so *"aapka budget kitna hai"* came back in
+  formal Devanagari. Register failure, not comprehension. It now has its own phrase table
+  and is in `supported_languages()`, held to the same import-time completeness checks.
+- **Adding it exposed a real gap:** safety detection handled romanised Hinglish and
+  **stance detection did not** - a Hinglish buyer could refuse contact but could not object
+  to a price. `INTENT_PHRASES` now has romanised entries.
+- **Second gap found by running it:** the romanised marker list was too thin, so the switch
+  landed three turns late on the shipped example. Expanded from 48 to 89 tokens; the switch
+  now lands on the second Hinglish turn as designed.
+- Which words stay English (`budget`, `website`, `catalogue`, `proposal`) is deliberate -
+  they are the words the buyer used.
+
+### Validation after both
+896 passed / 19 skipped with extras; 859 / 56 clean venv. ruff + mypy (`src tests`) clean;
+`mypy --strict` clean on win32/linux/darwin. Backchannel tests run 5x without flaking.
+New example `examples/hinglish.txt`.

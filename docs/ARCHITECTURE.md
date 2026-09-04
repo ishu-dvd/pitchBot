@@ -247,6 +247,60 @@ Known limitation: stance and language detection share the same blind spot — th
 negation window, and romanised Telugu has no settled spelling, so a Telugu speaker typing
 in Latin is detected less reliably than one typing in Telugu script.
 
+## Thinking out loud, and answering in the register the buyer used
+
+Two things a person does that the agent did not.
+
+### Filling the silence
+
+Measured, the gap between a buyer finishing a sentence and the reply becoming audible is
+**~4.5 seconds**, and transcription is essentially all of it — 3,982 ms of 4,507 ms in
+English. Four and a half seconds of dead air reads as a dropped call.
+
+That measurement dictates the hook point. Because the wait is transcription, the filler has
+to start when the **endpointer closes the utterance** — before anyone knows what was said.
+`SpeechTurnPipeline` therefore calls `on_thinking` immediately before awaiting the
+transcriber, and the listener starts a task that says at most two short things.
+
+Being chosen before the transcript exists is also what constrains *what* it may say:
+
+> **A filler may assert receipt. It may never assert assent.**
+
+"Hmm" and "got it" say only *I heard you*. "Ok", "yes" and "theek hai" say *I agree* — and
+if the sentence still being transcribed was *"so you'll do it for fifty thousand?"*, the
+agent has agreed out loud to a number nobody quoted. The natural-sounding tokens are absent
+for exactly that reason, and a test enforces it across every language.
+
+Only the **microphone** is muted for a filler, never the turn-taking machine: this runs
+while the pipeline is awaiting inside `push`, and `agent_started_speaking` would move that
+machine underneath the utterance it is transcribing. The utterance's audio has already been
+copied out of the buffer, so muting the device is both sufficient and safe. The filler is
+shielded from cancellation so a reply arriving mid-word does not clip a syllable — it costs
+at most the filler's own 0.4–1.1 s against a 4.5 s gap, and a clipped syllable sounds like
+a fault where a completed one sounds like a person.
+
+Longest single stretch of silence, reconstructed from the measurements: **4,156 → 1,428 ms**
+in English, **4,304 → 1,103 ms** in Hindi.
+
+### Answering in Hinglish
+
+`MIXED` used to redirect to the Hindi phrase table, so a buyer typing *"aapka budget kitna
+hai"* was answered in formal Devanagari. That is not a comprehension failure — they can read
+it — it is a **register** failure, and in an Indian B2B conversation switching someone into
+literary Hindi reads as correcting them.
+
+Hinglish is now a first-class language with its own table, held to the same import-time
+completeness checks as the others. Which words stay English is the point rather than a
+shortcut: `budget`, `website`, `catalogue`, `payment`, `demo` and `proposal` are the words
+the buyer used, and translating them to `बजट`/`प्रस्ताव` would be more internally consistent
+and less like anything a person says.
+
+Adding it immediately exposed a real gap of the same shape Telugu shipped with: safety
+detection handled romanised Hinglish and **stance detection did not**, so a Hinglish buyer
+could refuse contact but could not object to a price. `INTENT_PHRASES` now carries romanised
+entries, and the structural tests are driven from `supported_languages()`, so the next
+language cannot be half-added either.
+
 ## Deployment profiles
 
 ```mermaid

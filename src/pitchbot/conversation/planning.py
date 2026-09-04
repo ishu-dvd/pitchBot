@@ -470,16 +470,97 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             ),
         },
     ),
+    # Hinglish, and a first-class language rather than a redirect to Hindi.
+    #
+    # `MIXED` used to route to the Hindi table, so a buyer typing *"aapka budget kitna
+    # hai"* was answered in formal Devanagari. That is not the register they wrote in, and
+    # in an Indian B2B conversation the register carries meaning: romanised Hindi with
+    # English business nouns is how these calls actually sound, and switching someone into
+    # literary Hindi reads as correcting them.
+    #
+    # Note which words stay English. `budget`, `website`, `catalogue`, `payment`, `demo`
+    # and `proposal` are the words the buyer themself used; translating them to
+    # `बजट`/`प्रस्ताव` would be more consistent and less like anything a person says. The
+    # mixing is the point, not a shortcut.
+    LanguageCode.MIXED: LanguagePhrases(
+        acknowledge={
+            Slot.BUSINESS_TYPE: "Theek hai, aapka business samajh gaya.",
+            Slot.REQUESTED_FEATURES: "Website mein kya chahiye, woh note kar liya.",
+            Slot.BUDGET: "Budget saaf bataane ke liye shukriya.",
+            Slot.TIMELINE: "Timing samajh gaya.",
+        },
+        ask={
+            Slot.BUSINESS_TYPE: "Aapka business kya bechta hai?",
+            Slot.REQUESTED_FEATURES: "Website par aapke customers kya kar paayein?",
+            Slot.BUDGET: "Aapka budget kitna soch rahe hain?",
+            Slot.TIMELINE: "Yeh website kab tak live karni hai?",
+        },
+        closing=(
+            "Itni jaankari kaafi hai. Ek chhota demo theek rahega ya likhit proposal bhej doon?"
+        ),
+        confirm=(
+            "Badhiya - main proposal taiyaar karke bhej deta hoon, "
+            "aur jab aapko time ho tab us par baat kar lenge."
+        ),
+        repeated="Yeh maine note kar liya hai.",
+        switched="Bilkul, aage Hinglish mein hi baat karte hain.",
+        objection={
+            Intent.OBJECTING: (
+                "Baat sahi hai, price kaam ke hisaab se hi hona chahiye. "
+                "Hum fixed package nahi, aapki zaroorat ke hisaab se scope banate hain."
+            ),
+            Intent.COMPARING: (
+                "Compare karna sahi hai. "
+                "Bas dekh lijiye ki har quote mein kya kya shaamil hai, phir number dekhiye."
+            ),
+            Intent.STALLING: (
+                "Koi jaldi nahi hai. "
+                "Main details bhej deta hoon, jab aapko theek lage tab aage badhte hain."
+            ),
+        },
+        pitch={
+            "apparel": (
+                "Kapdon mein customer photo dekh kar hi decide karta hai, "
+                "isliye size chart aur fast product page zyada bikwaate hain."
+            ),
+            "toys": (
+                "Toys mein customer pehle age aur safety dekhta hai, "
+                "isliye clear age band aur stock count se cart chhodne wale kam hote hain."
+            ),
+            "books": (
+                "Kitaabon mein search aur category browsing hi dukaan chalaati hai, "
+                "kyunki customer ko pehle se pata hota hai use kya chahiye."
+            ),
+            "food": (
+                "Khaane mein order ka time aur delivery area sabse zyada maayne rakhta hai, "
+                "wahan galat jaankari se order seedha haath se jaata hai."
+            ),
+            "import-export": (
+                "Import-export mein customer specification aur bulk enquiry chahta hai, "
+                "isliye site ko bechne se zyada enquiry chhaantni chahiye."
+            ),
+            "plastics": (
+                "Plastic mein customer grade aur quantity compare karta hai, "
+                "isliye technical catalogue aur enquiry form hi asli kaam karte hain."
+            ),
+        },
+    ),
 }
 
 
 def supported_languages() -> frozenset[LanguageCode]:
     """Languages the planner can actually speak, as opposed to ones the enum names.
 
-    ``LanguageCode`` will always list more members than there are phrase sets - ``MIXED``
-    and ``UNKNOWN`` are routing states, not languages anyone writes sentences in. Exposing
-    the real set lets a caller check before promising a buyer a language, and lets a test
-    assert completeness without hard-coding the list it is checking.
+    ``LanguageCode`` will always list more members than there are phrase sets - ``UNKNOWN``
+    is a routing state, not a language anyone writes sentences in. Exposing the real set
+    lets a caller check before promising a buyer a language, and lets a test assert
+    completeness without hard-coding the list it is checking.
+
+    ``MIXED`` **is** in this set. It used to be excluded and redirected to Hindi, which
+    answered a buyer writing *"aapka budget kitna hai"* in formal Devanagari - a register
+    they had not used and would not have chosen. Hinglish is a language people conduct
+    business in, so it has its own table and is held to the same completeness checks as
+    the others.
     """
 
     return frozenset(_PHRASES)
@@ -488,15 +569,12 @@ def supported_languages() -> frozenset[LanguageCode]:
 def _table(language: LanguageCode) -> LanguageCode:
     """Which phrase set answers this language.
 
-    ``MIXED`` is code-switched Hindi-English, and a buyer writing Hinglish reads Hindi
-    fluently, so answering in Hindi is right. ``UNKNOWN`` gets English because guessing an
-    Indic language for unidentified text would be a worse failure than being formal. Any
-    language with its own phrase set answers in itself.
+    Every language with its own phrase set answers in itself, which now includes ``MIXED``.
+    ``UNKNOWN`` gets English, because guessing an Indic language for text nobody could
+    identify would be a worse failure than being formal.
     """
 
-    if language in _PHRASES:
-        return language
-    return LanguageCode.HINDI if language is LanguageCode.MIXED else LanguageCode.ENGLISH
+    return language if language in _PHRASES else LanguageCode.ENGLISH
 
 
 def render_reply(

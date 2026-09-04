@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from time import perf_counter
@@ -99,6 +99,7 @@ class SpeechTurnPipeline:
         frame_duration_ms: int = 250,
         max_utterance_bytes: int = MAX_UTTERANCE_BYTES,
         min_confidence: float = MIN_TRANSCRIPT_CONFIDENCE,
+        on_thinking: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= max_utterance_bytes <= MAX_UTTERANCE_BYTES:
             raise ValueError(f"max_utterance_bytes must be between 1 and {MAX_UTTERANCE_BYTES}")
@@ -112,6 +113,15 @@ class SpeechTurnPipeline:
         self._frame_duration_ms = frame_duration_ms
         self._max_utterance_bytes = max_utterance_bytes
         self._min_confidence = min_confidence
+        self._on_thinking = on_thinking
+        """Called when an utterance closes and transcription is about to start.
+
+        This exists because of where the time actually goes. Measured, the wait between a
+        buyer finishing a sentence and the reply being audible is ~4.5 s, of which
+        transcription is 3,982 ms of 4,507 ms in English. Anything that wants to cover
+        that silence has to be told at this moment - by the time the transcript exists,
+        almost the whole gap has already been spent in silence.
+        """
         self._buffer: list[AudioChunk] = []
         self._buffered_bytes = 0
         self._oversize = False
@@ -245,6 +255,15 @@ class SpeechTurnPipeline:
 
         chunks = self._buffer
         self._release_audio()
+        if self._on_thinking is not None:
+            # Before the await, so the listener starts counting from the moment the buyer
+            # actually stopped rather than from whenever this coroutine is next scheduled.
+            # Failures are contained: a backchannel is a courtesy, and losing the turn
+            # because the courtesy raised would be a strictly worse conversation.
+            try:
+                self._on_thinking()
+            except Exception:  # noqa: BLE001 - a filler must never cost a turn
+                logger.warning("Backchannel notification failed", exc_info=True)
         started = perf_counter()
         try:
             best = await self._best_transcript(chunks)

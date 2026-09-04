@@ -30,9 +30,10 @@ import sys
 import tempfile
 import time
 import wave
-from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -42,6 +43,7 @@ from pitchbot.conversation.models import ConversationResult
 from pitchbot.conversation.planning import Slot, supported_languages
 from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
+from pitchbot.speech.backchannel import Backchannel
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
 VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
@@ -292,10 +294,90 @@ class Listener:
     than papered over with a barge-in that would trigger on our own voice.
     """
 
-    def __init__(self, microphone: Any, pipeline: Any) -> None:
+    def __init__(
+        self,
+        microphone: Any,
+        pipeline: Any,
+        *,
+        backchannel: Backchannel | None = None,
+        say: Callable[[str], Awaitable[Any]] | None = None,
+        language: LanguageCode = LanguageCode.ENGLISH,
+    ) -> None:
         self._microphone = microphone
         self._pipeline = pipeline
         self._frames: AsyncIterator[AudioChunk] | None = None
+        self._backchannel = backchannel
+        self._say = say
+        self._language = language
+        self._thinking: asyncio.Task[None] | None = None
+
+    def attach(self, pipeline: Any) -> None:
+        """Give the listener its pipeline after construction.
+
+        Needed because the two reference each other: the pipeline must call
+        :meth:`start_thinking` the instant an utterance closes, and the listener must
+        drive the pipeline. Building the listener first and attaching keeps that knot
+        explicit rather than hiding it behind a mutable default or a factory closure.
+        """
+
+        self._pipeline = pipeline
+
+    def start_thinking(self) -> None:
+        """Begin filling the silence, called the moment transcription starts.
+
+        Measured, that silence is ~4.5 s and is almost entirely transcription, so this is
+        the only moment early enough to cover it.
+        """
+
+        if self._say is None or self._backchannel is None:
+            return
+        self._backchannel.begin_turn()
+        self._thinking = asyncio.get_running_loop().create_task(self._fill())
+
+    async def _fill(self) -> None:
+        """Say at most a couple of short things while the transcriber works.
+
+        Only the **microphone** is paused, never the turn-taking machine. This runs while
+        the pipeline is awaiting inside ``push``, and ``agent_started_speaking`` would move
+        that machine underneath the very utterance it is transcribing. Pausing the device
+        is enough: it stops the agent hearing itself, and the utterance's audio was already
+        copied out of the buffer before transcription began.
+        """
+
+        started = monotonic()
+        if self._backchannel is None or self._say is None:  # pragma: no cover - guarded
+            return
+        for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            elapsed_ms = (monotonic() - started) * 1000
+            if elapsed_ms < target:
+                await asyncio.sleep((target - elapsed_ms) / 1000)
+            # `max` rather than a fresh reading alone: having slept *to* the threshold, a
+            # re-measurement can still land a fraction of a millisecond below it, and the
+            # policy would then decline and the loop would end. The second filler would
+            # silently never fire, on a timer that looked correct. Waiting for the target
+            # is what happened, so that is what is reported.
+            waited_ms = max(float(target), (monotonic() - started) * 1000)
+            phrase = self._backchannel.due(waited_ms, self._language)
+            if phrase is None:
+                continue
+            self._microphone.pause()
+            try:
+                # Shielded so that the reply arriving mid-filler does not chop a word in
+                # half. It costs at most the filler's own length, measured at 0.4-1.1 s
+                # against a 4.5 s gap, and a clipped syllable sounds like a fault where a
+                # completed one sounds like a person.
+                await asyncio.shield(self._say(phrase))
+            finally:
+                self._microphone.resume()
+
+    async def _stop_thinking(self) -> None:
+        """Stop filling, waiting for any half-spoken filler to finish first."""
+
+        task, self._thinking = self._thinking, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def next_turn(self, *, on_skip: Callable[[str], None] | None = None) -> HeardTurn | None:
         """Wait until the buyer finishes a sentence and return it.
@@ -311,6 +393,7 @@ class Listener:
             self._frames = self._microphone.frames()
         async for chunk in self._frames:
             outcome = await self._pipeline.push(chunk)
+            await self._stop_thinking()
             utterance = outcome.utterance
             if utterance is None:
                 continue
@@ -334,6 +417,7 @@ class Listener:
         """
 
         self._pipeline.set_language(language)
+        self._language = language
 
     def agent_stopped_speaking(self) -> None:
         self._pipeline.agent_stopped_speaking()
@@ -342,10 +426,16 @@ class Listener:
     async def close(self) -> None:
         """Release the device. Ending the conversation must not leave a mic open."""
 
+        await self._stop_thinking()
         await self._microphone.stop()
 
 
-def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Listener | None, str]:
+def build_listener(
+    language: LanguageCode,
+    args: argparse.Namespace,
+    *,
+    say: Callable[[str], Awaitable[Any]] | None = None,
+) -> tuple[Listener | None, str]:
     """A microphone-backed listener for this language, or the reason there is not one."""
 
     from pitchbot.adapters.faster_whisper_stt import (
@@ -366,6 +456,8 @@ def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Li
         return None, f"no transcriber. Install it with: {STT_HINT}"
 
     microphone = Microphone(device=args.input_device, sample_rate_hz=SAMPLE_RATE_HZ)
+    backchannel = None if args.no_backchannel or say is None else Backchannel()
+    listener = Listener(microphone, None, backchannel=backchannel, say=say, language=language)
     pipeline = SpeechTurnPipeline(
         detector=WebRtcVoiceActivityDetector(mode=args.vad_mode, sample_rate_hz=SAMPLE_RATE_HZ),
         transcriber=FasterWhisperSpeechToTextAdapter(
@@ -385,10 +477,15 @@ def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Li
         # duration the endpointer reasons about, so silence is measured eight times too
         # long and the buyer never gets to finish a sentence.
         frame_duration_ms=FRAME_MS,
+        on_thinking=listener.start_thinking,
     )
-    listener = Listener(microphone, pipeline)
+    listener.attach(pipeline)
     hint = "forced" if args.fixed_language else "auto-detect"
-    note = f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model} ({hint})"
+    filler = "off" if backchannel is None else f"after {Backchannel().first_after_ms} ms"
+    note = (
+        f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model} "
+        f"({hint}); backchannel {filler}"
+    )
     return listener, note
 
 
@@ -423,7 +520,14 @@ async def run(args: argparse.Namespace) -> int:
 
     listener: Listener | None = None
     if args.listen:
-        listener, note = build_listener(language, args)
+        # The filler is spoken with the same voice as the reply, so it has to be handed
+        # the speaker rather than building its own: a second Piper instance would pay the
+        # ~2.1 s load again and could pick a different voice for the same language.
+        async def fill(text: str) -> None:
+            if speaker is not None:
+                await speaker.say(text)
+
+        listener, note = build_listener(language, args, say=fill)
         print(f"  listening : {note}")
         if listener is None:
             return 2
@@ -605,6 +709,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-model",
         default="small",
         help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
+    )
+    parser.add_argument(
+        "--no-backchannel",
+        action="store_true",
+        help="stay silent while thinking instead of saying 'hmm' - the measured wait "
+        "between a buyer finishing and the reply being audible is about 4.5 seconds",
     )
     parser.add_argument(
         "--fixed-language",

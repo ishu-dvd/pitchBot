@@ -467,19 +467,27 @@ class ConversationEngine:
         agree, so nothing about the existing contract changes until a buyer switches.
         """
 
-        if declared != state.declared_language:
+        if state.declared_language is LanguageCode.UNKNOWN:
+            # Seeding the session, not re-declaring it. This deliberately falls through to
+            # detection instead of returning: the caller's opening language is a default,
+            # and consuming a whole turn to record it would mean a buyer who asks for Hindi
+            # as the very first thing they say is ignored, and one who simply speaks Hindi
+            # from the start needs three turns to be heard rather than two.
+            state.declared_language = declared
+            state.language = declared
+        elif declared != state.declared_language:
             # A re-declaration is an instruction, not evidence, so it clears any partial
             # switch: a buyer halfway to Hindi whose operator moves the call to Telugu
             # must not then arrive in Hindi one turn later on the strength of a vote cast
             # before the reassignment.
-            switched = state.language is not LanguageCode.UNKNOWN and declared != state.language
+            switched = declared != state.language
             state.declared_language = declared
             state.language = declared
             state.pending_language = None
             state.pending_language_count = 0
             return declared, switched
 
-        current = state.language if state.language is not LanguageCode.UNKNOWN else declared
+        current = state.language
         if not self._detect_language_switch:
             state.language = current
             return current, False

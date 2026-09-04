@@ -44,12 +44,14 @@ OPT_OUT_SAMPLES: dict[LanguageCode, str] = {
     LanguageCode.ENGLISH: "Please do not call me again.",
     LanguageCode.HINDI: "मुझे दोबारा कॉल मत कीजिए।",
     LanguageCode.TELUGU: "నాకు వద్దు, దయచేసి మళ్ళీ కాల్ చేయవద్దు.",
+    LanguageCode.MIXED: "Mujhe dobara call mat karo.",
 }
 
 ABUSE_SAMPLES: dict[LanguageCode, str] = {
     LanguageCode.ENGLISH: "You are an idiot.",
     LanguageCode.HINDI: "तुम बेवकूफ हो।",
     LanguageCode.TELUGU: "నువ్వు మూర్ఖుడు.",
+    LanguageCode.MIXED: "Aap bewakoof hain.",
 }
 
 # One way each supported language can push back, agree, hesitate, or shop around. The same
@@ -75,6 +77,16 @@ INTENT_SAMPLES: dict[LanguageCode, dict[Intent, str]] = {
         Intent.STALLING: "నేను తరువాత ఆలోచిస్తాను.",
         Intent.COMPARING: "మేము వేరే కంపెనీని చూస్తున్నాము.",
     },
+    # Romanised, because that is what a Hinglish buyer types. Adding the `mixed` phrase
+    # table exposed that `INTENT_PHRASES` had no romanised entries at all: safety worked
+    # in Hinglish and stance did not, so a Hinglish buyer could refuse contact but could
+    # not object to a price. The same shape of gap Telugu shipped with, caught here first.
+    LanguageCode.MIXED: {
+        Intent.READY: "Theek hai, shuru karte hain.",
+        Intent.OBJECTING: "Yeh bahut mehanga hai.",
+        Intent.STALLING: "Main baad mein batata hoon.",
+        Intent.COMPARING: "Hum doosri company se baat kar rahe hain.",
+    },
 }
 
 # A sentence in each language that names a business the catalogue knows.
@@ -82,6 +94,7 @@ BUSINESS_SAMPLES: dict[LanguageCode, tuple[str, str]] = {
     LanguageCode.ENGLISH: ("We sell toys.", "toys"),
     LanguageCode.HINDI: ("हम कपड़े बेचते हैं।", "apparel"),
     LanguageCode.TELUGU: ("మేము బొమ్మలు అమ్ముతాము.", "toys"),
+    LanguageCode.MIXED: ("Hum kapde bechte hain.", "apparel"),
 }
 
 
@@ -284,6 +297,7 @@ SWITCH_REQUEST_SAMPLES: dict[LanguageCode, str] = {
     LanguageCode.ENGLISH: "Could you please speak in English?",
     LanguageCode.HINDI: "कृपया हिंदी में बात कीजिए।",
     LanguageCode.TELUGU: "దయచేసి తెలుగులో మాట్లాడండి.",
+    LanguageCode.MIXED: "Aap Hinglish mein baat kar sakte hain?",
 }
 
 
