@@ -112,3 +112,34 @@ All notable changes to PitchBot are documented here.
 - Closing a session leaked its briefing: `close_session` dropped conversation state but not
   the observations beside it, retaining every finished conversation for the process
   lifetime.
+
+### Added (PR 44)
+
+- API key authentication on every simulator endpoint and the audio socket, matched in
+  constant time and registered as a router-level dependency so an endpoint added later is
+  closed by default. Browsers authenticate the WebSocket with a subprotocol, because a
+  browser cannot set a header on one and a query parameter would be written to every access
+  log the connection passes through.
+- Per-credential token-bucket rate limiting. A turn costs seconds of CPU, so an anonymous
+  caller in a loop did not degrade the service, it stopped it.
+- Early language detection: the language is identified from a 2.0 s prefix while the buyer
+  is still speaking, so transcription no longer pays for its own detection pass. Measured
+  end to end on the shipped path, English fell from 3,983 ms to 2,407 ms and Hindi from
+  4,844 ms to 3,389 ms, with identical transcripts.
+- `authentication_enforced` on `/health`, so a server reporting "ok" while wide open is
+  visible rather than assumed.
+
+### Changed (PR 44)
+
+- `app_env` other than `local` now **refuses to start** without a credential. A warning
+  would have scrolled past once at startup and never been seen again.
+
+### Deferred (PR 44)
+
+- Waiting briefly for a detection that is nearly finished at the endpoint. It is currently
+  abandoned outright, which wastes an almost-complete pass, but any wait risks adding to the
+  gap it exists to shrink and needs its own measurement.
+- Cancelling a detection stops the coroutine, not the worker thread beneath it: Whisper
+  offers no mid-inference stop, so one pass finishes and is discarded.
+- Telugu is untouched. Transcription there is 37,692 ms; 1.6 s is 4% of it.
+- Rate limiting is per process, so N workers means N times the configured budget.

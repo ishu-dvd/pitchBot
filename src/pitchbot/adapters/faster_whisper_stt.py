@@ -142,6 +142,52 @@ make.
 
 LICENSE_REVIEW_DATE: Final[str] = "2026-09-03"
 
+DEFAULT_EARLY_DETECTION_SECONDS: Final[float] = 2.0
+"""How much speech to hand the language detector while the buyer is still talking.
+
+Measured 2026-09-05 (``probe_language_floor_sweep.py``, nine utterances, three languages).
+A shorter prefix is not merely less accurate, it is *dangerously* less accurate: at 1.5 s
+Telugu was reported as **Malayalam at probability 0.90**, a wrong answer confident enough to
+clear any usable floor. At 2.0 s no floor from 0.5 to 0.9 admitted a single wrong language.
+2.0 s is therefore the shortest measured-safe prefix, and prefix length is pure added
+latency before detection can even begin, so it is not raised past that.
+"""
+
+DEFAULT_EARLY_DETECTION_MIN_PROBABILITY: Final[float] = 0.7
+"""Floor for *acting* on an early detection, deliberately stricter than 0.5.
+
+:data:`DEFAULT_MIN_LANGUAGE_PROBABILITY` governs whether a detected language is *reported*.
+This governs whether one is *imposed on the decoder*, and the two failure modes are not
+comparable. Measured 2026-09-05 (``probe_forced_language_safety.py``), Hindi audio decoded
+under a forced ``en`` came back as fluent, plausible English - "We run a retail shop and our
+budget is 50,000 rupees" - at confidence 0.616, while the *correct* Telugu transcript scored
+0.316. A wrong forced language does not produce a visibly broken transcript; it produces a
+confident translation, and no confidence signal separates the two.
+
+At a 2.0 s prefix the nearest wrong detection sat at 0.42, so 0.7 leaves 0.28 of margin and
+still accepted 6 of 9 utterances. Falling below the floor costs only the saving - the
+utterance is transcribed exactly as it is today - so the floor is set to protect the
+transcript rather than to maximise how often the optimisation fires.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class DetectedLanguage:
+    """A language Whisper actually detected, with the probability it reported.
+
+    Carried from the early pass into transcription so the adapter can impose the language
+    on the decoder *and still report the real probability*. Passing ``language=`` to Whisper
+    makes it echo that language back at probability 1.00, so without this the adapter would
+    report a certainty no model ever produced.
+    """
+
+    language: LanguageCode
+    probability: float
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.probability <= 1.0:
+            raise ValueError("probability must be between 0 and 1")
+
 
 @dataclass(frozen=True, slots=True)
 class ModelLicense:
@@ -311,6 +357,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         force_language: bool = True,
         max_audio_seconds: float = DEFAULT_MAX_AUDIO_SECONDS,
         min_language_probability: float = DEFAULT_MIN_LANGUAGE_PROBABILITY,
+        early_detection_min_probability: float = DEFAULT_EARLY_DETECTION_MIN_PROBABILITY,
         emit_partials: bool = True,
     ) -> None:
         if beam_size < 1:
@@ -319,6 +366,8 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
             raise ValueError("max_audio_seconds must be positive")
         if not 0.0 <= min_language_probability <= 1.0:
             raise ValueError("min_language_probability must be between 0 and 1")
+        if not 0.0 <= early_detection_min_probability <= 1.0:
+            raise ValueError("early_detection_min_probability must be between 0 and 1")
         self._license = model_license(model_size)
         self._model_size = model_size
         self._device = device
@@ -330,6 +379,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         self._force_language = force_language
         self._max_audio_seconds = max_audio_seconds
         self._min_language_probability = min_language_probability
+        self._early_detection_min_probability = early_detection_min_probability
         self._emit_partials = emit_partials
         self._model: Any | None = None
         self._load_lock = asyncio.Lock()
@@ -502,9 +552,48 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
             return 0.0
         return min(1.0, max(0.0, value))
 
+    async def detect_prefix_language(self, payload: bytes) -> DetectedLanguage | None:
+        """Identify the language from a prefix of an utterance that is still being spoken.
+
+        This exists to move work, not to reduce it. Whisper pads every clip to a full 30 s
+        mel window, so detection costs the same ~1.6 s whether it is given 1.5 s of audio or
+        8 s (measured 1,631-1,758 ms across every prefix length tried). It cannot be made
+        cheaper - it can only be made *earlier*, overlapping the buyer's own speech, so that
+        by the time they stop the language is already known and only the decode pass is left.
+
+        That is worth 1,622 ms of the 3,982 ms the shipped path spends transcribing an
+        English utterance, because the default ``speech_stt_language = ""`` means Whisper
+        runs the encoder twice: once to identify the language, once to decode it.
+
+        Returns ``None`` - and the caller then transcribes exactly as it does today - when
+        the audio is malformed, detection fails, or the detected language is not one this
+        adapter can force. That last case is a real safety net and not a formality: at a
+        1.5 s prefix Telugu was reported as Malayalam at probability 0.90, which no floor
+        would have caught but this map rejects outright.
+        """
+
+        if not payload or len(payload) % _SAMPLE_WIDTH_BYTES:
+            return None
+        try:
+            model = await self._load_model()
+            _, numpy = require_faster_whisper()
+            samples = numpy.asarray(_decode_pcm(payload), dtype=numpy.float32)
+            detected, probability, _ = await asyncio.to_thread(model.detect_language, samples)
+        except Exception:
+            # Never fail the utterance for this. The whole feature is an optimisation whose
+            # fallback is the behaviour that shipped before it existed.
+            logger.warning("early language detection failed; falling back", exc_info=True)
+            return None
+        language = _LANGUAGE_BY_WHISPER_CODE.get(str(detected))
+        if language is None:
+            return None
+        return DetectedLanguage(language=language, probability=float(probability))
+
     async def transcribe(
         self,
         audio: AsyncIterator[AudioChunk],
+        *,
+        language_hint: DetectedLanguage | None = None,
     ) -> AsyncIterator[TranscriptChunk]:
         payload = await self._collect_audio(audio)
         model = await self._load_model()
@@ -516,6 +605,21 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
             if self._force_language and self._language in _WHISPER_FORCEABLE
             else None
         )
+        # A hint is only ever *acted on* here, at the one point where acting on it is
+        # dangerous. Forcing a wrong language does not produce a broken transcript, it
+        # produces a fluent translation - Hindi audio decoded as `en` came back as
+        # "We run a retail shop and our budget is 50,000 rupees" at confidence 0.616,
+        # higher than the correct Telugu transcript scored. So the floor guards the
+        # decoder, not the report.
+        honoured: DetectedLanguage | None = None
+        if (
+            whisper_language is None
+            and language_hint is not None
+            and language_hint.language in _WHISPER_FORCEABLE
+            and language_hint.probability >= self._early_detection_min_probability
+        ):
+            whisper_language = language_hint.language.value
+            honoured = language_hint
 
         try:
             segments, info = await asyncio.to_thread(
@@ -533,6 +637,16 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         weighted_confidence = 0.0
         total_duration = 0.0
         sequence = 0
+
+        # Passing `language=` makes Whisper echo that language back at probability 1.00,
+        # so reading `info` after honouring a hint would report a certainty no model ever
+        # produced. The hint carries the probability its own detection pass measured, and
+        # that is the honest number to resolve from.
+        detected_code = honoured.language.value if honoured is not None else info.language
+        detected_probability = (
+            honoured.probability if honoured is not None else info.language_probability
+        )
+        reported_language = self._resolve_language(detected_code, detected_probability)
 
         while True:
             try:
@@ -552,7 +666,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
                 # see everything said so far, because Whisper never revises a segment.
                 yield TranscriptChunk(
                     text=self._repair_script("".join(pieces).strip()),
-                    language=self._resolve_language(info.language, info.language_probability),
+                    language=reported_language,
                     confidence=self._segment_confidence(segment),
                     is_final=False,
                     sequence=sequence,
@@ -564,7 +678,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         # last final transcript, so a per-segment final would discard everything before it.
         yield TranscriptChunk(
             text=self._repair_script("".join(pieces).strip()),
-            language=self._resolve_language(info.language, info.language_probability),
+            language=reported_language,
             confidence=min(1.0, max(0.0, confidence)),
             is_final=True,
             sequence=sequence,
@@ -594,6 +708,8 @@ __all__ = [
     "DEFAULT_BEAM_SIZE",
     "DEFAULT_COMPUTE_TYPE",
     "DEFAULT_DEVICE",
+    "DEFAULT_EARLY_DETECTION_MIN_PROBABILITY",
+    "DEFAULT_EARLY_DETECTION_SECONDS",
     "DEFAULT_MAX_AUDIO_SECONDS",
     "DEFAULT_MIN_LANGUAGE_PROBABILITY",
     "DEFAULT_MODEL_SIZE",
@@ -605,6 +721,7 @@ __all__ = [
     "PROVIDER_ID",
     "SUPPORTED_SAMPLE_RATE_HZ",
     "FasterWhisperSpeechToTextAdapter",
+    "DetectedLanguage",
     "ModelLicense",
     "WhisperProvenance",
     "installed_distribution",

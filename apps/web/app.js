@@ -136,11 +136,36 @@ const audio = new AudioTransport(
   (frame) => player.push(frame),
 );
 
+// The API key, when the server is enforcing one. Kept in sessionStorage rather than
+// localStorage so closing the tab discards it, and read from ?key= once so a link can
+// carry it without it staying in the address bar.
+const API_KEY_STORAGE = "pitchbot.apiKey";
+
+function readApiKey() {
+  const fromQuery = new URLSearchParams(location.search).get("key");
+  if (fromQuery) {
+    sessionStorage.setItem(API_KEY_STORAGE, fromQuery);
+    history.replaceState(null, "", location.pathname);
+    return fromQuery;
+  }
+  return sessionStorage.getItem(API_KEY_STORAGE) || "";
+}
+
+const apiKey = readApiKey();
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      ...(options.headers || {}),
+    },
   });
+  if (response.status === 401) {
+    sessionStorage.removeItem(API_KEY_STORAGE);
+    throw new Error("This server requires an API key. Reload with ?key=<your-key>.");
+  }
   const body = await response.json();
   if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`);
   return body;

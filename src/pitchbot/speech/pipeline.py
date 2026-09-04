@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -26,6 +27,15 @@ logger = logging.getLogger(__name__)
 MAX_UTTERANCE_BYTES = 2 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 2_000
 MIN_TRANSCRIPT_CONFIDENCE = 0.3
+
+_PCM_SAMPLE_RATE_HZ = 16_000
+_PCM_SAMPLE_WIDTH_BYTES = 2
+"""The one audio shape this path carries: 16 kHz mono 16-bit PCM.
+
+Only used to turn a duration into a byte count for the early-detection threshold. Every
+transcriber in this repository refuses any other rate outright rather than resampling, so
+assuming it here cannot silently mis-measure a stream that would otherwise have worked.
+"""
 
 
 class UtteranceOutcome(StrEnum):
@@ -70,6 +80,31 @@ class RetunableTranscriber(Protocol):
     def set_language(self, language: LanguageCode | None) -> None: ...
 
 
+@runtime_checkable
+class EarlyDetectingTranscriber(Protocol):
+    """A transcriber that can identify a language before the utterance has finished.
+
+    Structural, like :class:`RetunableTranscriber`, so a transcriber without this stays a
+    perfectly valid transcriber and simply never gets asked. ``runtime_checkable`` verifies
+    only that the method exists, which is the same guarantee the sibling protocol relies on.
+
+    The hint is deliberately typed as an opaque ``object``. The pipeline's whole job here is
+    to carry a token from the detection call to the transcription call without inspecting
+    it; only the transcriber that minted it knows what a language hint means or when it is
+    safe to act on one. Typing it concretely would drag the transcriber's internals into the
+    turn machine for no benefit.
+    """
+
+    async def detect_prefix_language(self, payload: bytes) -> object | None: ...
+
+    def transcribe(
+        self,
+        audio: AsyncIterator[AudioChunk],
+        *,
+        language_hint: object | None = None,
+    ) -> AsyncIterator[TranscriptChunk]: ...
+
+
 class SpeechTurnPipeline:
     """Turns a stream of audio frames into endpointed, transcribed buyer utterances.
 
@@ -99,12 +134,15 @@ class SpeechTurnPipeline:
         frame_duration_ms: int = 250,
         max_utterance_bytes: int = MAX_UTTERANCE_BYTES,
         min_confidence: float = MIN_TRANSCRIPT_CONFIDENCE,
+        early_detection_seconds: float = 0.0,
         on_thinking: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= max_utterance_bytes <= MAX_UTTERANCE_BYTES:
             raise ValueError(f"max_utterance_bytes must be between 1 and {MAX_UTTERANCE_BYTES}")
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("min_confidence must be between 0 and 1")
+        if early_detection_seconds < 0:
+            raise ValueError("early_detection_seconds must not be negative")
         self._detector = detector
         self._transcriber = transcriber
         self._language = language
@@ -126,6 +164,16 @@ class SpeechTurnPipeline:
         self._buffered_bytes = 0
         self._oversize = False
         self._dropped_frames = 0
+        self._early_detection_bytes = int(
+            early_detection_seconds * _PCM_SAMPLE_RATE_HZ * _PCM_SAMPLE_WIDTH_BYTES
+        )
+        """Speech to accumulate before asking the transcriber to identify the language.
+
+        Zero disables the whole mechanism, which is the behaviour that shipped before it
+        existed: one auto-detecting transcription after the buyer stops.
+        """
+        self._detection_task: asyncio.Task[object | None] | None = None
+        self._detection_started = False
 
     @property
     def turn_taking(self) -> TurnTaking:
@@ -231,6 +279,76 @@ class SpeechTurnPipeline:
             return
         self._buffer.append(chunk)
         self._buffered_bytes += len(chunk.data)
+        self._maybe_start_early_detection()
+
+    def _maybe_start_early_detection(self) -> None:
+        """Ask the transcriber to identify the language while the buyer is still speaking.
+
+        Whisper pads every clip to a 30 s window, so identifying the language costs the same
+        ~1.6 s whether it is handed 2 s of audio or 8 s. That cost cannot be reduced - it can
+        only be moved off the critical path, into the time the buyer is still talking. When
+        it lands before the endpoint, transcription skips its own detection pass, which is
+        1,622 ms of the 3,982 ms an English utterance currently spends being transcribed.
+
+        Fires at most once per utterance. Firing repeatedly as more audio arrived would
+        spend that CPU over and over for an answer that does not change.
+        """
+
+        if self._early_detection_bytes <= 0 or self._detection_started:
+            return
+        if self._buffered_bytes < self._early_detection_bytes:
+            return
+        transcriber = self._transcriber
+        if not isinstance(transcriber, EarlyDetectingTranscriber):
+            return
+        payload = b"".join(chunk.data for chunk in self._buffer)
+        self._detection_started = True
+        self._detection_task = asyncio.create_task(transcriber.detect_prefix_language(payload))
+
+    def _take_detection_hint(self) -> object | None:
+        """Consume a finished early detection, or give up on an unfinished one.
+
+        Deliberately does not wait. The utterance is already endpointed, so waiting would
+        add silence to the very gap this exists to shrink, and an unfinished detection is
+        not a failure: transcription simply proceeds exactly as it did before this existed.
+        """
+
+        task = self._detection_task
+        self._detection_task = None
+        if task is None:
+            return None
+        if not task.done():
+            task.cancel()
+            return None
+        if task.cancelled():
+            return None
+        error = task.exception()
+        if error is not None:
+            logger.warning("Early language detection failed", exc_info=error)
+            return None
+        return task.result()
+
+    def _cancel_detection(self) -> None:
+        """Abandon an in-flight detection whose utterance no longer exists.
+
+        Cancellation reaches the coroutine, not the worker thread underneath it: the
+        transcriber runs inference through ``asyncio.to_thread`` and Whisper offers no
+        mid-inference stop, so the thread finishes its pass regardless and its result is
+        discarded. That is bounded waste - one detection pass - and the alternative, holding
+        the utterance open until the thread returns, would delay the next turn.
+        """
+
+        task = self._detection_task
+        self._detection_task = None
+        self._detection_started = False
+        if task is None:
+            return
+        if task.done():
+            if not task.cancelled():
+                # Retrieve it so asyncio does not log "exception was never retrieved".
+                task.exception()
+            return
+        task.cancel()
 
     def _release_audio(self) -> None:
         """Drop every buffered byte and clear the oversize latch with it.
@@ -242,6 +360,7 @@ class SpeechTurnPipeline:
         self._buffer = []
         self._buffered_bytes = 0
         self._oversize = False
+        self._cancel_detection()
 
     async def _transcribe(self, segment: SpeechSegment) -> UtteranceResult:
         dropped = self._dropped_frames
@@ -254,6 +373,9 @@ class SpeechTurnPipeline:
             return self._result(segment, UtteranceOutcome.OVERSIZE, 0.0, dropped)
 
         chunks = self._buffer
+        # Before _release_audio, which cancels any in-flight detection along with the
+        # buffer it was computed from.
+        hint = self._take_detection_hint()
         self._release_audio()
         if self._on_thinking is not None:
             # Before the await, so the listener starts counting from the moment the buyer
@@ -266,7 +388,7 @@ class SpeechTurnPipeline:
                 logger.warning("Backchannel notification failed", exc_info=True)
         started = perf_counter()
         try:
-            best = await self._best_transcript(chunks)
+            best = await self._best_transcript(chunks, hint)
         except (AdapterError, RuntimeError, ValueError):
             # Transcription is best effort. A failure loses one utterance; it must never
             # drop the call or fabricate what the buyer said.
@@ -293,14 +415,24 @@ class SpeechTurnPipeline:
             dropped_frames=dropped,
         )
 
-    async def _best_transcript(self, chunks: list[AudioChunk]) -> TranscriptChunk | None:
+    async def _best_transcript(
+        self,
+        chunks: list[AudioChunk],
+        hint: object | None = None,
+    ) -> TranscriptChunk | None:
         """Prefer the last final transcript, falling back to the last partial."""
 
         if self._transcriber is None:  # pragma: no cover - guarded by _transcribe
             return None
+        transcriber = self._transcriber
+        stream = _as_stream(chunks)
+        if hint is not None and isinstance(transcriber, EarlyDetectingTranscriber):
+            transcripts = transcriber.transcribe(stream, language_hint=hint)
+        else:
+            transcripts = transcriber.transcribe(stream)
         final: TranscriptChunk | None = None
         partial: TranscriptChunk | None = None
-        async for transcript in self._transcriber.transcribe(_as_stream(chunks)):
+        async for transcript in transcripts:
             if transcript.is_final:
                 final = transcript
             else:
@@ -331,6 +463,7 @@ async def _as_stream(chunks: list[AudioChunk]) -> AsyncIterator[AudioChunk]:
 
 
 __all__ = [
+    "EarlyDetectingTranscriber",
     "FrameResult",
     "RetunableTranscriber",
     "SpeechTurnPipeline",

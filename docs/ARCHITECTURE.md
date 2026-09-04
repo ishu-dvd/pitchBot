@@ -133,6 +133,8 @@ sequenceDiagram
         Mic->>VAD: One 960-byte frame at 16 kHz
         VAD->>Turn: speech / not speech
     end
+    Turn-->>STT: After 2.0 s of speech, identify the language (background)
+    Note over Turn,STT: Overlaps the buyer, so the endpoint does not pay for it
     Turn-->>STT: Utterance closed on trailing silence
     STT-->>Engine: Transcript, language, confidence
     Engine->>Engine: Safety check, then extract facts and stance
@@ -143,6 +145,34 @@ sequenceDiagram
     TTS-->>Speaker: Audio
     Speaker-->>Buyer: Hears the reply
 ```
+
+### Why the language is decided mid-utterance
+
+Transcription is 88-98% of the silence the buyer sits through, and with no language declared
+Whisper encodes the audio twice - once to identify the language, once to decode it. That
+second pass costs 1,622 ms and produces a byte-identical transcript.
+
+It cannot be made cheaper: Whisper pads every clip to a 30 s window, so detection costs the
+same ~1.6 s whether it is handed 1.5 s of audio or 8 s. It can only be made **earlier**. The
+pipeline therefore fires one detection at 2.0 s of buffered speech, on a worker thread, while
+the buyer keeps talking; by the endpoint the answer is usually already there and only the
+decode pass remains.
+
+Three things make that safe rather than merely fast:
+
+- **The floor guards the decoder, not the report.** Acting on a wrong language does not
+  degrade the transcript, it replaces it with a fluent translation, so the hint is only
+  imposed at probability >= 0.7 - stricter than the 0.5 used to *report* a detected language.
+- **A language outside `{en, hi, te}` is discarded outright.** This is what catches the
+  measured case of Telugu being identified as Malayalam at 0.90, which no floor would have.
+- **Every fallback is the previous behaviour.** Below the floor, outside the map, on failure,
+  or when the utterance ends first, the utterance is transcribed exactly as it was before.
+
+The detection is owned by the utterance that produced it. Barge-in, a discarded utterance and
+the agent taking the floor all release the buffered audio, and the detection is cancelled with
+it rather than applied to whatever is said next. Cancellation reaches the coroutine but not
+the worker thread beneath it - Whisper has no mid-inference stop - so one pass finishes and is
+thrown away, which is bounded waste and cheaper than holding the turn open for it.
 
 Three properties of this loop are deliberate and constrain the code:
 
@@ -367,6 +397,24 @@ flowchart LR
     Operator --> Outbound
     Outbound -. disabled by default .-> Provider
 ```
+
+### The API boundary
+
+Until recently there was no boundary at all: ten HTTP endpoints and the audio socket accepted
+any caller. That is a different problem from a normal open API, because one turn costs seconds
+of CPU on this hardware and concurrency is effectively single-digit - an anonymous caller in a
+loop does not degrade the service, it stops it.
+
+Authentication is a dependency on the **router**, not on each route, so an endpoint added
+later is closed by default. Secrets are compared with `hmac.compare_digest` against every
+configured credential, without an early return, so response time does not reveal which key was
+presented. Rate-limit buckets are keyed by credential and never by client address: an address
+is attacker-chosen and unbounded, so keying on it would let one caller allocate unlimited
+buckets and turn the limiter into the exhaustion it was added to prevent.
+
+`app_env='local'` may run open, so the local demo is unaffected. Every other value refuses to
+start without a credential - a warning would have scrolled past once and never been seen
+again, which is how services end up publicly readable.
 
 Data entering from transcripts, websites, prior notes, models, and providers is untrusted. It cannot alter system instructions, credentials, policies, or tool authorization.
 

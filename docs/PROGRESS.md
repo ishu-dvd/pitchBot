@@ -2104,3 +2104,78 @@ Tests: 896 -> **987 passed, 19 skipped**.
   slides but does not yet replace `DeckService`.
 - Plan content is English even when the scaffolding is Hindi or Telugu. Translating model
   output needs a translation model this product does not have.
+
+## PR 44 - Close the front door, and decide the language before the buyer stops
+
+Two changes with one motive: the API was open, and the buyer waits four and a half seconds.
+
+### The API had no boundary
+
+Ten HTTP endpoints and the audio socket accepted any caller - no key, no rate limit, no
+`Depends`. That matters more here than in a typical open API because one turn costs seconds of
+CPU and concurrency is effectively single-digit: an anonymous caller in a loop does not degrade
+the service, it stops it.
+
+Shipped: `name:secret` credentials compared in constant time, a per-credential token bucket,
+and both enforced by a dependency on the **router** so an endpoint added later is closed by
+default. `app_env='local'` may still run open; every other value now refuses to start without a
+credential. `/health` reports `authentication_enforced`, so an open server is visible rather
+than assumed.
+
+The WebSocket needed its own answer: a browser cannot set a header on one. It accepts the key
+as a subprotocol and echoes back only the plain protocol name. A query parameter was rejected -
+it would be written to every access log and proxy trace the connection passes through.
+
+Rate-limit buckets are keyed by credential and never by client address. An address is
+attacker-chosen and unbounded, so keying on it would let one caller allocate unlimited buckets
+and turn the limiter into the memory exhaustion it exists to prevent.
+
+### The default configuration was transcribing everything twice
+
+Measured (`probe_stt_cost_breakdown.py`): with no language declared - the shipped default -
+Whisper encodes the audio once to identify the language and again to decode it. **3,857 ms
+against 2,235 ms**, byte-identical transcript. The obvious suspect, a pure-Python PCM loop over
+64,000 samples, was 12.1 ms and irrelevant.
+
+The obvious fix was measured and **rejected**. Forcing the language the conversation is already
+in does not produce a damaged transcript when wrong, it produces a fluent translation: Hindi
+audio decoded as `en` returned *"We run a retail shop and our budget is 50,000 rupees"* at
+confidence **0.616**, while the *correct* Telugu transcript scored **0.316**. Any threshold
+rejects truth before it rejects fabrication.
+
+Detection cost is flat (1,631-1,758 ms for every prefix tried) because Whisper pads to a 30 s
+window, so it cannot be made cheaper - only earlier. It now runs on the first **2.0 s** of
+speech while the buyer is still talking.
+
+**2.0 s is the shortest measured-safe prefix, not the shortest useful one.** At 1.5 s Telugu
+was identified as **Malayalam at probability 0.90** - high enough to clear any threshold anyone
+would set. At 2.0 s no floor between 0.5 and 0.9 admitted a single wrong language.
+
+End to end on the shipped path, real detector, real adapter, frames at their true 30 ms cadence:
+
+| language | before | after | saved | same transcript |
+| --- | ---: | ---: | ---: | :---: |
+| en | 3,983 ms | 2,407 ms | **1,576 ms (-40%)** | yes |
+| hi | 4,844 ms | 3,389 ms | 1,455 ms (-30%) | yes |
+
+The English "before" independently reproduces the 3,982 ms measured on 2026-09-04 by a
+different probe. Re-run with `--instant`, so there is no speech to overlap, the saving collapses
+to 63 ms and -79 ms: the mechanism wins exactly where it claims to and costs nothing elsewhere.
+
+Tests: 997 -> **1052 passed, 19 skipped**. Five mutation checks confirm the probability floor,
+the detection cancellation, the router dependency, the refusal to start open, and the
+short-secret refusal are each load-bearing.
+
+### Deferred
+
+- **Waiting for a nearly-finished detection.** It is abandoned outright at the endpoint, which
+  wastes an almost-complete pass. Any wait risks adding to the gap it exists to shrink, so it
+  needs its own measurement first.
+- **Cancellation does not stop the worker thread.** Whisper offers no mid-inference stop, so a
+  cancelled pass finishes and is discarded - bounded waste, cheaper than holding the turn open.
+- **Telugu is untouched.** Transcription is 37,692 ms there; 1.6 s is 4% of it.
+- **Rate limiting is per process**, so N workers means N times the configured budget.
+- **The floor rests on nine utterances.** It admitted no wrong language, but the sample is
+  small and synthesised; a real corpus (backlog item 3) would settle it properly.
+- **`enable_real_time_audio` is still inert.** Authentication does not change that, and it must
+  be wired or removed before any live channel.

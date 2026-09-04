@@ -186,6 +186,7 @@ def build_speech_to_text(settings: Settings) -> tuple[SpeechToTextAdapter | None
         download_root=settings.speech_stt_download_root or None,
         allow_download=settings.speech_stt_allow_download,
         language=_stt_language(settings.speech_stt_language),
+        early_detection_min_probability=settings.speech_stt_early_detection_min_probability,
     )
     return adapter, f"{adapter.provenance().provider_id}:{adapter.model_size}"
 

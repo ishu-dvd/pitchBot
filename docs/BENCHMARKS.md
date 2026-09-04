@@ -1337,3 +1337,112 @@ Found only by running the real model end to end. The adapter's `max_new_tokens` 
 having stopped inside `"differentiator"`. Constrained decoding guarantees valid JSON for a
 *finished* answer, so a truncated one is an unparseable fragment rather than a shorter plan.
 Budgets are now per schema: 32 tokens for a topic, 320 for a plan.
+
+## Deciding the language before the buyer stops (2026-09-05)
+
+[Thinking out loud](#thinking-out-loud-2026-09-04) measured the endpoint-to-audible gap at
+**4,507 ms** in English, of which transcription is **3,982 ms**. This section is about where
+that 3,982 ms actually goes, and how 1,576 ms of it was removed without changing a transcript.
+
+### The shipped default runs the encoder twice
+
+`probe_stt_cost_breakdown.py`, one 7.17 s English clip, `small` int8 CPU, beam 1, medians of
+three fully-drained runs (faster-whisper's `segments` is a lazy generator, so timing
+`transcribe()` alone measures nothing):
+
+| Stage | Measured |
+| --- | ---: |
+| `_decode_pcm`, the pure-Python PCM conversion | **12.1 ms** |
+| `transcribe(language=None)` - the shipped default | **3,857 ms** |
+| `transcribe(language="en")` | **2,235 ms** |
+| `detect_language()` alone | **1,682 ms** |
+
+The transcripts were byte-identical. `3,857 - 2,235 = 1,622`, which is `detect_language` to
+within noise: the default `speech_stt_language = ""` means Whisper encodes the audio once to
+identify the language and once to decode it. The PCM conversion, the obvious suspect for a
+pure-Python loop over 64,000 samples, is 0.3% of the total and not worth touching.
+
+### Forcing the language is unsafe, and confidence will not tell you
+
+The obvious fix - force the language the conversation is already in - was measured and
+**rejected**. `probe_forced_language_safety.py`, three languages, every combination:
+
+| audio | forced | mean conf | CER % | what came back |
+| --- | --- | ---: | ---: | --- |
+| en | en | 0.749 | 0.0 | correct |
+| hi | hi | 0.622 | 0.0 | correct |
+| te | te | **0.316** | 0.0 | correct |
+| hi | **en** | **0.616** | 88.5 | *"We run a retail shop and our budget is 50,000 rupees."* |
+| te | en | 0.511 | 284.2 | *"We will also run Retail Shop. Our budget is Rs. 50,000."* |
+
+A wrong forced language does not produce a damaged transcript. It produces a **fluent,
+plausible translation** of what the buyer said, in a language they were not speaking - which
+also destroys the language signal the conversation uses to choose its reply. And it cannot be
+filtered out: the worst offender scored **0.616 while the correct Telugu transcript scored
+0.316**, so any confidence threshold rejects truth before it rejects fabrication.
+`SEPARABLE BY CONFIDENCE ALONE: False`.
+
+### So the saving has to come from starting earlier, not from guessing
+
+Detection cost is **flat** - 1,631-1,758 ms for every prefix length tried - because Whisper
+pads every clip to a 30 s mel window. It cannot be made cheaper. It can only be moved off the
+critical path into the time the buyer is still talking.
+
+`probe_language_floor_sweep.py`, nine utterances (three per language), sweeping prefix length
+against the probability floor. `accepted-WRONG` is the column that matters: those are the
+fabrications above.
+
+| prefix | floor | accepted-correct | accepted-WRONG | rejected |
+| ---: | ---: | ---: | ---: | ---: |
+| 1.5 s | 0.5 | 6 | **1** | 2 |
+| 1.5 s | 0.8 | 5 | **1** | 3 |
+| **2.0 s** | 0.5 | 8 | 0 | 1 |
+| **2.0 s** | **0.7** | **6** | **0** | 3 |
+| 2.5 s | 0.7 | 6 | 0 | 3 |
+| 3.0 s | 0.7 | 7 | 0 | 1 |
+
+**1.5 s is unsafe at every floor**: Telugu was identified as **Malayalam at probability
+0.90**, high enough to clear any threshold anyone would actually set. 2.0 s admitted no wrong
+language at any floor from 0.5 to 0.9.
+
+The shipped operating point is **2.0 s prefix, 0.7 floor**. 0.7 rather than the 0.5 already
+used for *reporting* a language, because this floor decides whether to **impose** one on the
+decoder, and the two failure modes are not comparable. The nearest wrong detection sat at
+0.42, so 0.7 leaves 0.28 of margin, and everything it rejects simply transcribes the way it
+always did.
+
+A second, independent guard sits underneath the floor: a detected language outside
+`{en, hi, te}` is discarded outright. That is what catches the Malayalam case, which no floor
+would have.
+
+### End to end, on the shipped path
+
+`probe_early_detection_end_to_end.py` drives the real `SpeechTurnPipeline` with the real
+WebRTC detector and the real adapter, delivering frames at their true 30 ms cadence. Timed
+from the last frame of speech to the transcript existing - the gap the buyer sits through:
+
+| language | audio | before | after | saved | same transcript |
+| --- | ---: | ---: | ---: | ---: | :---: |
+| en | 8.37 s | **3,983 ms** | **2,407 ms** | **1,576 ms (-40%)** | yes |
+| hi | 8.46 s | 4,844 ms | 3,389 ms | 1,455 ms (-30%) | yes |
+
+The English "before" of 3,983 ms independently reproduces the 3,982 ms measured on
+2026-09-04 by a different probe, which is the strongest evidence available that this is the
+real path and not a bench artifact.
+
+**The cadence is the whole mechanism, and the negative case proves it.** Re-run with
+`--instant`, feeding the same audio with no delay so there is no speech left to overlap:
+
+| language | before | after | saved |
+| --- | ---: | ---: | ---: |
+| en | 3,436 ms | 3,373 ms | 63 ms |
+| hi | 4,323 ms | 4,403 ms | **-79 ms** |
+
+Nothing to overlap, nothing gained - and nothing lost beyond noise. An utterance that ends
+before detection finishes falls back to exactly the previous behaviour, which is also what
+happens below the probability floor and for any language outside the map.
+
+### What this does not fix
+
+Telugu. Transcription there is 37,692 ms and the 1.6 s this saves is 4% of it. That number is
+untouched and remains the worst in the project.

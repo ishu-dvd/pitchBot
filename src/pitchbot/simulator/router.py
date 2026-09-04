@@ -3,22 +3,27 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import NoReturn
 from uuid import UUID, uuid4
 
 from fastapi import (
     APIRouter,
+    Depends,
     HTTPException,
     Query,
     Response,
     WebSocket,
     WebSocketDisconnect,
+    WebSocketException,
     status,
 )
+from starlette.requests import HTTPConnection
 
 from pitchbot.adapters import AudioChunk
 from pitchbot.config import settings
 from pitchbot.conversation import ConversationEngine, ConversationJournal, ConversationJournalError
 from pitchbot.conversation.providers import build_language_model
+from pitchbot.security import ApiCredential, CredentialStore, RateLimiter, parse_api_keys
 from pitchbot.simulator.models import (
     AudioMetadata,
     CreateSessionRequest,
@@ -47,11 +52,109 @@ from pitchbot.storage import (
     create_session_factory,
 )
 
-router = APIRouter(prefix="/api/simulator", tags=["simulator"])
-
 logger = logging.getLogger(__name__)
 
 PLAYBACK_FINISHED = "playback-finished"
+
+API_KEY_HEADER = "x-api-key"
+WEBSOCKET_KEY_PREFIX = "pitchbot.key."
+WEBSOCKET_SUBPROTOCOL = "pitchbot.v1"
+"""How a browser authenticates a WebSocket, which cannot carry a custom header.
+
+`new WebSocket(url, ["pitchbot.v1", "pitchbot.key.<secret>"])`. The browser sends both in
+`Sec-WebSocket-Protocol`; the server reads the key from there and accepts `pitchbot.v1`,
+so the secret is never echoed back. A query parameter was rejected for this: it would be
+written to every access log and proxy trace the connection passes through.
+"""
+
+credentials = CredentialStore(parse_api_keys(settings.api_keys))
+rate_limiter = RateLimiter(
+    capacity=settings.api_rate_limit_burst,
+    refill_per_second=settings.api_rate_limit_per_second,
+)
+
+
+def _offered_subprotocols(connection: HTTPConnection) -> tuple[str, ...]:
+    offered = connection.headers.get("sec-websocket-protocol")
+    if not offered:
+        return ()
+    return tuple(item.strip() for item in offered.split(",") if item.strip())
+
+
+def _accepted_subprotocol(connection: HTTPConnection) -> str | None:
+    """Echo back the plain protocol name, never the one carrying the secret."""
+
+    return (
+        WEBSOCKET_SUBPROTOCOL
+        if WEBSOCKET_SUBPROTOCOL in _offered_subprotocols(connection)
+        else None
+    )
+
+
+def _presented_key(connection: HTTPConnection) -> str | None:
+    header = connection.headers.get(API_KEY_HEADER)
+    if header is not None:
+        return header
+    for entry in _offered_subprotocols(connection):
+        if entry.startswith(WEBSOCKET_KEY_PREFIX):
+            return entry[len(WEBSOCKET_KEY_PREFIX) :]
+    return None
+
+
+def _reject(
+    connection: HTTPConnection,
+    *,
+    status_code: int,
+    detail: str,
+    retry_after: str | None,
+) -> NoReturn:
+    if connection.scope["type"] == "websocket":
+        # 1008 is "policy violation". An HTTPException here would surface as a server
+        # error rather than a clean close, and the client would learn nothing.
+        raise WebSocketException(code=1008, reason=detail)
+    headers = {"Retry-After": retry_after} if retry_after is not None else None
+    raise HTTPException(status_code=status_code, detail=detail, headers=headers)
+
+
+async def require_credential(connection: HTTPConnection) -> ApiCredential | None:
+    """Authenticate and rate-limit one request, for HTTP and WebSocket alike.
+
+    Typed against ``HTTPConnection`` - the base of both ``Request`` and ``WebSocket`` - so
+    a single dependency covers every route on this router. Registering it per-route would
+    have left the next endpoint someone adds unauthenticated by default, which is how the
+    API came to have ten open endpoints in the first place.
+    """
+
+    if not credentials.enforcing:
+        # Only reachable with app_env='local'; Settings refuses to build otherwise.
+        return None
+    credential = credentials.identify(_presented_key(connection))
+    if credential is None:
+        _reject(
+            connection,
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid X-API-Key is required",
+            retry_after=None,
+        )
+    decision = rate_limiter.check(credential.name)
+    if not decision.allowed:
+        logger.warning("Rate limit exceeded for credential %s", credential.name)
+        _reject(
+            connection,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded",
+            retry_after=decision.retry_after_header,
+        )
+    return credential
+
+
+router = APIRouter(
+    prefix="/api/simulator",
+    tags=["simulator"],
+    # Registered on the router, not per route, so an endpoint added later is authenticated
+    # by default. Per-route registration is how this API came to have ten open endpoints.
+    dependencies=[Depends(require_credential)],
+)
 
 
 def _build_service() -> SimulatorService:
@@ -61,6 +164,7 @@ def _build_service() -> SimulatorService:
             speech_transcriber=speech_providers.transcriber,
             speech_synthesizer=speech_providers.synthesizer,
             language_model=language_model,
+            speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -78,6 +182,7 @@ def _build_service() -> SimulatorService:
         speech_transcriber=speech_providers.transcriber,
         speech_synthesizer=speech_providers.synthesizer,
         language_model=language_model,
+        speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
     )
 
 
@@ -232,7 +337,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_accepted_subprotocol(websocket))
     media_type = websocket.query_params.get("media_type", "application/octet-stream")
     if len(media_type) > 100:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
