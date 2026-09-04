@@ -11,7 +11,8 @@ from starlette.responses import PlainTextResponse, Response
 
 from pitchbot.config import settings
 from pitchbot.observability import configure_logging, registry
-from pitchbot.simulator.router import credentials, require_credential, speech_providers
+from pitchbot.simulator import router as simulator_router_module
+from pitchbot.simulator.router import require_credential, speech_providers
 from pitchbot.simulator.router import router as simulator_router
 from pitchbot.speech.providers import preload_speech_providers
 
@@ -87,7 +88,11 @@ def health() -> dict[str, str | bool]:
         "env": settings.app_env,
         # Whether the API is actually closed. A server reporting "ok" while every endpoint
         # is open is the exact condition this field exists to make visible.
-        "authentication_enforced": credentials.enforcing,
+        #
+        # Read through the module rather than from a name bound at import, so it reports the
+        # store the router is *currently* using. Binding it here made this field a snapshot
+        # of startup that could not go stale visibly - it would simply be wrong.
+        "authentication_enforced": simulator_router_module.credentials.enforcing,
         "telephony_enabled": settings.enable_telephony,
         "whatsapp_enabled": settings.enable_whatsapp,
         "external_network_enabled": settings.enable_external_network,
