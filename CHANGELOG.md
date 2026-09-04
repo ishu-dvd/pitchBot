@@ -103,3 +103,12 @@ All notable changes to PitchBot are documented here.
   it, permanently retiring that question.
 - The model was consulted for Telugu, where it scores at or below guessing.
 - Site plans were truncated by a token cap chosen for a much shorter answer.
+- `SimulatorService` drives the slow lane after each turn, refuses to share one model
+  adapter between the lanes, and awaits any running deliberation before closing a session.
+- `site_outline` and `deck_preview_slides` on the service, so a plan is reachable.
+
+### Fixed (PR 43, second pass)
+
+- Closing a session leaked its briefing: `close_session` dropped conversation state but not
+  the observations beside it, retaining every finished conversation for the process
+  lifetime.

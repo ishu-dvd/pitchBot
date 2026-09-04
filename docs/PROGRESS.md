@@ -2098,8 +2098,8 @@ Tests: 896 -> **987 passed, 19 skipped**.
 - **Qwen3-0.6B is better than the shipped Qwen2.5-0.5B on English and Hindi** (5/6 vs 3/6)
   for 1.6x the latency. Not switched in this PR: the default model is operator-supplied and
   changing it is a deployment decision, not a code one.
-- The deliberation is not yet driven automatically by the server or the CLI voice loop; the
-  engine records observations and exposes the plan, and a caller must run the slow lane.
+- The CLI voice loop does not yet drive deliberation. The server does: `SimulatorService`
+  starts the slow lane after each turn and exposes `site_outline` and `deck_preview_slides`.
 - Deck previews still come from the hardcoded six-industry table; the plan renders its own
   slides but does not yet replace `DeckService`.
 - Plan content is English even when the scaffolding is Hindi or Telugu. Translating model

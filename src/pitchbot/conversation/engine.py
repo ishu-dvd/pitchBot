@@ -379,6 +379,11 @@ class ConversationEngine:
 
     def close_session(self, session_id: UUID) -> None:
         self._states.pop(session_id, None)
+        # The briefing is per-session state exactly as the conversation state is, so it has
+        # to be dropped here too. Leaving it behind would retain every closed conversation's
+        # observations for the lifetime of the process - a slow leak that no test of a
+        # single session could ever show.
+        self._briefings.pop(session_id, None)
 
     def _classify(self, state: ConversationState, *, force_cold: bool = False) -> Classification:
         weights = [item.weight for item in state.evidence]

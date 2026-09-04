@@ -48,6 +48,17 @@ from pitchbot.conversation import (
 from pitchbot.conversation.model_understanding import ModelTurnUnderstanding
 from pitchbot.conversation.planning import TurnUnderstanding
 from pitchbot.conversation.rules import detect_safety_signals
+from pitchbot.deliberation import (
+    BackgroundDeliberation,
+    Deliberator,
+    LaneScheduler,
+    LaneStats,
+    PreemptibleModel,
+    SitePlan,
+    Slide,
+    deck_slides,
+    site_content,
+)
 from pitchbot.domain import ContactPolicy, LanguageCode
 from pitchbot.knowledge import (
     FactClaimStatus,
@@ -176,6 +187,8 @@ class SimulatorService:
         speech_transcriber: SpeechToTextAdapter | None = None,
         speech_synthesizer: TextToSpeechAdapter | None = None,
         language_model: ModelAdapter | None = None,
+        deliberation_model: PreemptibleModel | None = None,
+        deliberation_model_id: str = "unknown",
         turn_taking: TurnTakingConfig | None = None,
     ) -> None:
         if (
@@ -240,6 +253,24 @@ class SimulatorService:
         self._understanding = (
             ModelTurnUnderstanding(language_model) if language_model is not None else None
         )
+        if deliberation_model is not None and deliberation_model is language_model:
+            raise ValueError(
+                "deliberation_model must be a different adapter instance from "
+                "language_model. A model adapter serialises calls behind one lock, so "
+                "sharing it would make every buyer turn queue behind a deliberation that "
+                "takes about ten seconds - strictly worse than the 3.37x contention the "
+                "two-lane design exists to avoid. Build a second adapter, ideally over a "
+                "larger model, since the slow lane has seconds and the turn path does not."
+            )
+        self._lanes = LaneScheduler()
+        self._deliberation_model = deliberation_model
+        self._deliberation_model_id = deliberation_model_id
+        self._deliberator = (
+            Deliberator(deliberation_model, self._lanes, model_id=deliberation_model_id)
+            if deliberation_model is not None
+            else None
+        )
+        self._deliberations: dict[UUID, BackgroundDeliberation] = {}
         self._turn_taking = turn_taking or TurnTakingConfig()
         # Recall reads the same journal the turn was just committed to, so it is only
         # available when durable history is enabled and lead identifiers are stable. The
@@ -411,13 +442,19 @@ class SimulatorService:
             conversation_checkpoint = self._conversation.checkpoint(session_id)
             if not replaying_durable_turn:
                 self._ensure_conversation_open(session_id)
-                understanding = await self._understand(session_id, request)
-                outcome = self._conversation.process_turn(
-                    session.session_id,
-                    text=request.text,
-                    language=request.language,
-                    understanding=understanding,
-                )
+                # The whole turn is claimed, not just the model call. Deliberation must
+                # stand down for the extraction and planning too, because the measured
+                # 3.37x penalty is CPU contention and applies to any work the buyer waits
+                # through - not only to a second model.
+                async with self._lanes.turn():
+                    understanding = await self._understand(session_id, request)
+                    outcome = self._conversation.process_turn(
+                        session.session_id,
+                        text=request.text,
+                        language=request.language,
+                        understanding=understanding,
+                    )
+                self._start_deliberation(session_id)
             session.language = request.language
             self._append_event(
                 session,
@@ -608,6 +645,55 @@ class SimulatorService:
             (fact.key for fact in snapshot.facts),
         )
 
+    def _start_deliberation(self, session_id: UUID) -> None:
+        """Let the slow lane think, now that nobody is waiting for a reply.
+
+        Called after the turn's claim has been released, so the deliberation starts against
+        a briefing that already includes what the buyer just said. Returning without doing
+        anything is the normal case: with no deliberation model configured, or with too
+        little known to plan from, there is nothing worth spending the CPU on.
+        """
+
+        if self._deliberator is None:
+            return
+        background = self._deliberations.get(session_id)
+        if background is None:
+            background = BackgroundDeliberation(
+                self._deliberator, self._conversation.briefing(session_id)
+            )
+            self._deliberations[session_id] = background
+        background.maybe_start()
+
+    def site_plan(self, session_id: UUID) -> SitePlan | None:
+        """The plan for this session, only while it still describes the buyer."""
+
+        return self._conversation.site_plan(session_id)
+
+    def site_outline(self, session_id: UUID, language: LanguageCode) -> str | None:
+        """The plan as a markdown outline, or ``None`` if there is nothing to show."""
+
+        plan = self.site_plan(session_id)
+        return None if plan is None else site_content(plan, language)
+
+    def deck_preview_slides(
+        self, session_id: UUID, language: LanguageCode
+    ) -> tuple[Slide, ...] | None:
+        """The plan as deck slides, or ``None`` if there is nothing to show."""
+
+        plan = self.site_plan(session_id)
+        return None if plan is None else deck_slides(plan, language)
+
+    @property
+    def deliberation_available(self) -> bool:
+        """True when a slow lane is configured to plan the buyer's site."""
+
+        return self._deliberator is not None
+
+    def lane_stats(self) -> LaneStats:
+        """What the scheduler has done, for the health endpoint and for tests."""
+
+        return self._lanes.stats()
+
     @property
     def speech_output_available(self) -> bool:
         """True when the server speaks replies itself instead of leaving it to the browser."""
@@ -764,10 +850,20 @@ class SimulatorService:
             except BaseException:
                 self._abort_teardown(session_id, session)
                 raise
+            # Before the conversation state goes, so a deliberation cannot outlive the
+            # briefing it is about to write into. Awaited rather than cancelled and
+            # forgotten: a generation left running would keep holding the model's lock and
+            # the CPU that the next session's turns need.
+            await self._stop_deliberation(session_id)
             try:
                 self._conversation.close_session(session_id)
             finally:
                 self._release_admission(session_id)
+
+    async def _stop_deliberation(self, session_id: UUID) -> None:
+        background = self._deliberations.pop(session_id, None)
+        if background is not None:
+            await background.stop()
 
     def replay(self, scenario_id: str) -> list[dict[str, str]]:
         try:
