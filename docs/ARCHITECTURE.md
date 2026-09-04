@@ -491,3 +491,92 @@ flowchart LR
 Evaluation snapshots are the portable source of run evidence. They contain corpus/suite hashes, exact code revision, hardware, finite metrics, bounded case labels, and machine-readable failure codes; they intentionally exclude raw transcripts, prompts, contact details, and audio. The generated HTML has no script or network dependency and applies a restrictive content security policy.
 
 An artifact reporting passing thresholds is not deployment authorization. Promotion also requires a reviewed suite manifest, comparison against the accepted baseline, safety and regression review, and human approval. Optional MLflow or Phoenix interfaces may be added later for local visualization; neither is required to validate artifacts, and no telemetry exporter may send data externally by default.
+
+---
+
+## Two lanes: answering now, thinking later
+
+PitchBot runs two local models with different jobs and irreconcilable budgets. The turn path
+has a few hundred milliseconds; working out what a buyer''s website should actually be takes
+about ten seconds. So they are different models — and, because they share one CPU, they must
+never run at the same time.
+
+```
+buyer speaks
+     |
+     v
+  [ fast lane ]  Qwen2.5-0.5B, one field, ~250-650 ms
+     |             reads the topic of the turn; never the stance
+     |             writes -> Briefing.observations
+     v
+  reply spoken
+     |
+     |  ... nobody is waiting ...
+     v
+  [ slow lane ]  Phi-3.5-mini, ~10 s, preemptible at 0.1 ms
+                   reads  <- Briefing.observations
+                   writes -> Briefing.deliberation  (competitors, differentiator, pages)
+```
+
+### Why they do not talk to each other
+
+An agent-to-agent round trip was measured at **12,976 ms** — three real generations — and
+every hop is free text, so every hop is a parsing risk. Streaming the slow lane''s answer
+makes its first field readable at 2,852 ms and its last at 6,736 ms, so an early consumer
+acts on a plan whose pages are still undecided. Writing and reading a shared field costs
+**0.162 microseconds**. The lanes share state and send nothing.
+
+### Why overwriting is impossible rather than prevented
+
+The obvious design is a shared scratchpad and a lock. A lock has to *prevent* two problems;
+this design does not have them.
+
+**One writer per field, forever.** The fast lane writes observations and cannot write a
+deliberation. The slow lane writes the deliberation and cannot write an observation. There is
+deliberately no method on `Briefing` that writes both, so the mistake is not available to a
+future caller — a test asserts the public surface stays that shape.
+
+**Conclusions carry the version they were drawn from.** Every deliberation records the
+observation count it saw. The moment the buyer adds anything, the plan is *stale* and
+`current_deliberation()` returns nothing: the reply falls back to what the rules know rather
+than confidently describing a business we have since been corrected about. The stale plan
+stays readable for display and debugging; it is only barred from being treated as current.
+
+**Late answers cannot clobber newer ones.** A deliberation takes tens of seconds, so two can
+be in flight after a preemption, and the last to finish is not the newest. `conclude()`
+refuses anything derived from an older version than what is stored.
+
+### Why the scheduler is a flag and not a lock
+
+A lock would make the fast lane wait for the slow lane, which inverts the priority that
+matters: the buyer is listening and the deliberation is not. The scheduler grants the fast
+lane the CPU immediately and asks the slow lane to stand down; the slow lane checks between
+tokens. Measured, stopping takes 0.1 ms and the next turn runs at 0.98x the idle baseline —
+verified at **0.99x** with both real models loaded.
+
+Capping the background model''s threads was tried and is worse, not better: 3.59x at four
+threads and 4.87x at two, against 3.37x uncapped, because the same work then occupies cores
+for longer.
+
+### What the model is trusted to decide
+
+Narrowly, and per language, because both were measured.
+
+- **Never the sales move.** Asked for stance, Qwen2.5-0.5B answered `stalling` to 8/8 test
+  turns and `STALLING` is an answerable objection, so every reply became "answer the stall".
+  Stance is read only by the rules.
+- **Only languages where a model beat nothing.** English, Hindi and Hinglish. Telugu measured
+  1/6 and 2/6 — at or below guessing — so it is not asked at all and falls through to the
+  rules. Adding it back is a one-line change plus a benchmark run.
+- **Only claims the turn supports.** Phi claimed `business_type` for *"I am just looking
+  around for now."* A slot is accepted only when the turn contains a marker for that topic, so
+  the model can still rescue *"our budget is around two lakh rupees"* — which the digit-only
+  budget pattern misses — and cannot invent a business out of a hedge.
+
+### What comes out
+
+A plan is rendered as a website outline and a three-slide deck mock. Neither invents anything:
+the model''s words fill headings and bullets, and every connecting sentence is fixed text held
+in `deliberation/artifacts.py`, so a reviewer can see exactly which parts a model influenced.
+Both are labelled a draft in the buyer''s language, and the scaffolding contains no digits at
+all — so a price or a date cannot appear in one by construction.

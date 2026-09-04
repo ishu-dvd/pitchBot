@@ -30,7 +30,7 @@ from pitchbot.conversation.model_understanding import (
     SCHEMA_NAME,
     ModelTurnUnderstanding,
 )
-from pitchbot.conversation.planning import Intent, Slot
+from pitchbot.conversation.planning import Slot
 from pitchbot.conversation.providers import NO_MODEL_ID, LlmProvider, build_language_model
 from pitchbot.domain import LanguageCode
 
@@ -164,6 +164,29 @@ def test_the_understanding_schema_is_registered() -> None:
     assert SCHEMA_NAME in SCHEMAS
 
 
+def test_every_schema_has_a_token_budget() -> None:
+    """A schema without one silently inherits a cap chosen for a different answer.
+
+    Regression: ``site-plan-v1`` needs ~118 tokens and the shipped default was 96, so every
+    plan failed with ``Unterminated string`` after stopping inside ``"differentiator"``.
+    Constrained decoding guarantees valid JSON only for a *finished* answer, so a truncated
+    one is not a shorter plan - it is an unparseable fragment and a hard failure.
+    """
+
+    from pitchbot.adapters.onnx_genai_model import SCHEMA_TOKEN_BUDGETS
+
+    assert set(SCHEMAS) == set(SCHEMA_TOKEN_BUDGETS)
+    assert all(budget > 0 for budget in SCHEMA_TOKEN_BUDGETS.values())
+
+
+def test_the_site_plan_budget_covers_a_measured_plan() -> None:
+    """Measured at 118 tokens on Phi-3.5-mini; the budget must leave real headroom."""
+
+    from pitchbot.adapters.onnx_genai_model import SCHEMA_TOKEN_BUDGETS
+
+    assert SCHEMA_TOKEN_BUDGETS["site-plan-v1"] >= 200
+
+
 # --------------------------------------------------------------------------------------
 # Understanding is additive and best effort
 # --------------------------------------------------------------------------------------
@@ -177,9 +200,7 @@ def _completion(**value: str) -> StructuredCompletion:
 async def test_a_model_reading_fills_a_slot_the_rules_missed() -> None:
     """The shipped budget regex needs digits, so "two lakh rupees" extracts nothing."""
 
-    source = ModelTurnUnderstanding(
-        MockModelAdapter([_completion(acknowledge="budget_stated", buyer_intent="exploring")])
-    )
+    source = ModelTurnUnderstanding(MockModelAdapter([_completion(topic="budget_stated")]))
 
     understanding = await source.understand(
         "Our budget is around two lakh rupees.",
@@ -191,7 +212,9 @@ async def test_a_model_reading_fills_a_slot_the_rules_missed() -> None:
     assert Slot.BUDGET in understanding.known_slots
     assert understanding.filled_now == frozenset({Slot.BUDGET})
     assert Slot.BUSINESS_TYPE in understanding.known_slots
-    assert understanding.intent is Intent.EXPLORING
+    # Stance never comes from the model: measured, Qwen2.5-0.5B answered `stalling` to
+    # every turn, and `stalling` is an answerable objection.
+    assert understanding.intent is None
 
 
 @pytest.mark.asyncio
@@ -205,9 +228,7 @@ async def test_a_model_failure_falls_back_rather_than_failing_the_turn() -> None
 async def test_a_value_outside_the_slot_vocabulary_is_dropped() -> None:
     """Constrained decoding makes this unreachable; the mapping refuses it anyway."""
 
-    source = ModelTurnUnderstanding(
-        MockModelAdapter([_completion(acknowledge="pizza", buyer_intent="dancing")])
-    )
+    source = ModelTurnUnderstanding(MockModelAdapter([_completion(topic="pizza")]))
 
     understanding = await source.understand("hello", LanguageCode.ENGLISH, [])
 

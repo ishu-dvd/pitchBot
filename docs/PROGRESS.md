@@ -2042,3 +2042,65 @@ rather than whether it works.
 896 passed / 19 skipped with extras; 859 / 56 clean venv. ruff + mypy (`src tests`) clean;
 `mypy --strict` clean on win32/linux/darwin. Backchannel tests run 5x without flaking.
 New example `examples/hinglish.txt`.
+
+## PR 43 — Two lanes on one CPU, and what a model may be trusted to decide
+
+Base: `1cbeeb4`
+
+The request was a two-model design: a fast model for conversation, a slower one for
+strategy, talking to each other. Measurement changed almost every part of that shape.
+
+**The naive form is negative value.** Running the two models together cost the turn path
+**3.37x** (453 ms to 1,504 ms p50). Capping the background model''s threads — the obvious
+mitigation — made it worse: 3.59x at four threads, 4.87x at two, because the same work then
+occupies cores for longer. What does work is not running them together: stopping the slow
+lane costs **0.1 ms** and the next turn is at 0.98x baseline. Verified end to end with both
+real models at **0.99x**.
+
+**They should not talk.** An A2A round trip measured **12,976 ms** across three real
+generations. Streaming made the plan''s first field readable at 2,852 ms and its last at
+6,736 ms, so an early consumer acts on a plan with no pages decided. A shared-state write
+and read costs **0.162 microseconds**. The lanes share a briefing and send nothing.
+
+**Overwriting is now impossible rather than prevented.** One writer per field, forever;
+conclusions carry the observation version they were drawn from and go stale the moment the
+buyer adds anything; a late deliberation cannot clobber a newer one.
+
+**Three live defects fixed, all found by measuring the shipped path.**
+
+1. Qwen2.5-0.5B answered `none`/`stalling` to **all eight** test turns — a constant
+   function — and `STALLING` is in `ANSWERABLE_OBJECTIONS`, so with a model configured every
+   reply became "answer the stall", including the turn where the buyer said *"Yes, let us go
+   ahead with the proposal."* The model is no longer asked for stance at all. Asked only for
+   the topic, the same model became useful (6/12, and Phi 10/12).
+2. Phi-3.5-mini claimed `business_type` for *"I am just looking around for now."*, which
+   would have retired that qualification question forever. Slot claims now require a topic
+   marker in the turn.
+3. Telugu is unsupported by every commercially-licensed model that runs on this hardware —
+   1/6 and 2/6, at or below guessing among five values — so it is not asked at all.
+
+**A fourth defect found only by running the real model:** a single `max_new_tokens` of 96
+truncated every site plan at 118 tokens, failing with `Unterminated string`. Budgets are now
+per schema.
+
+**Licence checks were done at the source, and two search claims were wrong.** `gemma-3-1b-it`
+is `gemma`-licensed and gated, not Apache-2.0; `sarvam-1` declares no licence; `sarvam-m` is
+Apache-2.0 but 23.6B and not CPU-runnable. NVIDIA''s small instruct models declare English
+only, and Parakeet ASR has Hindi but not Telugu, so nothing there closes the Telugu gap.
+`ai4bharat/indic-conformer-600m-multilingual` is MIT and is the most promising future route.
+
+Tests: 896 -> **987 passed, 19 skipped**.
+
+### Deferred
+
+- **Telugu understanding.** No permissive CPU-runnable model does it. The next thing to try
+  is translate-then-understand via an Indic translation model, or IndicConformer for ASR.
+- **Qwen3-0.6B is better than the shipped Qwen2.5-0.5B on English and Hindi** (5/6 vs 3/6)
+  for 1.6x the latency. Not switched in this PR: the default model is operator-supplied and
+  changing it is a deployment decision, not a code one.
+- The CLI voice loop does not yet drive deliberation. The server does: `SimulatorService`
+  starts the slow lane after each turn and exposes `site_outline` and `deck_preview_slides`.
+- Deck previews still come from the hardcoded six-industry table; the plan renders its own
+  slides but does not yet replace `DeckService`.
+- Plan content is English even when the scaffolding is Hindi or Telugu. Translating model
+  output needs a translation model this product does not have.

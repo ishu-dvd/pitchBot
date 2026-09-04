@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import deque
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -28,6 +28,7 @@ from pitchbot.adapters.contracts import (
 )
 from pitchbot.adapters.errors import (
     AdapterError,
+    DeliberationPreempted,
     IdempotencyConflictError,
     MockCapacityError,
     PermanentAdapterError,
@@ -165,9 +166,21 @@ class MockModelAdapter(ModelAdapter):
         self,
         instruction: str,
         schema_name: str,
+        *,
+        should_stop: Callable[[], bool] | None = None,
     ) -> StructuredCompletion:
+        """Answer, honouring ``should_stop`` the way the real adapter does.
+
+        The mock carries this parameter because the real adapter does: a double that cannot
+        stand in for ``PreemptibleModel`` forces every deliberation test to build its own
+        fake, and the two then drift. Checked once before answering rather than between
+        tokens, because there are no tokens here.
+        """
+
         if len(self.requests) >= self._max_requests:
             raise MockCapacityError("Mock model request history capacity exceeded")
+        if should_stop is not None and should_stop():
+            raise DeliberationPreempted("mock model asked to stop before answering")
         self.requests.append((len(instruction), schema_name))
         default = StructuredCompletion(value={}, model_version="mock-v1")
         return self._outcomes.next_or(default)

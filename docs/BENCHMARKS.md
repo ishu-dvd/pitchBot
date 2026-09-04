@@ -1214,3 +1214,126 @@ against whatever they just said. That rules out the most natural-sounding candid
 If the untranscribed sentence was *"so you'll do it for fifty thousand?"*, an agreeing filler
 has committed the agent, out loud, to a number nobody quoted. A test asserts no shipped
 phrase appears in the rejected set, in every language and register.
+
+---
+
+## Two lanes on one CPU (PR 43)
+
+The proposal was two models cooperating: a fast one for conversation, a slower one for
+strategy. Measured, the naive form of that is **negative value**, and the mitigation everyone
+reaches for first makes it worse.
+
+### Running both at once costs the turn path 3.4x
+
+Qwen2.5-0.5B answering a turn, while Phi-3.5-mini generates in the background. 16 logical
+CPUs, both int4 on CPU, `probe_dual_contention.py` and `probe_dual_quality_and_cap.py`.
+
+| Slow lane | Turn path p50 | p95 | vs idle |
+| --- | --- | --- | --- |
+| idle | 453 ms | 494 ms | 1.00x |
+| generating, all threads | 1,504 ms | 1,755 ms | **3.37x** |
+| generating, capped to 4 threads | 1,582 ms | 1,777 ms | **3.59x** |
+| generating, capped to 2 threads | 2,146 ms | 2,419 ms | **4.87x** |
+
+Capping threads is the intuitive fix and it is the wrong one: the same work spread over
+fewer cores takes longer, so the slow lane overlaps *more* turns. Background throughput fell
+from 6.9 to 4.8 tokens/second at the same time.
+
+### Preemption is free, so exclusion is affordable
+
+`probe_preemption.py`:
+
+| Measurement | Result |
+| --- | --- |
+| Time from asking the slow lane to stop, until it had | **0.1 ms** |
+| First turn after the stop | 241 ms |
+| Idle baseline for comparison | 247 ms (**0.98x**) |
+| Slow lane time-to-first-token | 2,338 ms |
+| Slow lane throughput | 5.6 tokens/second |
+
+Verified end to end with both real models loaded (`probe_two_lane_end_to_end.py`): the turn
+path ran at **0.99x** its idle baseline while preempting a live deliberation, the preempted
+plan was discarded whole, and the plan produced afterwards was a usable site outline.
+
+### How the lanes talk: measured, not chosen
+
+`probe_lane_protocol.py`. Every hop of the A2A round trip is a real generation.
+
+| Option | Cost | Needs both lanes running? |
+| --- | --- | --- |
+| A2A negotiation (3 generations) | **12,976 ms** | yes, so +3.37x on the turn path |
+| Streaming the plan | first field readable 2,852 ms, last 6,736 ms | yes, so +3.37x |
+| Shared state | **0.162 microseconds** | no |
+
+Streaming is worse than the total suggests. At 2,852 ms a consumer has `competitors` and
+neither `differentiator` (5,533 ms) nor `pages` (6,736 ms) — acting then means acting on a
+plan whose pages have not been decided. That is the misconception risk, arriving early.
+
+Shared state wins by roughly eight orders of magnitude and is the only option that does not
+require the lanes to overlap. See `docs/ARCHITECTURE.md` for how ownership makes overwriting
+impossible rather than merely prevented.
+
+---
+
+## Which model understands all three languages (PR 43)
+
+Every language-model accuracy number this project had was measured in English. The product
+claims English, Hindi and Telugu. `probe_trilingual_models.py`, one field, few-shot, the same
+six meanings expressed in each register so a per-language score is a property of the language.
+
+| Model | Licence | en | hi | te | Hinglish | Overall | p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen2.5-0.5B | Apache-2.0 | 3/6 | 3/6 | 2/6 | 3/6 | 46% | 648 ms |
+| Qwen3-0.6B | Apache-2.0 | 5/6 | 5/6 | **1/6** | 3/6 | 58% | 1,016 ms |
+| Phi-3.5-mini | MIT | 5/6 | 5/6 | **2/6** | 5/6 | **71%** | 4,338 ms |
+
+**Telugu is unsupported by every commercially-licensed model small enough for this hardware.**
+1/6 and 2/6 are at or below guessing among five enum values. The two failures differ in a way
+that decides the design: Qwen3 answers `none` for Telugu — it declines — while Phi answers
+`business_type` for four of six, which fills a qualification slot the buyer never gave and
+stops the agent ever asking. A confident wrong answer is worse than no answer, so Telugu is
+not asked at all.
+
+### Asking for two things at once collapses a small model
+
+`probe_shipped_understanding.py` ran the **shipped** understanding path, not a copy of it.
+
+| Schema | Model | acknowledge | buyer_intent | Distinct answers |
+| --- | --- | --- | --- | --- |
+| topic + stance | Qwen2.5-0.5B | 3/8 | 1/8 | **1** — a constant function |
+| topic + stance | Phi-3.5-mini | 5/8 | 2/8 | 4 |
+| topic only | Qwen2.5-0.5B | 6/12 bare, 7/12 few-shot | not asked | 3-4 |
+| topic only | Phi-3.5-mini | 6/12 bare, **10/12** few-shot | not asked | 5 |
+
+Qwen answered `none`/`stalling` to all eight turns. `STALLING` is in `ANSWERABLE_OBJECTIONS`,
+so with a model configured **every reply became "answer the stall"** — including the turn
+where the buyer said *"Yes, let us go ahead with the proposal."* Removing the stance field
+is what made the same model useful.
+
+Few-shot examples are worth their cost on the larger model only: Phi went 6/12 to 10/12 for
+1,138 ms to 3,701 ms, Qwen 6/12 to 7/12 for 256 ms to 556 ms.
+
+### Licences must come from the source
+
+Checked against the HuggingFace API on 2026-09-04, because a search summary asserted two of
+these and was wrong about both.
+
+| Model | Claimed by search | Actual | Verdict |
+| --- | --- | --- | --- |
+| `google/gemma-3-1b-it` | Apache-2.0 | `gemma`, **gated=manual** | refused |
+| `sarvamai/sarvam-1` | non-commercial | **no licence declared** | refused |
+| `sarvamai/sarvam-m` | non-commercial | `apache-2.0` | permitted, but **23.6B** — not CPU-runnable |
+| `Qwen/Qwen3-0.6B`, `Qwen3-1.7B` | Apache-2.0 | `apache-2.0`, ungated | permitted |
+| `nvidia/Nemotron-Mini-4B-Instruct` | permissive | NVIDIA Community Model License, `language: [en]` | English only |
+| `ai4bharat/indic-conformer-600m-multilingual` | MIT | `mit` | permitted — **ASR, a future option for Telugu** |
+
+NVIDIA was checked specifically. Their small instruct models declare English only, and
+Parakeet ASR covers Hindi but not Telugu, so nothing in that family closes the Telugu gap.
+
+### One token budget cannot fit two schemas
+
+Found only by running the real model end to end. The adapter's `max_new_tokens` defaulted to
+96; a site plan measures 118 tokens. Every deliberation failed with `Unterminated string`,
+having stopped inside `"differentiator"`. Constrained decoding guarantees valid JSON for a
+*finished* answer, so a truncated one is an unparseable fragment rather than a shorter plan.
+Budgets are now per schema: 32 tokens for a topic, 320 for a plan.

@@ -84,3 +84,31 @@ All notable changes to PitchBot are documented here.
 - Fixed a hedge word breaking budget extraction: `Our budget is around 150000 rupees` filled no slot because the pattern required digits immediately after the cue, so the buyer answered, the answer was discarded, the agent asked again, hit `MAX_ASKS_PER_SLOT` and closed without a budget. Hedges are a closed list in three languages rather than a permissive gap, which would have read `budget is not decided, we sold 500 units` as a budget of 500.
 - Fixed agreement producing the same sentence twice: "Okay, let's start." returned the identical closing question the buyer had just answered. A `confirm` phrase now commits to the next step.
 - Added `examples/sales-{en,hi,te}.txt`, replayable conversations in which a buyer pushes back on price, shops around, hesitates and then agrees.
+
+### Added (PR 43)
+
+- Two-lane deliberation: a preemptible background model that plans the buyer''s site while
+  the turn path is idle, and yields to it in 0.1 ms.
+- `Briefing` shared state with single-writer-per-field ownership, version-stamped
+  conclusions, and refusal of overtaken results.
+- Website outline and deck-mock rendering from a plan, labelled a draft in the buyer''s
+  language.
+- Per-schema token budgets for constrained decoding.
+
+### Fixed (PR 43)
+
+- A configured language model made **every** reply answer a stall objection, including at
+  the moment a buyer agreed to buy.
+- A model could fill a qualification slot from a turn that contained no information about
+  it, permanently retiring that question.
+- The model was consulted for Telugu, where it scores at or below guessing.
+- Site plans were truncated by a token cap chosen for a much shorter answer.
+- `SimulatorService` drives the slow lane after each turn, refuses to share one model
+  adapter between the lanes, and awaits any running deliberation before closing a session.
+- `site_outline` and `deck_preview_slides` on the service, so a plan is reachable.
+
+### Fixed (PR 43, second pass)
+
+- Closing a session leaked its briefing: `close_session` dropped conversation state but not
+  the observations beside it, retaining every finished conversation for the process
+  lifetime.

@@ -38,7 +38,7 @@ import asyncio
 import importlib
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
@@ -46,7 +46,7 @@ from types import ModuleType
 from typing import Any, Final
 
 from pitchbot.adapters.contracts import ModelAdapter, StructuredCompletion
-from pitchbot.adapters.errors import PermanentAdapterError
+from pitchbot.adapters.errors import DeliberationPreempted, PermanentAdapterError
 
 logger = logging.getLogger(__name__)
 
@@ -179,12 +179,82 @@ SCHEMAS: Final[Mapping[str, str]] = {
             "required": ["buyer_intent", "acknowledge"],
         }
     ),
+    "turn-topic-v1": json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "enum": [
+                        "business_type",
+                        "requested_features",
+                        "budget_stated",
+                        "timeline",
+                        "none",
+                    ],
+                }
+            },
+            "required": ["topic"],
+        }
+    ),
+    "site-plan-v1": json.dumps(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "competitors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 3,
+                },
+                "differentiator": {"type": "string"},
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 6,
+                },
+            },
+            "required": ["competitors", "differentiator", "pages"],
+        }
+    ),
 }
 """Every schema this adapter will answer, by the name ``complete_structured`` takes.
+
+``turn-topic-v1`` exists because ``turn-understanding-v1`` asks for two things at once and
+that is what broke it. Measured 2026-09-04 on the shipped path, Qwen2.5-0.5B answered
+``none``/``stalling`` to **all eight** test turns - a constant function. Asked the same
+question with the stance field removed, the same model scored 6/12 and Phi-3.5-mini 10/12.
+A small model given a fact and a judgement in one call answers neither; given only the fact
+it answers usefully. The two-field schema is retained only so an existing caller keeps
+working, and nothing in the turn path uses it any more.
+
+``site-plan-v1`` is the slow lane's only output. Measured at 118 tokens in 9.9 s on
+Phi-3.5-mini, so it is affordable in the background and impossible in the turn path.
 
 A closed registry rather than a caller-supplied schema: the grammar for each is compiled
 once at preload, and a schema that arrives at call time could not be. It also means the
 set of things a model is allowed to decide is reviewable in one place.
+"""
+
+
+SCHEMA_TOKEN_BUDGETS: Final[Mapping[str, int]] = {
+    "turn-understanding-v1": 96,
+    "turn-topic-v1": 32,
+    "site-plan-v1": 320,
+}
+"""How many tokens each schema's answer is allowed, because one cap cannot fit both.
+
+A single ``max_new_tokens`` is a choice between truncating the long answer and wasting the
+short one, and truncation here is not graceful: constrained decoding guarantees the answer
+is *valid JSON when finished*, so cutting it off mid-string produces an unparseable
+fragment and the whole call fails.
+
+That is not hypothetical. With the shipped default of 96, ``site-plan-v1`` failed on every
+attempt with ``Unterminated string``, having stopped inside ``"differentiator"``. Measured,
+a complete plan is 118 tokens, and a topic answer is under 10.
 """
 
 
@@ -337,11 +407,19 @@ class OnnxGenAiModelAdapter(ModelAdapter):
         self,
         instruction: str,
         schema_name: str,
+        *,
+        should_stop: Callable[[], bool] | None = None,
     ) -> StructuredCompletion:
         """Answer ``instruction`` as JSON that satisfies ``schema_name``.
 
         Serialised: one generator per schema is reused across calls, so two concurrent
         turns would interleave into one another's token sequence.
+
+        ``should_stop`` makes a long answer abandonable between tokens, which is what lets
+        background deliberation share a CPU with the turn path at all. It is checked in the
+        worker thread, so it must be cheap and must not touch the event loop. Measured, a
+        stop is observed in 0.1 ms and the next turn runs at 0.98x the idle baseline;
+        without it the turn path pays 3.37x for the whole of a 10 s deliberation.
         """
 
         if schema_name not in SCHEMAS:
@@ -351,13 +429,18 @@ class OnnxGenAiModelAdapter(ModelAdapter):
         async with self._lock:
             if self._model is None:
                 await asyncio.to_thread(self._load)
-            value = await asyncio.to_thread(self._generate, instruction, schema_name)
+            value = await asyncio.to_thread(self._generate, instruction, schema_name, should_stop)
         return StructuredCompletion(
             value=value,
             model_version=f"{self._model_id}@{installed_version() or 'unknown'}",
         )
 
-    def _generate(self, instruction: str, schema_name: str) -> dict[str, Any]:
+    def _generate(
+        self,
+        instruction: str,
+        schema_name: str,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         tokenizer = self._tokenizer
         generator = self._generators.get(schema_name)
         assert tokenizer is not None and generator is not None  # guarded by _load
@@ -368,9 +451,18 @@ class OnnxGenAiModelAdapter(ModelAdapter):
         generator.rewind_to(0)
         generator.append_tokens(tokens)
         steps = 0
-        while not generator.is_done() and steps < self._max_new_tokens:
+        stopped_early = False
+        budget = SCHEMA_TOKEN_BUDGETS.get(schema_name, self._max_new_tokens)
+        while not generator.is_done() and steps < budget:
+            if should_stop is not None and should_stop():
+                stopped_early = True
+                break
             generator.generate_next_token()
             steps += 1
+        if stopped_early:
+            raise DeliberationPreempted(
+                f"generation abandoned after {steps} tokens because the caller asked to stop"
+            )
         # Fast-forwarded tokens are appended to the sequence without ever being returned by
         # `get_next_tokens`, so collecting per-step tokens silently drops most of the JSON.
         produced = list(generator.get_sequence(0))[len(tokens) :]
@@ -382,7 +474,8 @@ class OnnxGenAiModelAdapter(ModelAdapter):
             # reachable only if generation was cut off by max_new_tokens mid-object.
             raise PermanentAdapterError(
                 f"model output was not valid JSON after {steps} tokens, which means "
-                f"generation was truncated rather than constrained: {text[:200]!r}"
+                f"generation was truncated rather than constrained. Raise this schema's "
+                f"entry in SCHEMA_TOKEN_BUDGETS: {text[:200]!r}"
             ) from error
         if not isinstance(parsed, dict):
             raise PermanentAdapterError(f"schema {schema_name!r} must yield an object")
@@ -394,6 +487,7 @@ __all__ = [
     "KNOWN_MODEL_LICENSES",
     "ONNX_GENAI_AVAILABLE",
     "PROVIDER_ID",
+    "SCHEMA_TOKEN_BUDGETS",
     "SCHEMAS",
     "ModelLicense",
     "OnnxGenAiModelAdapter",
