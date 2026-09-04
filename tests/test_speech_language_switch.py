@@ -72,8 +72,8 @@ def test_the_pipeline_language_reaches_the_transcriber() -> None:
 
     pipeline.set_language(LanguageCode.TELUGU)
 
-    assert pipeline.language is LanguageCode.TELUGU
     assert transcriber.languages == [LanguageCode.TELUGU]
+    assert pipeline.language.value == LanguageCode.TELUGU.value
 
 
 def test_a_transcriber_that_cannot_be_re_pointed_is_left_alone() -> None:

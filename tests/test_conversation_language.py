@@ -21,7 +21,7 @@ misquoted. There is no failing assertion available downstream. It has to be caug
 
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -40,8 +40,11 @@ from pitchbot.domain import LanguageCode
 DIGEST_KEY = b"language-switching-test-key-32b!"
 
 
-def _session(**kwargs: object) -> tuple[ConversationEngine, object]:
-    engine = ConversationEngine(turn_digest_key=DIGEST_KEY, **kwargs)  # type: ignore[arg-type]
+def _session(*, detect_language_switch: bool = True) -> tuple[ConversationEngine, UUID]:
+    engine = ConversationEngine(
+        turn_digest_key=DIGEST_KEY,
+        detect_language_switch=detect_language_switch,
+    )
     session_id = uuid4()
     engine.create_session(session_id)
     return engine, session_id

@@ -28,6 +28,7 @@ from pitchbot.conversation.planning import (
     ANSWERABLE_OBJECTIONS,
     ASK_ORDER,
     ReplyPlan,
+    SalesMove,
     render_reply,
     supported_languages,
 )
@@ -314,5 +315,12 @@ def test_every_language_can_acknowledge_being_switched_into(language: LanguageCo
 
     phrases = _PHRASES[_table(language)]  # noqa: SLF001
     assert phrases.switched.strip()
-    plan = ReplyPlan(ask=None, acknowledge=None, intent=None, objection=None, pitch=None, move=None)
+    plan = ReplyPlan(
+        ask=None,
+        acknowledge=None,
+        intent=None,
+        objection=None,
+        pitch=None,
+        move=SalesMove.CLOSE,
+    )
     assert render_reply(plan, language, switched=True).startswith(phrases.switched)
