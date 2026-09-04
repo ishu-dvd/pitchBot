@@ -32,6 +32,7 @@ from pitchbot.conversation.rules import (
     rule_version,
 )
 from pitchbot.conversation.state import ConversationState
+from pitchbot.deliberation.briefing import Briefing, SitePlan, Topic
 from pitchbot.domain import (
     Classification,
     IntentEvidence,
@@ -73,6 +74,7 @@ class ConversationEngine:
         self._turn_digest_key = turn_digest_key or secrets.token_bytes(32)
         self._digest_key_id = sha256(self._turn_digest_key).hexdigest()
         self._states: dict[UUID, ConversationState] = {}
+        self._briefings: dict[UUID, Briefing] = {}
 
     def create_session(self, session_id: UUID, *, lead_id: UUID | None = None) -> None:
         if session_id in self._states:
@@ -251,6 +253,7 @@ class ConversationEngine:
             # used, which is the default and needs no model.
             if understanding is not None:
                 state.understood_slot_keys.update(slot.value for slot in understanding.filled_now)
+            self._record_observations(session_id, accepted_facts)
             plan = plan_reply(
                 self._understanding_for(state, accepted_facts, understanding, text=text),
                 repeated=repeated,
@@ -542,9 +545,52 @@ class ConversationEngine:
         return TurnUnderstanding(
             known_slots=base.known_slots | remembered.known_slots | supplied.known_slots,
             filled_now=base.filled_now | supplied.filled_now,
-            intent=supplied.intent or detected,
+            # The rules own stance, always. This used to be `supplied.intent or detected`,
+            # which let a model that answered `stalling` to every turn - measured, 8/8 on
+            # Qwen2.5-0.5B - turn every reply into "answer the stall", including the turn a
+            # buyer agreed to buy. A model reads *topics* well and stance badly, so it is
+            # asked only for topics and is not consulted here even if a future one offers.
+            intent=detected,
             business_type=base.business_type,
         )
+
+    def _record_observations(self, session_id: UUID, accepted: list[RequirementFact]) -> None:
+        """Copy this turn's facts into the briefing the slow lane reads.
+
+        One-way on purpose. The engine writes observations and never reads a deliberation
+        back into a fact: a plan is what *we* would propose, and letting it flow into the
+        buyer's stated requirements would make the agent believe its own suggestions. See
+        :mod:`pitchbot.deliberation.briefing` for why ownership is arranged this way.
+        """
+
+        if not accepted:
+            return
+        briefing = self._briefings.setdefault(session_id, Briefing())
+        for fact in accepted:
+            topic = _TOPICS.get(fact.key)
+            if topic is None or not isinstance(fact.value, str) or not fact.value.strip():
+                continue
+            briefing.observe(topic, fact.value)
+
+    def briefing(self, session_id: UUID) -> Briefing:
+        """The shared state for this session, created on first use."""
+
+        return self._briefings.setdefault(session_id, Briefing())
+
+    def site_plan(self, session_id: UUID) -> SitePlan | None:
+        """The current plan for this session, or ``None`` if there is not one to trust.
+
+        ``None`` covers three different situations on purpose - never deliberated, still
+        deliberating, and deliberated against facts the buyer has since added to. A caller
+        that needs to tell them apart should read the briefing; a caller that just wants
+        something safe to show should use this.
+        """
+
+        briefing = self._briefings.get(session_id)
+        if briefing is None:
+            return None
+        current = briefing.current_deliberation()
+        return None if current is None else current.plan
 
     @staticmethod
     def _business_type(state: ConversationState) -> str | None:
@@ -569,6 +615,15 @@ class ConversationEngine:
             return self._states[session_id]
         except KeyError as error:
             raise LookupError("Conversation session not found") from error
+
+
+_TOPICS: dict[str, Topic] = {topic.value: topic for topic in Topic}
+"""Fact keys the slow lane can reason about, by the key the extractor emits.
+
+A mapping rather than ``Topic(fact.key)`` so that a fact key with no matching topic - and
+there are several, evidence dimensions among them - is skipped rather than raising in the
+turn path.
+"""
 
 
 _REPLIES: dict[LanguageCode, dict[str, str]] = {

@@ -81,6 +81,10 @@ flowchart LR
     API --> Conversation[Conversation state machine]
     Conversation <--> Speech[STT / TTS / VAD adapters]
     Conversation <--> Model[Local model adapter]
+    Conversation --> Briefing[(Briefing: observations)]
+    Briefing --> Slow[Background deliberation model]
+    Slow --> Briefing2[(Briefing: site plan)]
+    Briefing2 --> Artifacts[Website outline / deck mock]
     Conversation --> Policy[Deterministic policy engine]
     Conversation --> Store[(Append-only lead journey)]
     Policy --> Actions[Guarded action dispatcher]
@@ -96,6 +100,24 @@ The target design uses three profiles:
 - **`live-disabled`** — future official provider adapters requiring compliance and operator activation.
 
 See [Architecture](docs/ARCHITECTURE.md) for component, sequence, deployment, data-flow, provider-boundary, and latency details.
+
+### Two models, never at once
+
+A fast model reads each turn (~250-650 ms) and a slower one plans the buyer's site (~10 s).
+They share one CPU, so running them together costs the turn path **3.37x** — and capping the
+background model's threads makes that *worse*, not better. Instead the slow lane is preempted
+whenever a turn starts, which costs **0.1 ms** and returns the turn path to **0.99x** its idle
+baseline.
+
+They do not message each other: an agent-to-agent round trip measured **12,976 ms** against
+**0.162 microseconds** for a shared-state write and read. Each lane owns the fields it writes,
+so overwriting is impossible rather than prevented, and a plan goes stale the moment the buyer
+says something it did not account for.
+
+What a model is allowed to decide is measured, not assumed. It is never asked for the sales
+move — asked for stance, one model answered `stalling` to every turn — and it is not asked at
+all in Telugu, where every commercially-licensed model that fits this hardware scores at or
+below guessing. Numbers in [Benchmarks](docs/BENCHMARKS.md).
 
 ## Safety and compliance
 
