@@ -30,8 +30,10 @@ import sys
 import tempfile
 import time
 import wave
-from collections.abc import AsyncIterator, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +43,7 @@ from pitchbot.conversation.models import ConversationResult
 from pitchbot.conversation.planning import Slot, supported_languages
 from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
+from pitchbot.speech.backchannel import Backchannel
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
 VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
@@ -139,6 +142,10 @@ class Speaker:
         self._adapter = adapter
         self._language = language
 
+    @property
+    def language(self) -> LanguageCode:
+        return self._language
+
     async def say(self, text: str) -> str | None:
         """Speak ``text``. Returns a human-readable problem, or ``None`` on success."""
 
@@ -161,6 +168,29 @@ class Speaker:
             return await asyncio.to_thread(play_wav, path)
         finally:
             path.unlink(missing_ok=True)
+
+
+class Voices:
+    """Piper speakers for whichever languages a conversation turns out to need.
+
+    Built lazily and kept, because a buyer who switches to Hindi and back to English
+    should pay the voice load once per language rather than once per switch. Loading a
+    Piper voice was measured at about 2.1 s and holds the interpreter while it happens,
+    so repeating it mid-call is a silence the buyer hears.
+
+    A language with no reviewed voice is cached as a failure too. Re-attempting a load
+    that has already failed would stall every switch back to that language for the rest
+    of the call, and would reprint the same complaint each time.
+    """
+
+    def __init__(self, voices_dir: Path) -> None:
+        self._voices_dir = voices_dir
+        self._cache: dict[LanguageCode, tuple[Speaker | None, str]] = {}
+
+    def speaker(self, language: LanguageCode) -> tuple[Speaker | None, str]:
+        if language not in self._cache:
+            self._cache[language] = build_speaker(language, self._voices_dir)
+        return self._cache[language]
 
 
 def build_speaker(language: LanguageCode, voices_dir: Path) -> tuple[Speaker | None, str]:
@@ -235,6 +265,20 @@ async def build_understanding(model_dir: Path, model_id: str | None) -> tuple[An
     return ModelTurnUnderstanding(adapter), note
 
 
+@dataclass(frozen=True, slots=True)
+class HeardTurn:
+    """One finished buyer utterance, and what the transcriber made of its language.
+
+    The language travels with the text because the conversation needs it to decide whether
+    the buyer has switched. It was previously computed by the pipeline and dropped here,
+    which left the transcriber's own evidence unused on the one path where speech is the
+    only input there is.
+    """
+
+    text: str
+    language: LanguageCode | None
+
+
 class Listener:
     """Turns live microphone audio into finished buyer turns.
 
@@ -250,12 +294,92 @@ class Listener:
     than papered over with a barge-in that would trigger on our own voice.
     """
 
-    def __init__(self, microphone: Any, pipeline: Any) -> None:
+    def __init__(
+        self,
+        microphone: Any,
+        pipeline: Any,
+        *,
+        backchannel: Backchannel | None = None,
+        say: Callable[[str], Awaitable[Any]] | None = None,
+        language: LanguageCode = LanguageCode.ENGLISH,
+    ) -> None:
         self._microphone = microphone
         self._pipeline = pipeline
         self._frames: AsyncIterator[AudioChunk] | None = None
+        self._backchannel = backchannel
+        self._say = say
+        self._language = language
+        self._thinking: asyncio.Task[None] | None = None
 
-    async def next_turn(self, *, on_skip: Callable[[str], None] | None = None) -> str | None:
+    def attach(self, pipeline: Any) -> None:
+        """Give the listener its pipeline after construction.
+
+        Needed because the two reference each other: the pipeline must call
+        :meth:`start_thinking` the instant an utterance closes, and the listener must
+        drive the pipeline. Building the listener first and attaching keeps that knot
+        explicit rather than hiding it behind a mutable default or a factory closure.
+        """
+
+        self._pipeline = pipeline
+
+    def start_thinking(self) -> None:
+        """Begin filling the silence, called the moment transcription starts.
+
+        Measured, that silence is ~4.5 s and is almost entirely transcription, so this is
+        the only moment early enough to cover it.
+        """
+
+        if self._say is None or self._backchannel is None:
+            return
+        self._backchannel.begin_turn()
+        self._thinking = asyncio.get_running_loop().create_task(self._fill())
+
+    async def _fill(self) -> None:
+        """Say at most a couple of short things while the transcriber works.
+
+        Only the **microphone** is paused, never the turn-taking machine. This runs while
+        the pipeline is awaiting inside ``push``, and ``agent_started_speaking`` would move
+        that machine underneath the very utterance it is transcribing. Pausing the device
+        is enough: it stops the agent hearing itself, and the utterance's audio was already
+        copied out of the buffer before transcription began.
+        """
+
+        started = monotonic()
+        if self._backchannel is None or self._say is None:  # pragma: no cover - guarded
+            return
+        for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            elapsed_ms = (monotonic() - started) * 1000
+            if elapsed_ms < target:
+                await asyncio.sleep((target - elapsed_ms) / 1000)
+            # `max` rather than a fresh reading alone: having slept *to* the threshold, a
+            # re-measurement can still land a fraction of a millisecond below it, and the
+            # policy would then decline and the loop would end. The second filler would
+            # silently never fire, on a timer that looked correct. Waiting for the target
+            # is what happened, so that is what is reported.
+            waited_ms = max(float(target), (monotonic() - started) * 1000)
+            phrase = self._backchannel.due(waited_ms, self._language)
+            if phrase is None:
+                continue
+            self._microphone.pause()
+            try:
+                # Shielded so that the reply arriving mid-filler does not chop a word in
+                # half. It costs at most the filler's own length, measured at 0.4-1.1 s
+                # against a 4.5 s gap, and a clipped syllable sounds like a fault where a
+                # completed one sounds like a person.
+                await asyncio.shield(self._say(phrase))
+            finally:
+                self._microphone.resume()
+
+    async def _stop_thinking(self) -> None:
+        """Stop filling, waiting for any half-spoken filler to finish first."""
+
+        task, self._thinking = self._thinking, None
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def next_turn(self, *, on_skip: Callable[[str], None] | None = None) -> HeardTurn | None:
         """Wait until the buyer finishes a sentence and return it.
 
         Returns ``None`` only when the microphone closes, which is how the conversation
@@ -269,11 +393,12 @@ class Listener:
             self._frames = self._microphone.frames()
         async for chunk in self._frames:
             outcome = await self._pipeline.push(chunk)
+            await self._stop_thinking()
             utterance = outcome.utterance
             if utterance is None:
                 continue
             if utterance.is_turn and utterance.text:
-                return str(utterance.text)
+                return HeardTurn(str(utterance.text), utterance.language)
             if on_skip is not None:
                 on_skip(utterance.outcome.value)
         return None
@@ -282,6 +407,18 @@ class Listener:
         self._microphone.pause()
         self._pipeline.agent_started_speaking()
 
+    def set_language(self, language: LanguageCode) -> None:
+        """Follow a conversation that has changed language.
+
+        Only the transcriber's *expectation* moves. The decoder is already running in
+        auto-detect (see :func:`build_listener`), so this does not gate what Whisper is
+        allowed to hear - which matters, because gating it is precisely what would stop
+        the next switch being noticed.
+        """
+
+        self._pipeline.set_language(language)
+        self._language = language
+
     def agent_stopped_speaking(self) -> None:
         self._pipeline.agent_stopped_speaking()
         self._microphone.resume()
@@ -289,10 +426,16 @@ class Listener:
     async def close(self) -> None:
         """Release the device. Ending the conversation must not leave a mic open."""
 
+        await self._stop_thinking()
         await self._microphone.stop()
 
 
-def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Listener | None, str]:
+def build_listener(
+    language: LanguageCode,
+    args: argparse.Namespace,
+    *,
+    say: Callable[[str], Awaitable[Any]] | None = None,
+) -> tuple[Listener | None, str]:
     """A microphone-backed listener for this language, or the reason there is not one."""
 
     from pitchbot.adapters.faster_whisper_stt import (
@@ -313,10 +456,20 @@ def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Li
         return None, f"no transcriber. Install it with: {STT_HINT}"
 
     microphone = Microphone(device=args.input_device, sample_rate_hz=SAMPLE_RATE_HZ)
+    backchannel = None if args.no_backchannel or say is None else Backchannel()
+    listener = Listener(microphone, None, backchannel=backchannel, say=say, language=language)
     pipeline = SpeechTurnPipeline(
         detector=WebRtcVoiceActivityDetector(mode=args.vad_mode, sample_rate_hz=SAMPLE_RATE_HZ),
         transcriber=FasterWhisperSpeechToTextAdapter(
-            model_size=args.whisper_model, language=language
+            model_size=args.whisper_model,
+            language=language,
+            # Expected, not imposed. Forcing the opening language is what makes a switch
+            # undetectable: measured 2026-09-04, Hindi speech forced to `en` came back as
+            # fluent English the buyer never said, labelled `en` at probability 1.00, with
+            # the Devanagari gone. Auto-detect cost nothing to avoid that - identical CER
+            # on English and Hindi, better on Telugu. The expectation is still used for
+            # Telugu script repair, which is the only thing it was ever needed for here.
+            force_language=not args.fixed_language,
         ),
         language=language,
         # Must match what the microphone actually produces. The default assumes 250 ms
@@ -324,9 +477,16 @@ def build_listener(language: LanguageCode, args: argparse.Namespace) -> tuple[Li
         # duration the endpointer reasons about, so silence is measured eight times too
         # long and the buyer never gets to finish a sentence.
         frame_duration_ms=FRAME_MS,
+        on_thinking=listener.start_thinking,
     )
-    listener = Listener(microphone, pipeline)
-    return listener, f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model}"
+    listener.attach(pipeline)
+    hint = "forced" if args.fixed_language else "auto-detect"
+    filler = "off" if backchannel is None else f"after {Backchannel().first_after_ms} ms"
+    note = (
+        f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model} "
+        f"({hint}); backchannel {filler}"
+    )
+    return listener, note
 
 
 def scripted_turns(path: Path | None) -> list[str] | None:
@@ -349,16 +509,25 @@ async def run(args: argparse.Namespace) -> int:
         return 2
 
     speaker: Speaker | None = None
-    if args.speak or args.listen:
+    voices = Voices(Path(args.voices_dir))
+    audio_enabled = bool(args.speak or args.listen)
+    if audio_enabled:
         # Listening without speaking is a conversation the buyer can only lose, so --listen
         # implies --speak. A voice loop that answers in text is a demo of the microphone,
         # not of the product.
-        speaker, note = build_speaker(language, Path(args.voices_dir))
+        speaker, note = voices.speaker(language)
         print(f"  voice     : {note}")
 
     listener: Listener | None = None
     if args.listen:
-        listener, note = build_listener(language, args)
+        # The filler is spoken with the same voice as the reply, so it has to be handed
+        # the speaker rather than building its own: a second Piper instance would pay the
+        # ~2.1 s load again and could pick a different voice for the same language.
+        async def fill(text: str) -> None:
+            if speaker is not None:
+                await speaker.say(text)
+
+        listener, note = build_listener(language, args, say=fill)
         print(f"  listening : {note}")
         if listener is None:
             return 2
@@ -368,7 +537,7 @@ async def run(args: argparse.Namespace) -> int:
         understanding, note = await build_understanding(Path(args.model_dir), args.model_id)
         print(f"  model     : {note}")
 
-    engine = ConversationEngine()
+    engine = ConversationEngine(detect_language_switch=not args.fixed_language)
     session_id = uuid4()
     engine.create_session(session_id)
 
@@ -383,6 +552,7 @@ async def run(args: argparse.Namespace) -> int:
     index = 0
 
     while True:
+        transcribed_as: LanguageCode | None = None
         if listener is not None:
             print("\n  listening...", flush=True)
             heard = await listener.next_turn(
@@ -390,7 +560,8 @@ async def run(args: argparse.Namespace) -> int:
             )
             if heard is None:
                 break
-            text = heard
+            text = heard.text
+            transcribed_as = heard.language
             print(f"  you  \u203a {text}")
         elif script is not None:
             if index >= len(script):
@@ -412,9 +583,35 @@ async def run(args: argparse.Namespace) -> int:
         if understanding is not None:
             known_keys = {fact.key for fact in engine.snapshot(session_id).facts}
             read = await understanding.understand(text, language, known_keys)
-        result = engine.process_turn(session_id, text=text, language=language, understanding=read)
+        result = engine.process_turn(
+            session_id,
+            text=text,
+            language=language,
+            understanding=read,
+            transcribed_as=transcribed_as,
+        )
         elapsed_ms = (time.perf_counter() - started) * 1000
         known = known_slots(engine.snapshot(session_id).facts)
+
+        if result.language_switched:
+            # Announced before the reply is printed, because the reply is already in the
+            # new language and reading it first makes the notice look like it arrived a
+            # turn late. Everything downstream of the decision has to move with it too,
+            # and each part is a separate failure if it does not: a stale voice reads
+            # Hindi with an English one, and a stale transcriber expectation leaves
+            # Telugu unrepaired.
+            language = result.language
+            print(f"       * language -> {LANGUAGE_NAMES.get(language, language.value)}")
+            if listener is not None:
+                listener.set_language(language)
+            if audio_enabled:
+                # Re-resolved from `audio_enabled` rather than from `speaker`, so a switch
+                # into a language with no reviewed voice silences only that language.
+                # Keying it off `speaker` would make the first such switch permanent, and
+                # a buyer who moved to Telugu and back would never be spoken to again.
+                speaker, note = voices.speaker(language)
+                print(f"       * voice    : {note}")
+
         print(render_turn(result, known, elapsed_ms, verbose=not args.quiet))
 
         if speaker is not None:
@@ -424,6 +621,7 @@ async def run(args: argparse.Namespace) -> int:
                 # every turn would bury the conversation it is meant to accompany.
                 print(f"       ! audio disabled: {problem}")
                 speaker = None
+                audio_enabled = False
 
     if listener is not None:
         await listener.close()
@@ -511,6 +709,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-model",
         default="small",
         help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
+    )
+    parser.add_argument(
+        "--no-backchannel",
+        action="store_true",
+        help="stay silent while thinking instead of saying 'hmm' - the measured wait "
+        "between a buyer finishing and the reply being audible is about 4.5 seconds",
+    )
+    parser.add_argument(
+        "--fixed-language",
+        action="store_true",
+        help="never change language mid-conversation; also forces the transcriber to "
+        "--language instead of letting it detect (which is what hides a switch)",
     )
     parser.add_argument(
         "--script",

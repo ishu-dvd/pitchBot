@@ -44,6 +44,14 @@ class ConversationPhase(StrEnum):
 class ConversationResult(ConversationModel):
     reply: str = Field(min_length=1, max_length=1_000)
     language: LanguageCode
+    language_switched: bool = False
+    """Whether this turn changed the language the conversation is being held in.
+
+    ``language`` alone is not enough to act on: a caller has to re-point a voice and a
+    transcriber, and doing that on every turn would reload models needlessly, while doing
+    it never is the bug this exists to fix. This says which turn it was.
+    """
+
     disposition: ConversationDisposition
     phase: ConversationPhase
     safety_signals: tuple[SafetySignal, ...] = Field(default=(), max_length=16)
@@ -67,7 +75,15 @@ class ConversationSnapshot(ConversationModel):
 
 
 class ConversationStateCheckpoint(ConversationModel):
-    checkpoint_schema_version: Literal["1"]
+    checkpoint_schema_version: Literal["1", "2"]
+    """``"2"`` adds the language-switching fields. Both are accepted for reading.
+
+    A ``"1"`` checkpoint restores with the language fields at their defaults, which is
+    exactly right: it was written by a build that could not switch language, so it had
+    none to preserve. Writing ``"2"`` means an older build rejects it loudly on the
+    version literal rather than silently dropping a language the buyer had asked for.
+    """
+
     lead_id: UUID
     max_turns: int = Field(ge=1, le=10_000)
     max_facts: int = Field(ge=1, le=10_000)
@@ -84,6 +100,10 @@ class ConversationStateCheckpoint(ConversationModel):
     evidence: tuple[IntentEvidence, ...] = Field(default=(), max_length=10_000)
     classifications: tuple[Classification, ...] = Field(default=(), max_length=10_000)
     goal_change_count: int = Field(default=0, ge=0)
+    language: LanguageCode = LanguageCode.UNKNOWN
+    declared_language: LanguageCode = LanguageCode.UNKNOWN
+    pending_language: LanguageCode | None = None
+    pending_language_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_checkpoint(self) -> ConversationStateCheckpoint:
@@ -113,4 +133,10 @@ class ConversationStateCheckpoint(ConversationModel):
             raise ValueError("checkpoint records must belong to its lead")
         if self.stopped is not (self.phase is ConversationPhase.CLOSED):
             raise ValueError("checkpoint closed phase and stopped state must agree")
+        if (self.pending_language is None) is not (self.pending_language_count == 0):
+            # A count without a candidate would restore hysteresis that can never
+            # complete; a candidate without a count would restore one that switches on
+            # the next turn regardless of what is said. Both are silent, so both are
+            # rejected here rather than discovered mid-conversation.
+            raise ValueError("checkpoint pending language and its count must agree")
         return self

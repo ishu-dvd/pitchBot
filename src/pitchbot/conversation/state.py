@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from pitchbot.conversation.models import ConversationPhase
-from pitchbot.domain import Classification, IntentEvidence, RequirementFact
+from pitchbot.domain import Classification, IntentEvidence, LanguageCode, RequirementFact
 
 
 @dataclass(slots=True)
@@ -43,6 +43,33 @@ class ConversationState:
     turn - and then the next turn rebuilds the slot set from the rules' facts alone, the
     budget is missing again, and the agent asks for it a second time. Also bounded by the
     number of slots.
+    """
+
+    language: LanguageCode = LanguageCode.UNKNOWN
+    """The language the conversation is actually being held in.
+
+    Distinct from :attr:`declared_language` because the two diverge the moment a buyer
+    switches. The caller keeps declaring what it believes; this is what was decided.
+    """
+
+    declared_language: LanguageCode = LanguageCode.UNKNOWN
+    """The language the caller passed on the previous turn.
+
+    Kept so a caller that *deliberately* changes language - an operator switching a live
+    call, say - can be told apart from one that simply keeps repeating the language it
+    opened with. Without it the engine could not honour a re-declaration without also
+    letting a stale declaration undo a switch the buyer asked for.
+    """
+
+    pending_language: LanguageCode | None = None
+    """A different language heard but not yet acted on."""
+
+    pending_language_count: int = 0
+    """Consecutive turns :attr:`pending_language` has been heard.
+
+    Held in state rather than in a detector object so a checkpoint restores it. Hysteresis
+    kept outside the state would silently reset on every restore, and a buyer mid-switch
+    would have to start convincing the system again.
     """
 
     def __post_init__(self) -> None:

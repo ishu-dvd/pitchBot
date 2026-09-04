@@ -95,7 +95,8 @@ async def test_speech_then_silence_becomes_one_buyer_turn() -> None:
 
     heard = await asyncio.wait_for(listener.next_turn(), timeout=5)
 
-    assert heard == "We sell toys online."
+    assert heard is not None
+    assert heard.text == "We sell toys online."
 
 
 @pytest.mark.asyncio
@@ -217,7 +218,12 @@ async def test_a_spoken_turn_reaches_the_engine_and_is_sold_to() -> None:
     engine = ConversationEngine()
     session_id = uuid4()
     engine.create_session(session_id)
-    result = engine.process_turn(session_id, text=heard, language=LanguageCode.ENGLISH)
+    result = engine.process_turn(
+        session_id,
+        text=heard.text,
+        language=LanguageCode.ENGLISH,
+        transcribed_as=heard.language,
+    )
 
     expected = _PHRASES[_table(LanguageCode.ENGLISH)].pitch["toys"]  # noqa: SLF001
     assert expected in result.reply

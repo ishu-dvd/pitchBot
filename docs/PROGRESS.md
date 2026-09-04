@@ -1955,3 +1955,90 @@
 - **Rollback:** Revert PR 41. No schema migration and no persistent state; the `microphone`
   extra is additive and absent by default. Reverting restores the duplicated vocabulary and
   the dead `Intent`, both correctness regressions, and removes voice input entirely.
+
+## PR 42 - Follow a buyer who changes language
+
+- **Problem:** The language was a parameter the caller set once and never revisited. A buyer
+  who opened in English and moved to Hindi -- ordinary on an Indian B2B call, and almost
+  never announced -- was answered in English for the rest of the conversation.
+- **Measured first.** Transcribing one qualifying sentence per language three ways: forced
+  to the language spoken, forced to the language declared *before* the switch, and
+  auto-detect. Auto-detect matched a correct forced hint exactly (en 28.6%, hi 18.4% CER),
+  beat it on Telugu (110% against 247%), and named the language right at 0.96-1.00 every
+  time. A *stale* hint returned fluent English the buyer never said -- `"Our shop and our
+  budget is Rs. 50,000."` -- labelled `en` at probability 1.00, in Latin script, with every
+  signal of the switch erased and the budget extractor ready to take a number out of it.
+  That decided the design: expect a language, never force one.
+- **Shipped:** `conversation/language.py` reads a turn three ways -- an explicit request in
+  any script, script evidence, and a closed list of romanised Indic markers -- and
+  `decide_language` applies hysteresis. Two consecutive turns move the conversation; a
+  request moves it at once. The engine owns the decision, so `process_turn(language=)` is
+  now the caller's belief and `result.language` is what was decided. The switch is
+  acknowledged in the language switched *to*, first, before anything else in the reply.
+- **Three defects found and fixed on the way.** `SpeechTurnPipeline._language` was assigned
+  and never read, so its `language=` parameter promised to steer transcription and did
+  nothing. `UtteranceResult.language` was computed for every utterance and discarded by the
+  CLI, so on the voice loop -- where speech is the only input -- the transcriber's own
+  evidence never reached the conversation. And the Telugu request table used citation forms,
+  which Telugu's agglutinated case endings do not contain, so `ఇంగ్లీషులో` ("in English")
+  matched nothing: every Telugu-language request for English was silently missed. The last
+  was found by running `examples/switch-request-te.txt`, not by a test written from the same
+  assumption as the code.
+- **Tests:** 797 -> 857 passing. Implicit switching in four language pairs including back
+  out of an Indic language, a round trip without asking either time, Hinglish, a request in
+  every script driven from `supported_languages()`, mentions that must *not* switch, the
+  transcriber label used as a last resort and never over the words, hysteresis reset on
+  alternation, opt-out answered in the newly adopted language, checkpoint and journal
+  round-trips at schema `"2"`, and a `"1"` checkpoint still restoring.
+- **Deferred:** No negation window, so `"it is not expensive"` still reads as an objection
+  and romanised Telugu is detected less reliably than Telugu script. Switching is per
+  conversation, not per sentence -- a genuinely code-mixed sentence picks one language.
+  Barge-in still needs echo cancellation. The voice loop is still CLI-only. Vocabulary is
+  still six verticals and five features, and no model is selected.
+- **Rollback:** Revert PR 42. Checkpoint and journal schemas move `"1"` -> `"2"`, both
+  additive with defaults, so a reverted build reads `"1"` records and rejects `"2"` ones
+  loudly on the version literal rather than dropping a language silently. No migration, no
+  new dependency; switching needs no optional extra.
+
+## PR 42 addendum - thinking out loud, and Hinglish as its own language
+
+Two follow-ups landed in the same PR, both from asking what the conversation *feels* like
+rather than whether it works.
+
+### Backchannel
+- **Measured the gap first.** End of buyer speech to audible reply is **4,507 ms** (en) /
+  **4,553 ms** (hi), of which transcription is 3,982 / 4,453 ms. Planning is 1-25 ms and
+  reply synthesis with a resident voice is 92-501 ms. The first probe reloaded the Piper
+  voice per synthesis (~2.4 s) and inflated everything; discarded and redone.
+- **That decided the hook point.** The wait *is* transcription, so the filler starts on
+  `SpeechTurnPipeline.on_thinking`, fired immediately before awaiting the transcriber.
+  Waiting for the transcript would mean speaking into the last 500 ms of a 4,500 ms silence.
+- **Receipt, never assent.** The filler is chosen before the sentence is transcribed, so it
+  must be safe against anything the buyer might have said. "Ok"/"theek hai"/"haan" are
+  rejected: if the untranscribed sentence was a price proposal, an agreeing filler commits
+  the agent out loud. Tested across every language against an explicit assent set.
+- **Result:** longest contiguous silence 4,156 -> 1,428 ms (en), 4,304 -> 1,103 ms (hi).
+  Rendered `turn-en.wav` / `turn-hi.wav` in this folder for a human to listen to.
+- **Bug found by the clean-venv run:** the loop slept *to* a threshold then re-measured, and
+  the re-measurement could land a fraction below it, so the second filler silently never
+  fired on a timer that looked correct. Fixed by reporting the target as a floor.
+- **Telugu transcription measured at 37.7 s** for a 4.1 s clip - `small` loops. Recorded in
+  BENCHMARKS; no filler policy hides that, and it is the worst latency number here so far.
+
+### Hinglish
+- `MIXED` was a redirect to the Hindi table, so *"aapka budget kitna hai"* came back in
+  formal Devanagari. Register failure, not comprehension. It now has its own phrase table
+  and is in `supported_languages()`, held to the same import-time completeness checks.
+- **Adding it exposed a real gap:** safety detection handled romanised Hinglish and
+  **stance detection did not** - a Hinglish buyer could refuse contact but could not object
+  to a price. `INTENT_PHRASES` now has romanised entries.
+- **Second gap found by running it:** the romanised marker list was too thin, so the switch
+  landed three turns late on the shipped example. Expanded from 48 to 89 tokens; the switch
+  now lands on the second Hinglish turn as designed.
+- Which words stay English (`budget`, `website`, `catalogue`, `proposal`) is deliberate -
+  they are the words the buyer used.
+
+### Validation after both
+896 passed / 19 skipped with extras; 859 / 56 clean venv. ruff + mypy (`src tests`) clean;
+`mypy --strict` clean on win32/linux/darwin. Backchannel tests run 5x without flaking.
+New example `examples/hinglish.txt`.

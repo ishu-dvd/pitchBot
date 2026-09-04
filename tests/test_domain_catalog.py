@@ -84,6 +84,7 @@ def test_adding_a_vertical_without_a_pitch_fails_at_import(language: LanguageCod
             closing=existing.closing,
             confirm=existing.confirm,
             repeated=existing.repeated,
+            switched=existing.switched,
         )
 
 
@@ -107,4 +108,5 @@ def test_a_language_that_cannot_answer_an_objection_fails_at_import(
             closing=existing.closing,
             confirm=existing.confirm,
             repeated=existing.repeated,
+            switched=existing.switched,
         )

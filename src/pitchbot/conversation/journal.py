@@ -87,7 +87,15 @@ class _HistoryBudget:
 class ConversationTurnEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    event_schema_version: Literal["1"]
+    event_schema_version: Literal["1", "2"]
+    """``"2"`` adds the language state a switch depends on.
+
+    A ``"1"`` event replays with those fields at their defaults, which is what it meant:
+    it was written by a build that held one language for the whole conversation. Writing
+    ``"2"`` makes an older reader reject it on the version literal rather than silently
+    replay a conversation into the language the buyer had moved away from.
+    """
+
     session_id: UUID
     operation_id: UUID
     operation_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -101,6 +109,9 @@ class ConversationTurnEvent(BaseModel):
     abuse_redirected: bool
     stopped: bool
     goal_change_count: int = Field(ge=0)
+    declared_language: LanguageCode = LanguageCode.UNKNOWN
+    pending_language: LanguageCode | None = None
+    pending_language_count: int = Field(default=0, ge=0)
     result: ConversationResult
 
     @model_validator(mode="after")
@@ -829,7 +840,7 @@ class ConversationJournal:
 
         assert previous is not None
         checkpoint = ConversationStateCheckpoint(
-            checkpoint_schema_version="1",
+            checkpoint_schema_version="2",
             lead_id=lead_id,
             max_turns=first.max_turns,
             max_facts=first.max_facts,
@@ -846,6 +857,10 @@ class ConversationJournal:
             evidence=tuple(evidence),
             classifications=tuple(classifications),
             goal_change_count=previous.goal_change_count,
+            language=previous.result.language,
+            declared_language=previous.declared_language,
+            pending_language=previous.pending_language,
+            pending_language_count=previous.pending_language_count,
         )
         return ConversationReplay(
             lead_id=lead_id,
@@ -912,7 +927,7 @@ class ConversationJournal:
         if not checkpoint.recent_turn_digests:
             raise ValueError("processed turn is missing its repetition digest")
         return ConversationTurnEvent(
-            event_schema_version="1",
+            event_schema_version="2",
             session_id=session_id,
             operation_id=operation_id,
             operation_fingerprint=operation_fingerprint,
@@ -926,6 +941,9 @@ class ConversationJournal:
             abuse_redirected=checkpoint.abuse_redirected,
             stopped=checkpoint.stopped,
             goal_change_count=checkpoint.goal_change_count,
+            declared_language=checkpoint.declared_language,
+            pending_language=checkpoint.pending_language,
+            pending_language_count=checkpoint.pending_language_count,
             result=result,
         )
 

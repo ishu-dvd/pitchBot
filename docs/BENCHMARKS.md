@@ -1094,3 +1094,123 @@ The last two rows are why the list is closed. "Allow up to two words between the
 number" would read those as budgets of 500 and 900, and the failure directions are not
 comparable: a missed budget costs one more question, an invented one is quoted back to the
 buyer and shapes a proposal.
+
+## Language switching (2026-09-04)
+
+The conversation used to be told its language once and never revisited it. This measured
+what that costs when the buyer changes language, and whether auto-detect is a usable
+alternative. One qualifying sentence per language, synthesised with Piper, transcribed
+three ways with `faster-whisper` `small`/int8 on 8 CPU cores.
+
+- **matched** — decoder forced to the language actually spoken (the old best case)
+- **stale** — decoder forced to the language declared *before* the buyer switched (the bug)
+- **auto** — no hint at all (the candidate)
+
+| Spoken | Arm | Hint | Detected | Prob. | Script | CER% | Transcript |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| en | matched | `en` | en | 1.00 | Latn | 28.6 | We run a retail shop and our budget is 50,000 rupees. |
+| en | stale | `hi` | hi | 1.00 | Latn | 44.9 | ॐ ृ Woo-Run a retail shop ृ In our budget is 50,000 rupees |
+| en | auto | – | **en** | 1.00 | Latn | **28.6** | We run a retail shop and our budget is 50,000 rupees. |
+| hi | matched | `hi` | hi | 1.00 | Deva | 18.4 | हमारी दुकान है और हमारा बज़त पचा साजार रुबाई है |
+| hi | stale | `en` | en | 1.00 | Latn | 100.0 | **Our shop and our budget is Rs. 50,000.** |
+| hi | auto | – | **hi** | 0.96 | Deva | **18.4** | हमारी दुकान है और हमारा बज़त पचा साजार रुबाई है |
+| te | matched | `te` | te | 1.00 | Telu | 247.5 | మారం moist పిత౿క్లి పిని బిమిస్ … |
+| te | stale | `en` | en | 1.00 | Latn | 100.0 | **Our budget is Rs. 50,000** |
+| te | auto | – | **te** | 0.96 | Telu | **110.0** | కాంరికింటాటిలూన సిడిరూడియాలేదినాంవాంనిం… |
+
+Two conclusions, and the second is the one that decided the design.
+
+**Auto-detect is free.** It matched a correct forced hint exactly on English (28.6%) and
+Hindi (18.4%), beat it on Telugu (110% against 247%), and identified the language correctly
+in every case at 0.96–1.00. There is no accuracy argument for forcing.
+
+**A stale hint does not fail — it fabricates.** The bolded rows are the danger. Hindi and
+Telugu speech forced to `en` came back as fluent, well-formed English the buyer never said,
+labelled `en` at probability **1.00**, in Latin script. Every signal a caller could use to
+notice the switch — the script, the reported language, the confidence — was erased, and the
+budget extractor would happily have taken "Rs. 50,000" out of a sentence nobody uttered.
+That is worse than garbage: garbage is visible.
+
+So the voice loop *expects* a language without forcing it, and `--fixed-language` is
+available for a caller that genuinely owns the language and wants the old behaviour.
+
+Telugu remains poor at `small` under every arm. That is a model-size and voice question,
+tracked separately; nothing here improves it, and auto-detect is simply the least bad.
+
+### Detection thresholds
+
+Hysteresis of **2 consecutive turns** before a detected switch, and **0** for a request.
+One turn is too eager — a single borrowed word would move the reply language, the voice
+and the transcriber at once. Three means the buyer has been answered twice in a language
+they abandoned. A request bypasses it entirely: a person who asks and is then answered
+twice more in the old language has been ignored, and knows it.
+
+Romanised Indic text needs **2 distinct markers** from a closed token list before it is
+read as Hinglish. One is not evidence — *"Namaste, we run a retail shop"* is an English
+sentence containing a greeting.
+
+## Thinking out loud (2026-09-04)
+
+How long is the buyer actually left in silence between finishing a sentence and hearing a
+reply? Measured on the shipped local path, Piper voices resident (a first pass that reloaded
+the voice per synthesis inflated everything by ~2.4 s and was discarded):
+
+| Spoken | Audio | Transcribe | Plan | Reply TTS | **Gap** |
+| --- | --- | --- | --- | --- | --- |
+| en | 4.0 s | 3,982 ms | 25 ms | 501 ms | **4,507 ms** |
+| hi | 4.1 s | 4,453 ms | 6 ms | 95 ms | **4,553 ms** |
+| te | 4.1 s | **37,692 ms** | 1 ms | 92 ms | **37,785 ms** |
+
+**Transcription is the entire gap** — 88% of it in English, 97.8% in Hindi. Planning costs
+1–25 ms and synthesising the reply with a resident voice costs 92–501 ms. That decides where
+a backchannel has to hook in: it must start when the *endpointer closes the utterance*,
+because by the time a transcript exists almost the whole silence has already been spent.
+
+**Telugu at 37.7 s is a separate finding, not a backchannel problem.** `small` loops badly on
+Telugu at this sentence length. No filler policy hides a 38-second wait; it is recorded here
+because it is the single worst latency number this project has measured.
+
+### Filler cost
+
+| Register | Filler | Synth | Spoken | All-in | Headroom |
+| --- | --- | --- | --- | --- | --- |
+| en | `Hmm.` | 50 ms | 0.37 s | 421 ms | 4,086 ms |
+| en | `Got it.` | 58 ms | 0.57 s | 627 ms | 3,880 ms |
+| en | `Let me see.` | 47 ms | 0.81 s | 859 ms | 3,648 ms |
+| hi | `अच्छा।` | 52 ms | 0.70 s | 749 ms | 3,804 ms |
+| hi | `समझ गया।` | 53 ms | 0.88 s | 935 ms | 3,618 ms |
+| mixed | `Achcha.` | 37 ms | 0.75 s | 791 ms | 3,762 ms |
+| mixed | `Samajh gaya.` | 56 ms | 1.07 s | 1,124 ms | 3,429 ms |
+| te | `అలాగా.` | 42 ms | 0.53 s | 576 ms | 37,209 ms |
+
+Every candidate fits several times over, which is what makes a *second* filler on a long
+wait affordable rather than a gamble. Thresholds are 700 ms for the first and 2,500 ms for
+the second, capped at two per turn.
+
+### What it buys
+
+Reconstructing a full turn from those measurements and reporting the longest single stretch
+of dead air — the thing that makes a pause feel like a dropped call rather than a beat:
+
+| Spoken | Gap | Longest silence, off | Longest silence, on | Improvement |
+| --- | --- | --- | --- | --- |
+| en | 4,156 ms | 4,156 ms | **1,428 ms** | −2,728 ms |
+| hi | 4,304 ms | 4,304 ms | **1,103 ms** | −3,201 ms |
+
+Roughly 1.1–1.4 s is an ordinary conversational pause. Rendered turns are written to
+`turn-en.wav` / `turn-hi.wav` by the probe so the part a number cannot judge can be listened
+to.
+
+### Receipt, never assent
+
+A filler is chosen **before the buyer's sentence has been transcribed**, so it has to be safe
+against whatever they just said. That rules out the most natural-sounding candidates:
+
+| Considered | Verdict |
+| --- | --- |
+| `Hmm.` `Got it.` `अच्छा।` `Achcha.` `అలాగా.` | **kept** — assert only that we heard |
+| `Ok.` `Yes.` `Sure.` `हाँ।` `Theek hai.` | **rejected** — assert agreement |
+
+If the untranscribed sentence was *"so you'll do it for fifty thousand?"*, an agreeing filler
+has committed the agent, out loud, to a number nobody quoted. A test asserts no shipped
+phrase appears in the rejected set, in every language and register.

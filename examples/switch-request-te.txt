@@ -1,0 +1,24 @@
+# A buyer who *asks* to change language rather than just doing it. This is the case that
+# needs no hysteresis: a person who asks to be spoken to in Telugu and is answered twice
+# more in English has been ignored, and knows it. So a request switches on the turn it is
+# made, while merely detecting a language takes two consecutive turns.
+#
+# Run: pitchbot-talk --script examples/switch-request-te.txt
+#
+# Turn 1 opens in English and names the vertical.
+We run a small food and snacks business.
+
+# Turn 2 asks, in English, for Telugu. One turn, immediate switch, acknowledged in Telugu.
+Can you please speak in Telugu?
+
+# Turn 3 continues in Telugu now that the agent has moved.
+మాకు ఆన్‌లైన్ ఆర్డర్లు కావాలి.
+
+# Turn 4 asks to go back to English, this time written in Telugu. A request is recognised
+# by naming a language and a way of speaking it, in any script - so a Telugu speaker
+# asking for English in Telugu is a request, which a table keyed only on each language's
+# own script would have missed entirely.
+దయచేసి ఇంగ్లీషులో మాట్లాడండి.
+
+# Turn 5 is back in English, and so is the agent.
+Our budget is around 80000 rupees.

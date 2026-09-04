@@ -6,6 +6,7 @@ from hashlib import sha256
 from hmac import new as new_hmac
 from uuid import UUID, uuid4
 
+from pitchbot.conversation.language import decide_language, detect_language
 from pitchbot.conversation.models import (
     ConversationDisposition,
     ConversationPhase,
@@ -51,6 +52,7 @@ class ConversationEngine:
         max_classifications: int = 20,
         max_goal_changes: int = 3,
         turn_digest_key: bytes | None = None,
+        detect_language_switch: bool = True,
     ) -> None:
         if max_goal_changes < 1:
             raise ValueError("Maximum goal changes must be positive")
@@ -60,6 +62,14 @@ class ConversationEngine:
         if turn_digest_key is not None and len(turn_digest_key) < 32:
             raise ValueError("Turn digest key must contain at least 32 bytes")
         self._max_goal_changes = max_goal_changes
+        self._detect_language_switch = detect_language_switch
+        """Whether a buyer may change the conversation's language by speaking it.
+
+        On by default because it is the behaviour a person expects and the one a call
+        needs. Off is for a caller that owns the language itself - a scripted evaluation,
+        or an operator console that sets it explicitly - where a detected switch would be
+        an unasked-for change to a variable someone else is managing.
+        """
         self._turn_digest_key = turn_digest_key or secrets.token_bytes(32)
         self._digest_key_id = sha256(self._turn_digest_key).hexdigest()
         self._states: dict[UUID, ConversationState] = {}
@@ -94,8 +104,16 @@ class ConversationEngine:
         language: LanguageCode,
         source_span_id: UUID | None = None,
         understanding: TurnUnderstanding | None = None,
+        transcribed_as: LanguageCode | None = None,
     ) -> ConversationResult:
         """Advance one turn.
+
+        ``transcribed_as`` is the language a transcriber reported for this turn when it
+        arrived as speech. It is a *fallback* signal for deciding the conversation's
+        language, used only when the text itself says nothing - a turn too short to carry
+        script evidence, or one romanised past recognition. It is ranked last on purpose:
+        a transcriber that has been given a language to expect reports that language back,
+        so on the exact turn a buyer switches it is the least reliable evidence available.
 
         ``understanding`` is an optional richer reading of this turn, produced elsewhere -
         today by an opt-in local model. It only ever influences which slot is acknowledged
@@ -108,6 +126,15 @@ class ConversationEngine:
         state.ensure_turn_capacity()
         if state.stopped:
             raise RuntimeError("Conversation is closed")
+
+        # Resolved before the safety branches, not after, because those branches reply
+        # too. A buyer who opts out in Hindi on an English-declared session must be told
+        # in Hindi that they will not be contacted again - answering the one turn that
+        # ends the relationship in a language they did not use is the worst possible
+        # place to get this wrong.
+        language, switched = self._resolve_language(
+            state, text=text, declared=language, transcribed_as=transcribed_as
+        )
 
         normalized = normalize_text(text)
         repeated = is_repeated_turn(
@@ -134,6 +161,7 @@ class ConversationEngine:
                 state,
                 reply=self._reply(language, "opt_out"),
                 language=language,
+                language_switched=switched,
                 disposition=ConversationDisposition.STOP,
                 signals=signals,
                 classification=classification,
@@ -155,6 +183,7 @@ class ConversationEngine:
                 state,
                 reply=self._reply(language, reply_key),
                 language=language,
+                language_switched=switched,
                 disposition=disposition,
                 signals=signals,
                 classification=classification,
@@ -170,6 +199,7 @@ class ConversationEngine:
                 state,
                 reply=self._reply(language, "unsafe_request"),
                 language=language,
+                language_switched=switched,
                 disposition=ConversationDisposition.REDIRECT,
                 signals=signals,
                 classification=classification,
@@ -233,7 +263,7 @@ class ConversationEngine:
                 state.asked_slot_counts[plan.ask.value] = (
                     state.asked_slot_counts.get(plan.ask.value, 0) + 1
                 )
-            reply = render_reply(plan, language, repeated=repeated)
+            reply = render_reply(plan, language, repeated=repeated, switched=switched)
 
         classification = self._classify(state)
         state.phase = self._phase_for(classification)
@@ -241,6 +271,7 @@ class ConversationEngine:
             state,
             reply=reply,
             language=language,
+            language_switched=switched,
             disposition=disposition,
             signals=signals,
             classification=classification,
@@ -272,7 +303,7 @@ class ConversationEngine:
     def export_checkpoint(self, session_id: UUID) -> ConversationStateCheckpoint:
         state = self._get_state(session_id)
         return ConversationStateCheckpoint(
-            checkpoint_schema_version="1",
+            checkpoint_schema_version="2",
             lead_id=state.lead_id,
             max_turns=state.max_turns,
             max_facts=state.max_facts,
@@ -289,6 +320,10 @@ class ConversationEngine:
             evidence=tuple(state.evidence),
             classifications=tuple(state.classifications),
             goal_change_count=state.goal_change_count,
+            language=state.language,
+            declared_language=state.declared_language,
+            pending_language=state.pending_language,
+            pending_language_count=state.pending_language_count,
         )
 
     def restore_checkpoint(
@@ -329,6 +364,10 @@ class ConversationEngine:
             stopped=checkpoint.stopped,
             facts_by_key={fact.key: fact for fact in checkpoint.facts},
             goal_change_count=checkpoint.goal_change_count,
+            language=checkpoint.language,
+            declared_language=checkpoint.declared_language,
+            pending_language=checkpoint.pending_language,
+            pending_language_count=checkpoint.pending_language_count,
         )
         state.recent_turn_digests.extend(checkpoint.recent_turn_digests)
         state.evidence.extend(checkpoint.evidence)
@@ -386,6 +425,7 @@ class ConversationEngine:
         *,
         reply: str,
         language: LanguageCode,
+        language_switched: bool,
         disposition: ConversationDisposition,
         signals: list[SafetySignal],
         classification: Classification,
@@ -397,6 +437,7 @@ class ConversationEngine:
         return ConversationResult(
             reply=reply,
             language=language,
+            language_switched=language_switched,
             disposition=disposition,
             phase=state.phase,
             safety_signals=tuple(signals),
@@ -407,6 +448,59 @@ class ConversationEngine:
             repeated_turn=repeated,
             turn_count=state.turn_count,
         )
+
+    def _resolve_language(
+        self,
+        state: ConversationState,
+        *,
+        text: str,
+        declared: LanguageCode,
+        transcribed_as: LanguageCode | None = None,
+    ) -> tuple[LanguageCode, bool]:
+        """Decide which language to answer this turn in, and whether that is a change.
+
+        The caller's ``declared`` language seeds the session and is honoured again
+        whenever the caller *changes* it, so an operator who reassigns a live call is
+        obeyed at once. Between re-declarations the engine's own decision wins, which is
+        what makes this work for a caller that never reads :attr:`~ConversationResult.
+        language` back - the HTTP API today. A caller that does read it back sees the two
+        agree, so nothing about the existing contract changes until a buyer switches.
+        """
+
+        if state.declared_language is LanguageCode.UNKNOWN:
+            # Seeding the session, not re-declaring it. This deliberately falls through to
+            # detection instead of returning: the caller's opening language is a default,
+            # and consuming a whole turn to record it would mean a buyer who asks for Hindi
+            # as the very first thing they say is ignored, and one who simply speaks Hindi
+            # from the start needs three turns to be heard rather than two.
+            state.declared_language = declared
+            state.language = declared
+        elif declared != state.declared_language:
+            # A re-declaration is an instruction, not evidence, so it clears any partial
+            # switch: a buyer halfway to Hindi whose operator moves the call to Telugu
+            # must not then arrive in Hindi one turn later on the strength of a vote cast
+            # before the reassignment.
+            switched = declared != state.language
+            state.declared_language = declared
+            state.language = declared
+            state.pending_language = None
+            state.pending_language_count = 0
+            return declared, switched
+
+        current = state.language
+        if not self._detect_language_switch:
+            state.language = current
+            return current, False
+        decision = decide_language(
+            current=current,
+            reading=detect_language(text, transcribed_as=transcribed_as),
+            pending=state.pending_language,
+            pending_count=state.pending_language_count,
+        )
+        state.language = decision.language
+        state.pending_language = decision.pending
+        state.pending_language_count = decision.pending_count
+        return decision.language, decision.switched
 
     @staticmethod
     def _understanding_for(

@@ -1,0 +1,33 @@
+# A buyer who starts in English and moves to Hindi halfway through, **without ever saying
+# they are going to** - which on an Indian B2B call is the ordinary case, not the edge one.
+# Nobody announces a language change; they just make it. Before this was handled the agent
+# carried on in English for the rest of the conversation, and on the voice path the
+# transcriber stayed forced to English too, so the Hindi turns came back as confident
+# English nobody said.
+#
+# Run: pitchbot-talk --script examples/switch-en-hi.txt
+#
+# Turn 1 opens in the declared language. Nothing to detect.
+We run an online toy store.
+
+# Turn 2 is the first Hindi turn. The agent does NOT switch here, on purpose: one turn is
+# not evidence, and switching on it would let a single borrowed word change the reply
+# language, the voice and the transcriber all at once.
+हमें एक कैटलॉग और ऑनलाइन पेमेंट चाहिए।
+
+# Turn 3 is the second consecutive Hindi turn, so the switch happens now and is
+# acknowledged in Hindi before anything else is said.
+यह हमारे लिए थोड़ा महंगा लग रहा है।
+
+# Turn 4 stays in Hindi. The objection above was answered in Hindi; this continues.
+हमारा बजट लगभग 150000 रुपये है।
+
+# Turn 5 agrees, in Hindi. The agent closes rather than asking one more question.
+ठीक है, शुरू करें।
+
+# Turns 6 and 7 go back to English, again without saying so. Switching has to work in
+# both directions: a conversation that could move into Hindi but never move back would
+# strand a buyer who used two Hindi sentences and then returned to English.
+Actually, can we do this over email?
+
+Send me the proposal by Friday please.

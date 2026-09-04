@@ -185,6 +185,122 @@ Two rules matter more than the table:
 The stance is read by the rules, so this works with no model installed. A local model, when
 present, supplies a stance it reads from a sentence matching no phrase, and wins.
 
+## Following a buyer who changes language
+
+The language used to be a parameter the caller set once. It is now a decision the
+conversation makes every turn, because on an Indian B2B call a buyer moving between
+English, Hindi and Telugu mid-conversation is ordinary rather than exceptional.
+
+`process_turn(language=...)` is now the caller's **belief**; `result.language` is what was
+**decided**, and `result.language_switched` marks the turn it changed. When nothing
+switches the two are identical, so a caller that never reads the result back — the HTTP
+API today — is unaffected.
+
+```
+buyer turn ──► detect_language(text)          three signals, in priority order
+                 │  1 request   "speak in Hindi", any script      ─► switch now
+                 │  2 script    Devanagari / Telugu letters       ─┐
+                 │  3 vocabulary  romanised Indic, >=2 markers    ─┤
+                 │  (4 transcriber label, only if text says nothing)
+                 ▼                                                 │
+             decide_language(...)  hysteresis: 2 consecutive turns ┘
+                 ▼
+      ConversationState.language ──► reply phrases
+                                └──► CLI: Piper voice, Whisper expectation
+```
+
+Three properties matter more than the detector itself.
+
+**Most switches are never announced.** People do not say "I am going to speak Hindi now";
+they just do it. So the primary path is implicit — two consecutive turns in another
+language move the conversation, in either direction — and the explicit request is the
+smaller, easier case layered on top. A request is obeyed at once because someone who asks
+and is then answered twice more in the old language has been ignored; evidence is not,
+because someone who used one Hindi word has not asked for anything. The two are separated
+by whether a language is *named* alongside a way of speaking it — `"we sell Hindi books"`
+names a language and asks for nothing.
+
+**Hysteresis lives in `ConversationState`, so a checkpoint restores it.** A partial switch
+held in a detector object would silently reset on restore, and a buyer one turn away from
+being understood would have to convince the system a second time. Both the checkpoint and
+the journal event carry it, at schema version `"2"`.
+
+**The transcriber expects a language without forcing one.** This is the non-obvious part.
+A Whisper decoder forced to the language the call opened in does not degrade when the
+buyer switches — it returns fluent, confident text *in the language it was told to expect*
+(measured; see `BENCHMARKS.md`). The script, the label and the confidence all agree, and
+nothing downstream can tell it apart from the buyer having said it. Auto-detect costs no
+accuracy, so the expectation is used only for Telugu script repair.
+
+The language is resolved **before** the safety branches, so an opt-out spoken in a newly
+adopted language is answered in that language. The turn that ends the relationship is the
+worst one to get wrong.
+
+On the voice path the transcriber's own language label travels with the transcript as a
+last-resort signal, used only when the text carries no script evidence of its own — a turn
+too short, or numeric. It is ranked below the words because a transcriber given a language
+to expect reports that language back, so on the exact turn a buyer switches it is the
+least reliable evidence available. It was previously computed for every utterance and
+discarded before reaching the conversation.
+
+Known limitation: stance and language detection share the same blind spot — there is no
+negation window, and romanised Telugu has no settled spelling, so a Telugu speaker typing
+in Latin is detected less reliably than one typing in Telugu script.
+
+## Thinking out loud, and answering in the register the buyer used
+
+Two things a person does that the agent did not.
+
+### Filling the silence
+
+Measured, the gap between a buyer finishing a sentence and the reply becoming audible is
+**~4.5 seconds**, and transcription is essentially all of it — 3,982 ms of 4,507 ms in
+English. Four and a half seconds of dead air reads as a dropped call.
+
+That measurement dictates the hook point. Because the wait is transcription, the filler has
+to start when the **endpointer closes the utterance** — before anyone knows what was said.
+`SpeechTurnPipeline` therefore calls `on_thinking` immediately before awaiting the
+transcriber, and the listener starts a task that says at most two short things.
+
+Being chosen before the transcript exists is also what constrains *what* it may say:
+
+> **A filler may assert receipt. It may never assert assent.**
+
+"Hmm" and "got it" say only *I heard you*. "Ok", "yes" and "theek hai" say *I agree* — and
+if the sentence still being transcribed was *"so you'll do it for fifty thousand?"*, the
+agent has agreed out loud to a number nobody quoted. The natural-sounding tokens are absent
+for exactly that reason, and a test enforces it across every language.
+
+Only the **microphone** is muted for a filler, never the turn-taking machine: this runs
+while the pipeline is awaiting inside `push`, and `agent_started_speaking` would move that
+machine underneath the utterance it is transcribing. The utterance's audio has already been
+copied out of the buffer, so muting the device is both sufficient and safe. The filler is
+shielded from cancellation so a reply arriving mid-word does not clip a syllable — it costs
+at most the filler's own 0.4–1.1 s against a 4.5 s gap, and a clipped syllable sounds like
+a fault where a completed one sounds like a person.
+
+Longest single stretch of silence, reconstructed from the measurements: **4,156 → 1,428 ms**
+in English, **4,304 → 1,103 ms** in Hindi.
+
+### Answering in Hinglish
+
+`MIXED` used to redirect to the Hindi phrase table, so a buyer typing *"aapka budget kitna
+hai"* was answered in formal Devanagari. That is not a comprehension failure — they can read
+it — it is a **register** failure, and in an Indian B2B conversation switching someone into
+literary Hindi reads as correcting them.
+
+Hinglish is now a first-class language with its own table, held to the same import-time
+completeness checks as the others. Which words stay English is the point rather than a
+shortcut: `budget`, `website`, `catalogue`, `payment`, `demo` and `proposal` are the words
+the buyer used, and translating them to `बजट`/`प्रस्ताव` would be more internally consistent
+and less like anything a person says.
+
+Adding it immediately exposed a real gap of the same shape Telugu shipped with: safety
+detection handled romanised Hinglish and **stance detection did not**, so a Hinglish buyer
+could refuse contact but could not object to a price. `INTENT_PHRASES` now carries romanised
+entries, and the structural tests are driven from `supported_languages()`, so the next
+language cannot be half-added either.
+
 ## Deployment profiles
 
 ```mermaid
