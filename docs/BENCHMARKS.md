@@ -1094,3 +1094,57 @@ The last two rows are why the list is closed. "Allow up to two words between the
 number" would read those as budgets of 500 and 900, and the failure directions are not
 comparable: a missed budget costs one more question, an invented one is quoted back to the
 buyer and shapes a proposal.
+
+## Language switching (2026-09-04)
+
+The conversation used to be told its language once and never revisited it. This measured
+what that costs when the buyer changes language, and whether auto-detect is a usable
+alternative. One qualifying sentence per language, synthesised with Piper, transcribed
+three ways with `faster-whisper` `small`/int8 on 8 CPU cores.
+
+- **matched** — decoder forced to the language actually spoken (the old best case)
+- **stale** — decoder forced to the language declared *before* the buyer switched (the bug)
+- **auto** — no hint at all (the candidate)
+
+| Spoken | Arm | Hint | Detected | Prob. | Script | CER% | Transcript |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| en | matched | `en` | en | 1.00 | Latn | 28.6 | We run a retail shop and our budget is 50,000 rupees. |
+| en | stale | `hi` | hi | 1.00 | Latn | 44.9 | ॐ ृ Woo-Run a retail shop ृ In our budget is 50,000 rupees |
+| en | auto | – | **en** | 1.00 | Latn | **28.6** | We run a retail shop and our budget is 50,000 rupees. |
+| hi | matched | `hi` | hi | 1.00 | Deva | 18.4 | हमारी दुकान है और हमारा बज़त पचा साजार रुबाई है |
+| hi | stale | `en` | en | 1.00 | Latn | 100.0 | **Our shop and our budget is Rs. 50,000.** |
+| hi | auto | – | **hi** | 0.96 | Deva | **18.4** | हमारी दुकान है और हमारा बज़त पचा साजार रुबाई है |
+| te | matched | `te` | te | 1.00 | Telu | 247.5 | మారం moist పిత౿క్లి పిని బిమిస్ … |
+| te | stale | `en` | en | 1.00 | Latn | 100.0 | **Our budget is Rs. 50,000** |
+| te | auto | – | **te** | 0.96 | Telu | **110.0** | కాంరికింటాటిలూన సిడిరూడియాలేదినాంవాంనిం… |
+
+Two conclusions, and the second is the one that decided the design.
+
+**Auto-detect is free.** It matched a correct forced hint exactly on English (28.6%) and
+Hindi (18.4%), beat it on Telugu (110% against 247%), and identified the language correctly
+in every case at 0.96–1.00. There is no accuracy argument for forcing.
+
+**A stale hint does not fail — it fabricates.** The bolded rows are the danger. Hindi and
+Telugu speech forced to `en` came back as fluent, well-formed English the buyer never said,
+labelled `en` at probability **1.00**, in Latin script. Every signal a caller could use to
+notice the switch — the script, the reported language, the confidence — was erased, and the
+budget extractor would happily have taken "Rs. 50,000" out of a sentence nobody uttered.
+That is worse than garbage: garbage is visible.
+
+So the voice loop *expects* a language without forcing it, and `--fixed-language` is
+available for a caller that genuinely owns the language and wants the old behaviour.
+
+Telugu remains poor at `small` under every arm. That is a model-size and voice question,
+tracked separately; nothing here improves it, and auto-detect is simply the least bad.
+
+### Detection thresholds
+
+Hysteresis of **2 consecutive turns** before a detected switch, and **0** for a request.
+One turn is too eager — a single borrowed word would move the reply language, the voice
+and the transcriber at once. Three means the buyer has been answered twice in a language
+they abandoned. A request bypasses it entirely: a person who asks and is then answered
+twice more in the old language has been ignored, and knows it.
+
+Romanised Indic text needs **2 distinct markers** from a closed token list before it is
+read as Hinglish. One is not evidence — *"Namaste, we run a retail shop"* is an English
+sentence containing a greeting.

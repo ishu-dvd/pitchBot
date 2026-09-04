@@ -1955,3 +1955,47 @@
 - **Rollback:** Revert PR 41. No schema migration and no persistent state; the `microphone`
   extra is additive and absent by default. Reverting restores the duplicated vocabulary and
   the dead `Intent`, both correctness regressions, and removes voice input entirely.
+
+## PR 42 - Follow a buyer who changes language
+
+- **Problem:** The language was a parameter the caller set once and never revisited. A buyer
+  who opened in English and moved to Hindi -- ordinary on an Indian B2B call, and almost
+  never announced -- was answered in English for the rest of the conversation.
+- **Measured first.** Transcribing one qualifying sentence per language three ways: forced
+  to the language spoken, forced to the language declared *before* the switch, and
+  auto-detect. Auto-detect matched a correct forced hint exactly (en 28.6%, hi 18.4% CER),
+  beat it on Telugu (110% against 247%), and named the language right at 0.96-1.00 every
+  time. A *stale* hint returned fluent English the buyer never said -- `"Our shop and our
+  budget is Rs. 50,000."` -- labelled `en` at probability 1.00, in Latin script, with every
+  signal of the switch erased and the budget extractor ready to take a number out of it.
+  That decided the design: expect a language, never force one.
+- **Shipped:** `conversation/language.py` reads a turn three ways -- an explicit request in
+  any script, script evidence, and a closed list of romanised Indic markers -- and
+  `decide_language` applies hysteresis. Two consecutive turns move the conversation; a
+  request moves it at once. The engine owns the decision, so `process_turn(language=)` is
+  now the caller's belief and `result.language` is what was decided. The switch is
+  acknowledged in the language switched *to*, first, before anything else in the reply.
+- **Three defects found and fixed on the way.** `SpeechTurnPipeline._language` was assigned
+  and never read, so its `language=` parameter promised to steer transcription and did
+  nothing. `UtteranceResult.language` was computed for every utterance and discarded by the
+  CLI, so on the voice loop -- where speech is the only input -- the transcriber's own
+  evidence never reached the conversation. And the Telugu request table used citation forms,
+  which Telugu's agglutinated case endings do not contain, so `ఇంగ్లీషులో` ("in English")
+  matched nothing: every Telugu-language request for English was silently missed. The last
+  was found by running `examples/switch-request-te.txt`, not by a test written from the same
+  assumption as the code.
+- **Tests:** 797 -> 857 passing. Implicit switching in four language pairs including back
+  out of an Indic language, a round trip without asking either time, Hinglish, a request in
+  every script driven from `supported_languages()`, mentions that must *not* switch, the
+  transcriber label used as a last resort and never over the words, hysteresis reset on
+  alternation, opt-out answered in the newly adopted language, checkpoint and journal
+  round-trips at schema `"2"`, and a `"1"` checkpoint still restoring.
+- **Deferred:** No negation window, so `"it is not expensive"` still reads as an objection
+  and romanised Telugu is detected less reliably than Telugu script. Switching is per
+  conversation, not per sentence -- a genuinely code-mixed sentence picks one language.
+  Barge-in still needs echo cancellation. The voice loop is still CLI-only. Vocabulary is
+  still six verticals and five features, and no model is selected.
+- **Rollback:** Revert PR 42. Checkpoint and journal schemas move `"1"` -> `"2"`, both
+  additive with defaults, so a reverted build reads `"1"` records and rejects `"2"` ones
+  loudly on the version literal rather than dropping a language silently. No migration, no
+  new dependency; switching needs no optional extra.

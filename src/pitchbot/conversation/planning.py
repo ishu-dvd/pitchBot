@@ -285,6 +285,7 @@ class LanguagePhrases:
     closing: str
     confirm: str
     repeated: str
+    switched: str
 
     def __post_init__(self) -> None:
         missing = [
@@ -326,6 +327,7 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             "and we can walk through it whenever suits you."
         ),
         repeated="I have that noted.",
+        switched="Of course, let us carry on in English.",
         objection={
             Intent.OBJECTING: (
                 "That is fair, and price should match the work. "
@@ -383,6 +385,7 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
         closing="मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
         confirm=("बढ़िया — मैं प्रस्ताव तैयार करके भेज देता हूँ, और जब आपको सुविधा हो तब उस पर बात कर लेंगे।"),
         repeated="यह मैंने दर्ज कर लिया है।",
+        switched="बिलकुल, आगे की बात हिंदी में करते हैं।",
         objection={
             Intent.OBJECTING: (
                 "बात सही है, कीमत काम के हिसाब से ही होनी चाहिए। "
@@ -437,6 +440,7 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
         closing=("నాకు కావలసిన సమాచారం వచ్చింది. ఒక చిన్న డెమో మంచిదా లేక రాతపూర్వక ప్రతిపాదనా?"),
         confirm=("మంచిది — నేను ప్రతిపాదన సిద్ధం చేసి పంపిస్తాను, మీకు వీలైనప్పుడు దాని గురించి మాట్లాడుకుందాం."),
         repeated="అది నేను నమోదు చేసుకున్నాను.",
+        switched="తప్పకుండా, ఇక తెలుగులోనే మాట్లాడుకుందాం.",
         objection={
             Intent.OBJECTING: (
                 "మీరు చెప్పింది సబబే, ధర పనికి తగినట్టే ఉండాలి. మేము నిర్ణీత ప్యాకేజీ కాదు, మీ అవసరానికి తగినట్టే పరిధి నిర్ణయిస్తాం."
@@ -495,7 +499,13 @@ def _table(language: LanguageCode) -> LanguageCode:
     return LanguageCode.HINDI if language is LanguageCode.MIXED else LanguageCode.ENGLISH
 
 
-def render_reply(plan: ReplyPlan, language: LanguageCode, *, repeated: bool = False) -> str:
+def render_reply(
+    plan: ReplyPlan,
+    language: LanguageCode,
+    *,
+    repeated: bool = False,
+    switched: bool = False,
+) -> str:
     """Compose the reply from fixed phrases only.
 
     Nothing the buyer wrote reaches this string. That is a safety property, not a stylistic
@@ -511,6 +521,12 @@ def render_reply(plan: ReplyPlan, language: LanguageCode, *, repeated: bool = Fa
 
     phrases = _PHRASES[_table(language)]
     parts: list[str] = []
+    if switched:
+        # First, and in the new language, because it is the answer to the thing the buyer
+        # most recently did. A reply that switches language without saying so reads as a
+        # glitch; one that says so first reads as having listened - and for a buyer who
+        # actually asked, this sentence is the whole answer to their request.
+        parts.append(phrases.switched)
     if plan.objection is not None:
         parts.append(phrases.objection[plan.objection])
     if repeated:

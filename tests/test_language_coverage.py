@@ -274,3 +274,45 @@ def test_naming_a_business_produces_a_pitch_about_it(language: LanguageCode) -> 
 
     expected = _PHRASES[_table(language)].pitch[vertical]  # noqa: SLF001
     assert expected in result.reply
+
+
+# One way each supported language can ask to be spoken to *in that language*, written in
+# that language. A buyer asking for Hindi types the request in Hindi, so a request table
+# that only knew the English word "hindi" would miss every request a Hindi speaker makes.
+SWITCH_REQUEST_SAMPLES: dict[LanguageCode, str] = {
+    LanguageCode.ENGLISH: "Could you please speak in English?",
+    LanguageCode.HINDI: "कृपया हिंदी में बात कीजिए।",
+    LanguageCode.TELUGU: "దయచేసి తెలుగులో మాట్లాడండి.",
+}
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+def test_every_language_can_be_asked_for_in_itself(language: LanguageCode) -> None:
+    """A language nobody can request is a language nobody can switch into by asking.
+
+    Driven from `supported_languages` for the same reason the refusals above are: adding
+    a language without a way to ask for it fails here, when the language is added, rather
+    than for the first buyer who tries.
+    """
+
+    from pitchbot.conversation.language import LanguageEvidence, detect_language
+
+    reading = detect_language(SWITCH_REQUEST_SAMPLES[language])
+    assert reading.evidence is LanguageEvidence.REQUESTED
+    assert reading.language is language
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+def test_every_language_can_acknowledge_being_switched_into(language: LanguageCode) -> None:
+    """The acknowledgement is the whole answer to a buyer who asked, so it cannot be blank.
+
+    It is also the one phrase guaranteed to be read in a language the buyer has just
+    started using, which makes a placeholder here more visible than anywhere else.
+    """
+
+    from pitchbot.conversation.planning import _PHRASES, _table
+
+    phrases = _PHRASES[_table(language)]  # noqa: SLF001
+    assert phrases.switched.strip()
+    plan = ReplyPlan(ask=None, acknowledge=None, intent=None, objection=None, pitch=None, move=None)
+    assert render_reply(plan, language, switched=True).startswith(phrases.switched)

@@ -185,6 +185,68 @@ Two rules matter more than the table:
 The stance is read by the rules, so this works with no model installed. A local model, when
 present, supplies a stance it reads from a sentence matching no phrase, and wins.
 
+## Following a buyer who changes language
+
+The language used to be a parameter the caller set once. It is now a decision the
+conversation makes every turn, because on an Indian B2B call a buyer moving between
+English, Hindi and Telugu mid-conversation is ordinary rather than exceptional.
+
+`process_turn(language=...)` is now the caller's **belief**; `result.language` is what was
+**decided**, and `result.language_switched` marks the turn it changed. When nothing
+switches the two are identical, so a caller that never reads the result back — the HTTP
+API today — is unaffected.
+
+```
+buyer turn ──► detect_language(text)          three signals, in priority order
+                 │  1 request   "speak in Hindi", any script      ─► switch now
+                 │  2 script    Devanagari / Telugu letters       ─┐
+                 │  3 vocabulary  romanised Indic, >=2 markers    ─┤
+                 │  (4 transcriber label, only if text says nothing)
+                 ▼                                                 │
+             decide_language(...)  hysteresis: 2 consecutive turns ┘
+                 ▼
+      ConversationState.language ──► reply phrases
+                                └──► CLI: Piper voice, Whisper expectation
+```
+
+Three properties matter more than the detector itself.
+
+**Most switches are never announced.** People do not say "I am going to speak Hindi now";
+they just do it. So the primary path is implicit — two consecutive turns in another
+language move the conversation, in either direction — and the explicit request is the
+smaller, easier case layered on top. A request is obeyed at once because someone who asks
+and is then answered twice more in the old language has been ignored; evidence is not,
+because someone who used one Hindi word has not asked for anything. The two are separated
+by whether a language is *named* alongside a way of speaking it — `"we sell Hindi books"`
+names a language and asks for nothing.
+
+**Hysteresis lives in `ConversationState`, so a checkpoint restores it.** A partial switch
+held in a detector object would silently reset on restore, and a buyer one turn away from
+being understood would have to convince the system a second time. Both the checkpoint and
+the journal event carry it, at schema version `"2"`.
+
+**The transcriber expects a language without forcing one.** This is the non-obvious part.
+A Whisper decoder forced to the language the call opened in does not degrade when the
+buyer switches — it returns fluent, confident text *in the language it was told to expect*
+(measured; see `BENCHMARKS.md`). The script, the label and the confidence all agree, and
+nothing downstream can tell it apart from the buyer having said it. Auto-detect costs no
+accuracy, so the expectation is used only for Telugu script repair.
+
+The language is resolved **before** the safety branches, so an opt-out spoken in a newly
+adopted language is answered in that language. The turn that ends the relationship is the
+worst one to get wrong.
+
+On the voice path the transcriber's own language label travels with the transcript as a
+last-resort signal, used only when the text carries no script evidence of its own — a turn
+too short, or numeric. It is ranked below the words because a transcriber given a language
+to expect reports that language back, so on the exact turn a buyer switches it is the
+least reliable evidence available. It was previously computed for every utterance and
+discarded before reaching the conversation.
+
+Known limitation: stance and language detection share the same blind spot — there is no
+negation window, and romanised Telugu has no settled spelling, so a Telugu speaker typing
+in Latin is detected less reliably than one typing in Telugu script.
+
 ## Deployment profiles
 
 ```mermaid

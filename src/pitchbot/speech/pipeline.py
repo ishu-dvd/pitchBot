@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
 from time import perf_counter
+from typing import Protocol, runtime_checkable
 
 from pitchbot.adapters import (
     AdapterError,
@@ -62,6 +63,13 @@ class FrameResult:
     utterance: UtteranceResult | None = None
 
 
+@runtime_checkable
+class RetunableTranscriber(Protocol):
+    """A transcriber whose expected language can be changed without rebuilding it."""
+
+    def set_language(self, language: LanguageCode | None) -> None: ...
+
+
 class SpeechTurnPipeline:
     """Turns a stream of audio frames into endpointed, transcribed buyer utterances.
 
@@ -112,6 +120,32 @@ class SpeechTurnPipeline:
     @property
     def turn_taking(self) -> TurnTaking:
         return self._turn_taking
+
+    @property
+    def language(self) -> LanguageCode:
+        """The language this pipeline expects the buyer to be speaking."""
+
+        return self._language
+
+    def set_language(self, language: LanguageCode) -> None:
+        """Follow a conversation that has changed language.
+
+        Until this existed the ``language`` constructor argument was stored and never
+        read - the pipeline accepted a language, promised by its own signature to
+        transcribe in it, and passed it nowhere. The transcriber's language came only
+        from its own constructor, so a caller who re-pointed the pipeline changed
+        nothing at all and had no way to find that out.
+
+        Forwarded to the transcriber only when the transcriber can accept it. A
+        transcriber built around a fixed language is a legitimate implementation, and one
+        that has none - the ``None`` case this pipeline is explicitly built to tolerate -
+        has nothing to re-point.
+        """
+
+        self._language = language
+        transcriber = self._transcriber
+        if isinstance(transcriber, RetunableTranscriber):
+            transcriber.set_language(language)
 
     @property
     def can_transcribe(self) -> bool:
@@ -279,6 +313,7 @@ async def _as_stream(chunks: list[AudioChunk]) -> AsyncIterator[AudioChunk]:
 
 __all__ = [
     "FrameResult",
+    "RetunableTranscriber",
     "SpeechTurnPipeline",
     "UtteranceOutcome",
     "UtteranceResult",

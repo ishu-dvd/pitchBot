@@ -50,6 +50,48 @@ pitchbot-talk --language te     # Telugu
 pitchbot-talk --language mixed  # Hinglish input, answered in Hindi
 ```
 
+`--language` only chooses which language to *open* in. It is not a lock: the conversation
+follows the buyer from that point on. See **Changing language mid-conversation** below.
+
+### Changing language mid-conversation
+
+Start with `pitchbot-talk` (English) and try either of these. Neither needs any extra.
+
+**Just start speaking another language.** This is the usual case — almost nobody announces
+a switch. Type two Hindi sentences in a row:
+
+```
+हमें एक कैटलॉग और ऑनलाइन पेमेंट चाहिए।
+यह हमारे लिए थोड़ा महंगा लग रहा है।
+```
+
+The first is answered in English on purpose. The second switches, and the reply opens with
+`बिलकुल, आगे की बात हिंदी में करते हैं।` before answering the objection. One turn is not
+enough deliberately: a single borrowed word must not move the reply language, the voice and
+the transcriber all at once — try `Namaste, we run a retail shop` and nothing changes,
+because that is an English sentence containing a greeting.
+
+Then type two English sentences and it comes back. Switching works in both directions.
+
+**Or just ask.** A request switches on the turn it is made, in any script:
+
+```
+can you please speak in Telugu?
+దయచేసి ఇంగ్లీషులో మాట్లాడండి.
+```
+
+The second is a Telugu speaker asking for *English*, written in Telugu — which is exactly
+how that request gets made in practice.
+
+Both are replayable end to end:
+
+```bash
+pitchbot-talk --script examples/switch-en-hi.txt      # implicit, and back again
+pitchbot-talk --script examples/switch-request-te.txt # asked for, twice
+```
+
+Pass `--fixed-language` to turn this off entirely.
+
 ### Things worth trying
 
 | Type this | What it shows |
@@ -63,6 +105,9 @@ pitchbot-talk --language mixed  # Hinglish input, answered in Hindi
 | `honestly that sounds too expensive` | it **answers the objection**, then keeps going |
 | `we are comparing another vendor` | a different objection gets a different answer |
 | `okay, let's start` | it **stops qualifying and closes**, even with slots unknown |
+| two Hindi sentences in a row | it **switches language** and says so, without being asked |
+| `can you speak in Hindi?` | a request switches immediately instead |
+| `we sell Hindi books online` | naming a language is **not** asking for it - nothing changes |
 | `మా బడ్జెట్ 200000 రూపాయలు` (with `--language te`) | Telugu extraction |
 | `నాకు వద్దు, దయచేసి మళ్ళీ కాల్ చేయవద్దు` | Telugu opt-out |
 
@@ -197,6 +242,15 @@ paused for the whole reply — otherwise it would hear itself through your speak
 that as you talking. Headphones do not change this; the pause is unconditional. The
 pipeline supports barge-in and it is deliberately not enabled here.
 
+**It follows you if you change language.** Speak two sentences in another language and the
+voice, the reply and the transcriber all move together; it prints `* language -> Hindi` and
+`* voice :` when they do. The transcriber is deliberately left on auto-detect rather than
+pinned to `--language`, because a decoder forced to the wrong language does not fail — it
+returns confident, fluent text in the language it was told to expect, and nothing
+downstream can tell that apart from what you actually said. `--fixed-language` restores
+the pinned behaviour. The Piper voice for each language is loaded once and kept, so
+switching back is instant.
+
 **A microphone is hardware, not a package.** Installing the extra on a machine with no
 input device succeeds and still cannot listen; the CLI says so rather than hanging.
 
@@ -290,7 +344,18 @@ $env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'
 
 **`no reviewed <lang> voice in models/piper`.** The voice file is missing, or its filename
 is not one with a reviewed licence. PitchBot refuses to load a voice whose licence has not
-been checked — see `KNOWN_VOICE_LICENSES`.
+been checked — see `KNOWN_VOICE_LICENSES`. If this appears *mid-conversation* the buyer has
+switched into a language you have no voice for; the text reply is still correct and in the
+right language, and switching back restores audio.
+
+**It switched language and I did not want it to.** Two consecutive turns in another
+language move the conversation. Pass `--fixed-language` to pin it, which also stops the
+transcriber auto-detecting.
+
+**It did not switch when I expected it to.** One turn is never enough — that is deliberate.
+Naming a language without a way of speaking it is also not a request: `we sell Hindi books`
+changes nothing, while `speak in Hindi` switches at once. Naming two languages in one
+sentence is refused as ambiguous rather than guessed at.
 
 **`--speak` prints `audio disabled: ...`.** Synthesis worked and playback did not. On Linux
 install `alsa-utils` or `pulseaudio-utils`.

@@ -214,9 +214,13 @@ character error rate from 100% to 41%; the alternative fix, an ``initial_prompt`
 anchor, corrects the alphabet and destroys the words (CER 90-116%). See
 :mod:`pitchbot.speech.scripts` for the measurement and the mapping.
 
-Repair runs only when the caller **declared** the language, never on an auto-detected one.
-A detected label is a guess, and rewriting a Hindi transcript into Telugu on the strength
-of a guess would corrupt the language this project already supports.
+Repair runs on the language the caller **expects**, never on one Whisper merely detected.
+A detected label is a single guess about a single utterance, and rewriting a Hindi
+transcript into Telugu on the strength of it would corrupt the language this project
+already supports. An expectation is not a guess: it is either the caller's declaration or,
+in a switching conversation, a language confirmed across consecutive turns. That holds
+whether or not the expectation is forced on the decoder, which is why ``force_language``
+does not gate this.
 """
 
 
@@ -304,6 +308,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         download_root: str | None = None,
         allow_download: bool = False,
         language: LanguageCode | None = None,
+        force_language: bool = True,
         max_audio_seconds: float = DEFAULT_MAX_AUDIO_SECONDS,
         min_language_probability: float = DEFAULT_MIN_LANGUAGE_PROBABILITY,
         emit_partials: bool = True,
@@ -322,6 +327,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         self._download_root = download_root
         self._allow_download = allow_download
         self._language = language
+        self._force_language = force_language
         self._max_audio_seconds = max_audio_seconds
         self._min_language_probability = min_language_probability
         self._emit_partials = emit_partials
@@ -334,9 +340,44 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
 
     @property
     def language(self) -> LanguageCode | None:
-        """The declared language, or ``None`` when Whisper auto-detects."""
+        """The language this adapter expects, or ``None`` when it expects nothing."""
 
         return self._language
+
+    @property
+    def force_language(self) -> bool:
+        """Whether the expected language is imposed on Whisper's decoder.
+
+        Forcing the *right* language is free and forcing the *wrong* one fabricates.
+        Measured 2026-09-04 on Piper speech, ``small``/int8: Hindi audio forced to ``en``
+        returned *"Our shop and our budget is Rs. 50,000."* - fluent English the buyer
+        never said, reported as ``en`` at probability 1.00, in Latin script. Every signal
+        a caller could have used to notice the switch was erased, and the extractors would
+        have taken a budget out of it.
+
+        Auto-detect costs nothing to avoid that: identical character error rate to a
+        matched hint on English (28.6%) and Hindi (18.4%), better on Telugu (110% against
+        247%), and the right label at 0.96-1.00 for all three. So a conversation whose
+        language may change should *expect* a language without forcing it, and one that
+        cannot change may force it.
+        """
+
+        return self._force_language
+
+    def set_language(self, language: LanguageCode | None) -> None:
+        """Re-point the expected language without reloading the model.
+
+        A conversation whose language changes mid-call needs the transcriber to follow it.
+        Building a second adapter would work and would cost a model load - measured at
+        3.55 s - in the middle of a turn, which is a stall the buyer hears. The loaded
+        model is independent of the language, so only the expectation has to move.
+
+        Safe to call between utterances, which is the only place the pipeline calls it:
+        Whisper reads the language once per :meth:`transcribe`, so a change mid-utterance
+        would apply to the next one anyway rather than corrupting the one in flight.
+        """
+
+        self._language = language
 
     @property
     def license(self) -> ModelLicense:
@@ -436,7 +477,11 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         return bytes(payload)
 
     def _resolve_language(self, detected: str, probability: float) -> LanguageCode:
-        if self._language is not None:
+        # Only a *forced* language may be reported verbatim, because only then is it
+        # what the decoder actually used. Reporting an expectation that was not imposed
+        # would hide the one thing auto-detect exists to reveal: that the buyer has
+        # started speaking something else.
+        if self._language is not None and self._force_language:
             return self._language
         if probability < self._min_language_probability:
             return LanguageCode.UNKNOWN
@@ -466,7 +511,11 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         _, numpy = require_faster_whisper()
 
         samples = numpy.asarray(_decode_pcm(payload), dtype=numpy.float32)
-        whisper_language = self._language.value if self._language in _WHISPER_FORCEABLE else None
+        whisper_language = (
+            self._language.value
+            if self._force_language and self._language in _WHISPER_FORCEABLE
+            else None
+        )
 
         try:
             segments, info = await asyncio.to_thread(
