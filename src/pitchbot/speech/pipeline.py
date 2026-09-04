@@ -18,6 +18,7 @@ from pitchbot.adapters import (
     VoiceActivity,
     VoiceActivityDetector,
 )
+from pitchbot.adapters.errors import UnsupportedLanguageError
 from pitchbot.domain import LanguageCode
 from pitchbot.speech.models import BargeIn, SpeechFrame, SpeechSegment, TurnTakingState
 from pitchbot.speech.turn_taking import TurnTaking, TurnTakingConfig
@@ -46,6 +47,20 @@ class UtteranceOutcome(StrEnum):
     LOW_CONFIDENCE = "low-confidence"
     OVERSIZE = "oversize"
     TRANSCRIBER_UNAVAILABLE = "transcriber-unavailable"
+    LANGUAGE_UNSUPPORTED = "language-unsupported"
+    """The buyer is speaking a language this transcriber demonstrably cannot transcribe.
+
+    Measured 2026-09-05, Telugu through Whisper ``small`` returns nonsense in every decoder
+    configuration tried - the reference "మేము రిటైల్ షాప్ నడుపుతాము" came back as
+    "మరింరIsn claiming the jammals from the charity sponsor" - and takes **37,533 ms** to do
+    it, five and a half times real time. Understanding scores at or below guessing in the
+    same language and is already gated out.
+
+    So the honest outcome is the one this project already uses when no transcriber is
+    configured at all: say so, immediately, rather than spend thirty-seven seconds of a
+    shared CPU producing text nobody should act on. Reported only when the language was
+    *confidently* identified; an uncertain guess still transcribes.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +404,23 @@ class SpeechTurnPipeline:
         started = perf_counter()
         try:
             best = await self._best_transcript(chunks, hint)
+        except UnsupportedLanguageError as decline:
+            # Ordered before the generic handler on purpose. Nothing failed here: the
+            # transcriber identified the language, recognised it as one it cannot serve, and
+            # declined. Reporting that as `transcriber-unavailable` would be a lie about a
+            # working component, and would hide the one fact the operator needs - which
+            # language was heard.
+            elapsed = (perf_counter() - started) * 1000
+            logger.info(
+                "Declined an utterance in a language this transcriber cannot serve",
+                extra={"declined_language": decline.language},
+            )
+            return self._result(
+                segment,
+                UtteranceOutcome.LANGUAGE_UNSUPPORTED,
+                elapsed,
+                dropped,
+            )
         except (AdapterError, RuntimeError, ValueError):
             # Transcription is best effort. A failure loses one utterance; it must never
             # drop the call or fabricate what the buyer said.

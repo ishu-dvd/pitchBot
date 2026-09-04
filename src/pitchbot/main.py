@@ -2,15 +2,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import PlainTextResponse, Response
 
 from pitchbot.config import settings
-from pitchbot.simulator.router import credentials, speech_providers
+from pitchbot.observability import configure_logging, registry
+from pitchbot.simulator.router import credentials, require_credential, speech_providers
 from pitchbot.simulator.router import router as simulator_router
 from pitchbot.speech.providers import preload_speech_providers
 
@@ -50,8 +51,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="PitchBot API", version="0.1.0", lifespan=lifespan)
+configure_logging(level=settings.log_level, json_format=settings.log_json)
 app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(simulator_router)
+
+
+@app.get(
+    "/metrics",
+    include_in_schema=False,
+    response_class=PlainTextResponse,
+    # Authenticated on exactly the same terms as everything else. An open /metrics would
+    # undo the boundary: it reports which languages are being spoken, how many turns ran and
+    # how the service is performing, which is precisely the reconnaissance an unauthenticated
+    # caller wants. It also sits outside the simulator router, so it does not inherit that
+    # router's dependency and has to say so itself.
+    dependencies=[Depends(require_credential)],
+)
+def metrics() -> str:
+    return registry.render()
+
 
 web_directory = Path(__file__).resolve().parents[2] / "apps" / "web"
 app.mount("/simulator", StaticFiles(directory=web_directory, html=True), name="simulator-web")

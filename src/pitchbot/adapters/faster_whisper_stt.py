@@ -73,14 +73,14 @@ import importlib
 import logging
 import math
 import sys
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from importlib import metadata
 from types import ModuleType
 from typing import Any, Final
 
 from pitchbot.adapters.contracts import AudioChunk, SpeechToTextAdapter, TranscriptChunk
-from pitchbot.adapters.errors import PermanentAdapterError
+from pitchbot.adapters.errors import PermanentAdapterError, UnsupportedLanguageError
 from pitchbot.domain import LanguageCode
 from pitchbot.speech.scripts import repair_telugu_transcript
 
@@ -358,6 +358,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         max_audio_seconds: float = DEFAULT_MAX_AUDIO_SECONDS,
         min_language_probability: float = DEFAULT_MIN_LANGUAGE_PROBABILITY,
         early_detection_min_probability: float = DEFAULT_EARLY_DETECTION_MIN_PROBABILITY,
+        unsupported_languages: Iterable[LanguageCode] = (),
         emit_partials: bool = True,
     ) -> None:
         if beam_size < 1:
@@ -380,6 +381,7 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         self._max_audio_seconds = max_audio_seconds
         self._min_language_probability = min_language_probability
         self._early_detection_min_probability = early_detection_min_probability
+        self._unsupported_languages = frozenset(unsupported_languages)
         self._emit_partials = emit_partials
         self._model: Any | None = None
         self._load_lock = asyncio.Lock()
@@ -620,6 +622,13 @@ class FasterWhisperSpeechToTextAdapter(SpeechToTextAdapter):
         ):
             whisper_language = language_hint.language.value
             honoured = language_hint
+
+        if honoured is not None and honoured.language in self._unsupported_languages:
+            # Declined *before* the expensive call, which is the entire point: this saves
+            # 37,533 ms of a shared CPU that would otherwise produce untrustworthy text.
+            # Only reachable from a hint that already cleared the probability floor, so an
+            # uncertain guess still transcribes rather than being refused on a hunch.
+            raise UnsupportedLanguageError(honoured.language.value)
 
         try:
             segments, info = await asyncio.to_thread(

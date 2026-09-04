@@ -23,6 +23,15 @@ from pitchbot.adapters import AudioChunk
 from pitchbot.config import settings
 from pitchbot.conversation import ConversationEngine, ConversationJournal, ConversationJournalError
 from pitchbot.conversation.providers import build_language_model
+from pitchbot.domain import LanguageCode
+from pitchbot.observability import (
+    TurnStage,
+    correlated,
+    new_turn_id,
+    record_stage,
+    record_turn,
+    record_utterance,
+)
 from pitchbot.security import ApiCredential, CredentialStore, RateLimiter, parse_api_keys
 from pitchbot.simulator.models import (
     AudioMetadata,
@@ -265,17 +274,26 @@ async def process_turn(session_id: UUID, request: TurnRequest) -> TurnResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="operation_id is required for retry-safe turn requests",
         )
-    try:
-        return await simulator_service.process_turn(session_id, request)
-    except SessionNotFoundError as error:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
-    except InjectedSimulatorError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(error),
-        ) from error
-    except RuntimeError as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    with correlated(session_id=session_id, turn_id=new_turn_id()):
+        started = perf_counter()
+        try:
+            response = await simulator_service.process_turn(session_id, request)
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        except InjectedSimulatorError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(error),
+            ) from error
+        except RuntimeError as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+        record_stage(
+            TurnStage.PLAN,
+            (perf_counter() - started) * 1000,
+            language=request.language.value,
+        )
+        record_turn(language=request.language.value, disposition=response.disposition.value)
+        return response
 
 
 @router.post("/sessions/{session_id}/interrupt", response_model=SessionResponse)
@@ -462,6 +480,9 @@ async def _handle_utterance(
     """Report one utterance. Returns ``False`` when the socket has been closed."""
 
     message = _utterance_message(result)
+    language_label = (result.language or LanguageCode.UNKNOWN).value
+    record_utterance(language=language_label, outcome=result.outcome.value)
+    record_stage(TurnStage.TRANSCRIBE, result.transcribe_ms, language=language_label)
     if not result.is_turn or result.text is None:
         await socket.send_json(message)
         return True
@@ -507,6 +528,11 @@ async def _handle_utterance(
     message["turn_latency_ms"] = round(
         pipeline.turn_taking.config.end_silence_ms + result.transcribe_ms + engine_ms,
         1,
+    )
+    record_stage(
+        TurnStage.TOTAL,
+        pipeline.turn_taking.config.end_silence_ms + result.transcribe_ms + engine_ms,
+        language=language,
     )
     # Whether the browser should speak this reply itself. Announced with the reply rather
     # than inferred from whether audio arrives, so the client never has to guess between
