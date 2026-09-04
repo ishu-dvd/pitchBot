@@ -22,7 +22,13 @@ export class AudioTransport {
     if (this.stopped || generation !== this.generation) return;
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const encodedType = encodeURIComponent(mediaType || "application/octet-stream");
-    this.socket = new WebSocket(`${protocol}//${location.host}/api/simulator/sessions/${sessionId}/audio?media_type=${encodedType}`);
+    const url = `${protocol}//${location.host}/api/simulator/sessions/${sessionId}/audio?media_type=${encodedType}`;
+    // A browser cannot set a header on a WebSocket, so the key travels as a subprotocol.
+    // Not as a query parameter: that would be written to every access log and proxy trace
+    // the connection passes through.
+    const apiKey = sessionStorage.getItem("pitchbot.apiKey") || "";
+    const protocols = apiKey ? ["pitchbot.v1", `pitchbot.key.${apiKey}`] : [];
+    this.socket = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
     // Reply audio arrives as binary frames. Without this they are delivered as Blobs,
     // which can only be read asynchronously - and reading them out of order would
     // reassemble the reply's PCM scrambled.

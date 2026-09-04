@@ -190,6 +190,7 @@ class SimulatorService:
         deliberation_model: PreemptibleModel | None = None,
         deliberation_model_id: str = "unknown",
         turn_taking: TurnTakingConfig | None = None,
+        speech_early_detection_seconds: float = 0.0,
     ) -> None:
         if (
             min(
@@ -210,6 +211,9 @@ class SimulatorService:
             )
         if recall_failure_budget < 1:
             raise ValueError("Simulator recall_failure_budget must be positive")
+        if speech_early_detection_seconds < 0:
+            raise ValueError("Simulator speech_early_detection_seconds must not be negative")
+        self._speech_early_detection_seconds = speech_early_detection_seconds
         self._clock = clock or SystemClock()
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
@@ -714,6 +718,7 @@ class SimulatorService:
             language=session.language,
             config=self._turn_taking,
             clock=self._clock,
+            early_detection_seconds=self._speech_early_detection_seconds,
         )
 
     async def interrupt(self, session_id: UUID) -> SessionResponse:

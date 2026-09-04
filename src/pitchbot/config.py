@@ -29,6 +29,19 @@ class Settings(BaseSettings):
 
     allowed_contacts: str = Field(default="")
 
+    # --- API access control -----------------------------------------------------------
+    # Comma-separated "<name>:<secret>" pairs, for example
+    # "web:a-long-random-string,ops:another-one". Empty means no authentication, which is
+    # accepted ONLY when app_env is "local" - see validate_api_access below. Until this
+    # existed the API had ten unauthenticated HTTP endpoints and an unauthenticated
+    # WebSocket.
+    api_keys: str = ""
+    # A turn costs seconds of CPU, so the limit that matters is small and per-credential.
+    # Burst covers a client opening a session and immediately taking a turn; the sustained
+    # rate is what stops a loop.
+    api_rate_limit_burst: int = 20
+    api_rate_limit_per_second: float = 2.0
+
     lead_recall_top_k: int = 3
     lead_recall_deadline_ms: int = 150
     lead_recall_failure_budget: int = 3
@@ -61,6 +74,22 @@ class Settings(BaseSettings):
     # Weights are never fetched by PitchBot unless this is explicitly enabled.
     speech_stt_download_root: str = ""
     speech_stt_allow_download: bool = False
+    # Identify the language while the buyer is still talking, so transcription does not
+    # have to. Measured 2026-09-05: the shipped auto-detect default runs the Whisper encoder
+    # twice - once to find the language, once to decode it - costing 3,857 ms against
+    # 2,235 ms when the language is already known. Detection cost is flat regardless of how
+    # much audio it is given (Whisper pads to 30 s), so the only way to win is to start it
+    # sooner, overlapping the buyer's own speech.
+    #
+    # 2.0 s is the shortest measured-SAFE prefix, not merely the shortest useful one: at
+    # 1.5 s Telugu was identified as Malayalam at probability 0.90. Set to 0 to disable and
+    # get exactly the behaviour that shipped before this existed.
+    speech_stt_early_detection_seconds: float = 2.0
+    # Stricter than the reporting floor because this decides whether to *impose* a language
+    # on the decoder rather than whether to report one. A wrong imposed language does not
+    # produce a broken transcript, it produces a fluent translation, and no confidence
+    # signal distinguishes the two.
+    speech_stt_early_detection_min_probability: float = 0.7
 
     # Text-to-speech is off by default, and for a different reason than the other two.
     # The browser client already speaks replies with the Web Speech API, so this is not a
@@ -119,6 +148,10 @@ class Settings(BaseSettings):
             raise ValueError("speech_vad_mode must be between 0 and 3")
         if self.speech_stt_beam_size < 1:
             raise ValueError("speech_stt_beam_size must be positive")
+        if self.speech_stt_early_detection_seconds < 0:
+            raise ValueError("speech_stt_early_detection_seconds must not be negative")
+        if not 0.0 <= self.speech_stt_early_detection_min_probability <= 1.0:
+            raise ValueError("speech_stt_early_detection_min_probability must be between 0 and 1")
         if self.speech_stt_language not in {"", "en", "hi", "mixed", "unknown"}:
             raise ValueError(
                 "speech_stt_language must be empty (auto-detect) or one of "
@@ -175,6 +208,35 @@ class Settings(BaseSettings):
                     "llm_model_id must name the upstream model, for example "
                     "'Qwen/Qwen2.5-0.5B-Instruct', so its licence can be checked"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_api_access(self) -> Settings:
+        """Refuse to start an unauthenticated server anywhere but a developer's machine.
+
+        The alternative - defaulting to authentication everywhere - would break the local
+        demo for everyone, and a gate people routinely switch off is not a gate. The
+        alternative in the other direction, warning and continuing, is how services end up
+        publicly readable: the warning scrolls past once at startup and is never seen again.
+
+        So the two states are exactly: `local` may run open, and everything else must have
+        a credential or it does not boot.
+        """
+
+        from pitchbot.security.credentials import parse_api_keys
+
+        entries = parse_api_keys(self.api_keys)
+        if not entries and self.app_env != "local":
+            raise ValueError(
+                f"api_keys must define at least one '<name>:<secret>' credential when "
+                f"app_env is {self.app_env!r}. Only app_env='local' may run without "
+                "authentication, because every endpoint - including the audio socket - "
+                "is otherwise open to anyone who can reach the port"
+            )
+        if self.api_rate_limit_burst < 1:
+            raise ValueError("api_rate_limit_burst must be at least 1")
+        if self.api_rate_limit_per_second <= 0:
+            raise ValueError("api_rate_limit_per_second must be positive")
         return self
 
     @model_validator(mode="after")

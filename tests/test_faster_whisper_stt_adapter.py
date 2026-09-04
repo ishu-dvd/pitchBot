@@ -40,6 +40,7 @@ from pitchbot.adapters.faster_whisper_stt import (
     LICENSE,
     PROVIDER_ID,
     SUPPORTED_SAMPLE_RATE_HZ,
+    DetectedLanguage,
     FasterWhisperSpeechToTextAdapter,
     ModelLicense,
     _decode_pcm,
@@ -397,3 +398,154 @@ async def test_provenance_records_package_and_model_licenses() -> None:
     assert provenance.model_license == "MIT"
     assert provenance.model_size == _MODEL_SIZE
     assert provenance.package_version
+
+
+# --------------------------------------------------------------------------------------
+# Early language detection
+#
+# Measured 2026-09-05: the shipped auto-detect default runs the Whisper encoder twice,
+# 3,857 ms against 2,235 ms when the language is already known. The saving is real but the
+# failure mode is not survivable - forcing a WRONG language does not degrade the transcript,
+# it replaces it with a fluent translation (Hindi audio decoded as `en` came back as
+# "We run a retail shop and our budget is 50,000 rupees" at confidence 0.616, higher than
+# the correct Telugu transcript scored). These tests pin the gate, not the speedup.
+# --------------------------------------------------------------------------------------
+
+
+class _FakeSegment:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.start = 0.0
+        self.end = 1.0
+        self.avg_logprob = -0.1
+        self.no_speech_prob = 0.01
+        self.compression_ratio = 1.0
+
+
+class _FakeInfo:
+    def __init__(self, language: str, probability: float) -> None:
+        self.language = language
+        self.language_probability = probability
+
+
+class _FakeModel:
+    """Records the language it was asked to decode with."""
+
+    def __init__(self, *, detected: tuple[str, float] = ("hi", 0.93)) -> None:
+        self.requested_languages: list[str | None] = []
+        self.detect_calls = 0
+        self._detected = detected
+
+    def transcribe(self, samples: object, **kwargs: object) -> tuple[object, _FakeInfo]:
+        language = kwargs.get("language")
+        self.requested_languages.append(language if language is None else str(language))
+        # Whisper echoes a forced language back at probability 1.00, which is exactly the
+        # fabricated certainty the adapter must not report.
+        info = _FakeInfo(str(language) if language else "en", 1.0 if language else 0.55)
+        return iter([_FakeSegment("we run a retail shop")]), info
+
+    def detect_language(self, samples: object) -> tuple[str, float, None]:
+        self.detect_calls += 1
+        return (*self._detected, None)
+
+
+def _with_model(adapter: FasterWhisperSpeechToTextAdapter, model: _FakeModel) -> None:
+    adapter._model = model  # noqa: SLF001 - substituting the loaded model is the point
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_detect_prefix_language_reports_what_the_model_detected() -> None:
+    adapter = _adapter()
+    _with_model(adapter, _FakeModel(detected=("hi", 0.93)))
+    detected = await adapter.detect_prefix_language(_pcm([0] * 16_000))
+    assert detected is not None
+    assert detected.language is LanguageCode.HINDI
+    assert detected.probability == pytest.approx(0.93)
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_detect_prefix_language_refuses_a_language_it_cannot_force() -> None:
+    """At a 1.5 s prefix Telugu was reported as Malayalam at 0.90 - no floor catches that."""
+
+    adapter = _adapter()
+    _with_model(adapter, _FakeModel(detected=("ml", 0.90)))
+    assert await adapter.detect_prefix_language(_pcm([0] * 16_000)) is None
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_detect_prefix_language_refuses_malformed_audio() -> None:
+    adapter = _adapter()
+    _with_model(adapter, _FakeModel())
+    assert await adapter.detect_prefix_language(b"") is None
+    assert await adapter.detect_prefix_language(b"\x00") is None
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_a_hint_above_the_floor_is_imposed_on_the_decoder() -> None:
+    adapter = _adapter(early_detection_min_probability=0.7)
+    model = _FakeModel()
+    _with_model(adapter, model)
+    hint = DetectedLanguage(language=LanguageCode.HINDI, probability=0.93)
+    chunks = [
+        chunk async for chunk in adapter.transcribe(_stream(_pcm([0] * 16_000)), language_hint=hint)
+    ]
+    assert model.requested_languages == ["hi"]
+    assert chunks[-1].language is LanguageCode.HINDI
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_a_hint_below_the_floor_is_ignored_and_costs_only_the_saving() -> None:
+    adapter = _adapter(early_detection_min_probability=0.7)
+    model = _FakeModel()
+    _with_model(adapter, model)
+    hint = DetectedLanguage(language=LanguageCode.HINDI, probability=0.42)
+    chunks = [
+        chunk async for chunk in adapter.transcribe(_stream(_pcm([0] * 16_000)), language_hint=hint)
+    ]
+    assert model.requested_languages == [None], "below the floor, auto-detect must still run"
+    assert chunks[-1].text
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_an_honoured_hint_reports_its_own_probability_not_whispers_fabricated_one() -> None:
+    """Passing `language=` makes Whisper answer 1.00. Reporting that would be inventing it."""
+
+    adapter = _adapter(early_detection_min_probability=0.7, min_language_probability=0.95)
+    model = _FakeModel()
+    _with_model(adapter, model)
+    hint = DetectedLanguage(language=LanguageCode.HINDI, probability=0.80)
+    chunks = [
+        chunk async for chunk in adapter.transcribe(_stream(_pcm([0] * 16_000)), language_hint=hint)
+    ]
+    # 0.80 is below the 0.95 reporting floor, so the honest answer is UNKNOWN. Had the
+    # adapter read Whisper's echoed 1.00 it would have reported HINDI with certainty.
+    assert chunks[-1].language is LanguageCode.UNKNOWN
+
+
+@requires_faster_whisper
+@pytest.mark.asyncio
+async def test_a_declared_language_still_wins_over_a_hint() -> None:
+    adapter = _adapter(language=LanguageCode.ENGLISH, force_language=True)
+    model = _FakeModel()
+    _with_model(adapter, model)
+    hint = DetectedLanguage(language=LanguageCode.HINDI, probability=0.99)
+    async for _chunk in adapter.transcribe(_stream(_pcm([0] * 16_000)), language_hint=hint):
+        pass
+    assert model.requested_languages == ["en"]
+
+
+@requires_faster_whisper
+def test_early_detection_floor_is_validated() -> None:
+    with pytest.raises(ValueError, match="early_detection_min_probability"):
+        _adapter(early_detection_min_probability=1.5)
+
+
+def test_detected_language_refuses_an_impossible_probability() -> None:
+    with pytest.raises(ValueError, match="probability must be between 0 and 1"):
+        DetectedLanguage(language=LanguageCode.ENGLISH, probability=1.5)

@@ -10,8 +10,8 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from pitchbot.config import settings
+from pitchbot.simulator.router import credentials, speech_providers
 from pitchbot.simulator.router import router as simulator_router
-from pitchbot.simulator.router import speech_providers
 from pitchbot.speech.providers import preload_speech_providers
 
 
@@ -67,6 +67,9 @@ def health() -> dict[str, str | bool]:
     return {
         "status": "ok",
         "env": settings.app_env,
+        # Whether the API is actually closed. A server reporting "ok" while every endpoint
+        # is open is the exact condition this field exists to make visible.
+        "authentication_enforced": credentials.enforcing,
         "telephony_enabled": settings.enable_telephony,
         "whatsapp_enabled": settings.enable_whatsapp,
         "external_network_enabled": settings.enable_external_network,
