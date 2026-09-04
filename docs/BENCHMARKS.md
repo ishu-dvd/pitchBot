@@ -1446,3 +1446,82 @@ happens below the probability floor and for any language outside the map.
 
 Telugu. Transcription there is 37,692 ms and the 1.6 s this saves is 4% of it. That number is
 untouched and remains the worst in the project.
+
+## Telugu is a decoder pathology, and no configuration fixes it (2026-09-05)
+
+Telugu transcription at **37,692 ms** for a 4.1 s clip has been the worst number in this
+project since it was first measured, filed as "`small` loops badly on Telugu". A loop is a
+generation problem, and faster-whisper exposes the standard controls for one, so it was worth
+testing before anyone retracted a language.
+
+`probe_telugu_loop.py`, one 6.82 s Telugu clip, `small` int8 CPU, beam 1:
+
+| configuration | ms | xRT | chars | compression |
+| --- | ---: | ---: | ---: | ---: |
+| baseline (shipped) | **37,533** | 5.5 | 244 | 1.57 |
+| `condition_on_previous_text=False` | 35,873 | 5.3 | 45 | 1.74 |
+| **`no_repeat_ngram_size=3`** | **2,216** | **0.3** | 23 | 1.05 |
+| `repetition_penalty=1.1` | 25,011 | 3.7 | 67 | 1.84 |
+| `no_repeat` + `no_condition` | 2,388 | 0.4 | 23 | 1.05 |
+| `compression_ratio_threshold=1.8` | 34,543 | 5.1 | 103 | 1.56 |
+
+It **is** a decoder pathology: `no_repeat_ngram_size=3` is a **16.9x speedup**.
+
+And it does not matter, because every configuration returns nonsense. Against a reference of
+*"మేము రిటైల్ షాప్ నడుపుతాము మా బడ్జెట్ యాభై వేల రూపాయలు"*:
+
+- baseline: `మరింరIsn claiming the jammals from the charity sponsor మింటి మారా ...`
+- `no_repeat_ngram_size=3`: `మార్ల్ నికా సి వా్్ క్.`
+- `condition_on_previous_text=False`: `𝘰𝘰𝘸𝘴𝘦𝘷𝘢𝘰𝘸𝘳𝘗𝘴𝘵, 𝘅, ...`
+
+Whisper `small` cannot transcribe Telugu. The 37 seconds was the model flailing, and the knob
+converts thirty-seven seconds of nonsense into two seconds of nonsense.
+
+### The knob cannot be taken for the languages that do work
+
+Run on **deliberately repetitive English** - a buyer insisting, and a price stated twice,
+which is ordinary sales speech:
+
+| configuration | transcript |
+| --- | --- |
+| baseline | `No, no, no. 50,000 rupees is our budget. **50,000 rupees.** And we really, really need the website by June.` |
+| `no_repeat_ngram_size=3` | `No, no, no. 50,000 rupees is our budget. **50 thousand rupees.** And we really, really need the website by June.` |
+
+Forbidding a repeated trigram forces the decoder to a different surface form for the second
+mention. Nothing was lost semantically *here*, but the budget extractor reads numbers out of
+exactly these strings and already misses hedged variants (`"around 150000 rupees"` extracts
+nothing). Rewriting what a buyer said, to buy latency for a language the model cannot do
+anyway, is not a trade worth making. English cost is unchanged at ~1,930 ms in every
+configuration, so there is no speedup to gain there either.
+
+### What shipped instead
+
+An utterance whose language is **confidently** identified as one the transcriber cannot serve
+is declined, in the ~1.7 s the identification costs, with the outcome
+`language-unsupported`. This is the treatment this project already gives an unconfigured
+transcriber: say so, rather than emit text nobody should act on.
+
+Confidence matters. The decline fires only on a hint that already cleared the 0.7 floor from
+[the early-detection work](#deciding-the-language-before-the-buyer-stops); an uncertain guess
+still transcribes, and still pays the 37 s. Telugu **text** turns are unaffected - the
+conversation engine handles Telugu text, and this is about speech only.
+
+## Answering "what is p95 turn latency" (2026-09-05)
+
+Every latency figure in this document came from a probe script run by hand, because the
+running service measured `transcribe_ms` and `engine_ms`, sent them to whichever browser
+asked, and discarded them. Turn stages are now recorded in-process and exposed at
+`/metrics`, so the question is answerable from real traffic rather than from a bench.
+
+Stages are recorded **separately** - `detect_language`, `transcribe`, `plan`, `synthesize`,
+`total` - because a single turn-latency number hides the only term that has ever mattered:
+transcription was 3,982 ms of a 4,507 ms English turn.
+
+Bucket edges stop at 30 s deliberately. A conventional set topping out at 10 s would have put
+Telugu's 37.7 s in `+Inf`, hiding the worst number in the project inside the one bucket nobody
+reads.
+
+Verified against a live server: one real turn produced
+`pitchbot_turns_total{disposition="continue",language="en"} 1`,
+`pitchbot_turn_stage_ms_count{language="en",stage="plan"} 1`, and
+`pitchbot_metrics_dropped_series_total 0`.

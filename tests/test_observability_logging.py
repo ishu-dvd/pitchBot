@@ -178,3 +178,36 @@ def test_configure_logging_replaces_handlers_rather_than_stacking_them() -> None
     logging.getLogger().info("once")
     assert stream.getvalue().count("once") == 1
     configure_logging(level="INFO", json_format=False)
+
+
+def test_third_party_loggers_are_routed_through_the_root_formatter() -> None:
+    """Uvicorn configures itself AFTER import and gives uvicorn.access its own handler.
+
+    Left alone, the process emits two formats at once: JSON from the application and plain
+    text for every request line -- and the request lines are the ones an operator greps
+    first. Verified live before this existed: access logs came out unstructured.
+    """
+
+    from pitchbot.observability.logging import (
+        DEFAULT_TAKEOVER_LOGGERS,
+        take_over_third_party_loggers,
+    )
+
+    hijacked = logging.getLogger("uvicorn.access")
+    hijacked.handlers = [logging.StreamHandler(io.StringIO())]
+    hijacked.propagate = False
+
+    stream = io.StringIO()
+    configure_logging(level="INFO", stream=stream)
+    take_over_third_party_loggers()
+
+    assert hijacked.handlers == []
+    assert hijacked.propagate is True
+
+    hijacked.info("127.0.0.1 - GET /health 200")
+    payload = json.loads(stream.getvalue().strip().splitlines()[-1])
+    assert payload["logger"] == "uvicorn.access"
+    assert payload["message"] == "127.0.0.1 - GET /health 200"
+    assert "uvicorn.access" in DEFAULT_TAKEOVER_LOGGERS
+
+    configure_logging(level="INFO", json_format=False)

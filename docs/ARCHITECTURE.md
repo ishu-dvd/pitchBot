@@ -416,6 +416,32 @@ buckets and turn the limiter into the exhaustion it was added to prevent.
 start without a credential - a warning would have scrolled past once and never been seen
 again, which is how services end up publicly readable.
 
+### Explaining itself
+
+Correlation lives in `contextvars`, not in call signatures. The turn path crosses the router,
+the service, the engine, the pipeline and two adapters, most of them `async`; a correlation id
+is not an argument any of them have an opinion about, so threading it explicitly would touch
+every signature on the path and still be forgotten by the next caller. A `contextvars` value
+is also visible to everything a task awaits and invisible to concurrent tasks serving other
+sessions, which is exactly the scoping required.
+
+Two constraints shape the rest:
+
+- **Redaction is structural.** Buyer content is removed by the log formatter based on field
+  name, so a caller cannot opt in by accident and a reviewer cannot forget. Matching is on
+  substrings, so `text`, `reply_text` and `utterance_text` are one rule.
+- **Label cardinality is bounded by construction.** Metric labels come from closed sets - a
+  language, a stage, an outcome - and never from a session id or a lead reference. A registry
+  keyed by something unbounded becomes the memory leak it was added to detect, which is the
+  same failure the rate limiter avoids by keying on credentials rather than addresses. A
+  ceiling refuses new series and counts the refusals, so a labelling bug is visible instead of
+  fatal.
+
+Uvicorn installs its own handlers when the server starts, which is after this application is
+imported, so the takeover happens at startup rather than at import. Without it the process
+emits JSON from the application and plain text for every request line - and the request lines
+are the ones an operator greps first.
+
 Data entering from transcripts, websites, prior notes, models, and providers is untrusted. It cannot alter system instructions, credentials, policies, or tool authorization.
 
 The implemented conversation engine treats buyer text only as untrusted conversation data. Explicit opt-outs stop immediately; abuse receives at most one neutral redirection; requests for internal information or instruction bypass are refused without extraction or action authority. Classification uses explicit budget, timeline, decision, next-step, rejection, and need evidence. Language, accent, frustration, synthetic persona, and protected or sensitive traits are excluded.

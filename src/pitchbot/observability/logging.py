@@ -161,11 +161,42 @@ def configure_logging(
     root.setLevel(level.upper())
 
 
+def take_over_third_party_loggers(names: Iterable[str] = ()) -> None:
+    """Route libraries that install their own handlers through the root formatter.
+
+    Uvicorn calls ``dictConfig`` when the server starts, which is *after* this module is
+    imported, and gives ``uvicorn.access`` its own handler with ``propagate`` disabled. The
+    result is a process emitting two log formats at once: JSON from the application and
+    plain text from every request line, so half the output is unparseable by whatever reads
+    the other half - and the request lines are exactly the ones an operator greps first.
+
+    Clearing the handlers and re-enabling propagation hands those records to the root
+    logger, where they get correlation ids and redaction like everything else.
+
+    Must be called *after* the third-party library has configured itself. For uvicorn that
+    means application startup, not import.
+    """
+
+    for name in names or DEFAULT_TAKEOVER_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.handlers = []
+        logger.propagate = True
+
+
+DEFAULT_TAKEOVER_LOGGERS: Final[tuple[str, ...]] = (
+    "uvicorn",
+    "uvicorn.access",
+    "uvicorn.error",
+)
+
+
 __all__ = [
+    "DEFAULT_TAKEOVER_LOGGERS",
     "REDACTED",
     "SENSITIVE_FIELD_MARKERS",
     "JsonLogFormatter",
     "configure_logging",
     "is_sensitive",
     "redact",
+    "take_over_third_party_loggers",
 ]

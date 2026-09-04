@@ -11,6 +11,7 @@ from starlette.responses import PlainTextResponse, Response
 
 from pitchbot.config import settings
 from pitchbot.observability import configure_logging, registry
+from pitchbot.observability.logging import take_over_third_party_loggers
 from pitchbot.simulator import router as simulator_router_module
 from pitchbot.simulator.router import require_credential, speech_providers
 from pitchbot.simulator.router import router as simulator_router
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
 
     await preload_speech_providers(speech_providers)
+    take_over_third_party_loggers()
     yield
 
 
