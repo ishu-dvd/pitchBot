@@ -208,9 +208,16 @@ matter and they pull against each other:
 
 **Pick by what you are optimising.** `en_GB-alba-medium` is female and costs only 56 ms more
 than the outgoing male voice. `en_US-ljspeech-high` sounds markedly less mechanical — that is
-what the `high` tier buys — but adds **322 ms to every reply** and drops the realtime factor
-from 16.5× to 4.2×, so one CPU serves roughly a quarter as many concurrent calls. The download
-commands above use `ljspeech-high`; swap in `alba-medium` if latency matters more than polish.
+what the `high` tier buys — but adds **322 ms to every reply**, which is *more than an entire
+human conversational turn-gap* (measured at ~200 ms across ten languages by Stivers et al.,
+PNAS 2009), and drops the realtime factor from 16.5× to 4.2×. The download commands above use
+`ljspeech-high`; swap in `alba-medium` if latency matters more than polish.
+
+> **Context for that trade.** The whole spoken turn currently takes ~2,587 ms from the buyer
+> finishing to the first audio — about **13× the human turn-gap** and 6.5× ITU-T G.114's
+> 400 ms ceiling for interactive voice. Transcription is 66% of it and the endpointer's fixed
+> 700 ms wait is another 27%, so the voice is not the problem — but 322 ms is not free either.
+> See [BENCHMARKS.md](BENCHMARKS.md), *"What 'real time' means to a person, not to a CPU"*.
 
 `en_US-kristin-medium` is listed as **unverified**, not female: at 160 Hz it falls inside the
 band where the measurement cannot distinguish the two, and the licence table should not carry

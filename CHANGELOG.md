@@ -400,3 +400,28 @@ All notable changes to PitchBot are documented here.
   exactly this kind of time, so returning some of it silently would have undone part of that
   work. Both tiers are now documented with their measured cost, and `en_GB-alba-medium` is
   offered as the low-latency female option at 182 ms - 56 ms more than the outgoing male voice.
+
+### Reframed (PR 49)
+
+- **Latency is now measured against a human standard, not a system one.** Every figure in this
+  repository had been reported as milliseconds or a realtime factor; neither says whether a
+  conversation feels natural, and the realtime factor describes concurrency rather than what
+  one buyer experiences. Stivers et al. (PNAS 2009) measured the median human turn-taking gap
+  at **~200 ms** across ten unrelated languages, and ITU-T G.114 puts the outer limit for
+  interactive voice at **400 ms**.
+
+  Against that, the shipped English path answers in **~2,587 ms** - about **13x the human gap**
+  and 6.5x G.114's ceiling. The breakdown matters: transcription is 66%, and the endpointer's
+  fixed `end_silence_ms` wait is another 27%, so the agent is already 1.75x past G.114 before a
+  single instruction runs. The `high` voice's +322 ms is, in these terms, **more than one
+  entire human turn-gap spent on timbre**.
+
+### Gap recorded, not closed (PR 49)
+
+- **The one research-backed mitigation in the codebase is not connected to the product.**
+  Filled pauses and backchannels are shown to reduce *perceived* delay even when measured delay
+  is unchanged. `speech/backchannel.py` implements exactly that, in all three languages, and
+  `SpeechTurnPipeline` exposes an `on_thinking` hook - but it is wired only in `cli/talk.py`.
+  `create_speech_pipeline` never passes it, so the WebSocket path spends the full ~2.6 s in
+  silence. `FIRST_AFTER_MS` is also 700 ms *after* the endpoint, so even on the CLI the first
+  filler lands ~1,400 ms after the buyer stops, 7x the human gap.

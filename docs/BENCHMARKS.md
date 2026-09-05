@@ -1969,3 +1969,90 @@ change that silently returns 322 ms of it would undo part of that work without s
 The low-latency female option is **`en_GB-alba-medium`**: 182 ms, only 56 ms more than the
 outgoing male voice, CC-BY-4.0, and confirmed female at 203 Hz. The high-fidelity option is
 `en_US-ljspeech-high` at 448 ms. Both are documented; neither is hidden behind the other.
+
+## What "real time" means to a person, not to a CPU (2026-09-06)
+
+Every latency figure in this document has been reported as a *system* quantity - milliseconds,
+or a realtime factor. Neither says whether a conversation feels natural, and the realtime
+factor in particular is misleading: 16.5x versus 4.2x describes how many concurrent calls one
+CPU could serve, not what a single buyer experiences. A buyer experiences exactly one number -
+**the gap between finishing their sentence and hearing a reply** - so that is the number that
+needs a target.
+
+### The target comes from measurement, not preference
+
+**Human-human conversation.** Stivers et al., *Universals and cultural variation in turn-taking
+in conversation*, PNAS 106(26):10587-10592 (2009), measured turn transitions across ten
+languages from unrelated families and found the **median gap is about 200 ms**, with
+cross-language variation inside a ~250 ms band. Speakers subjectively believe other cultures
+pace conversation very differently; measured, they barely differ. 200 ms is close to a human
+universal, and it is *shorter* than the time it takes to plan an utterance - which is why
+listeners predict the end of a turn rather than react to it.
+
+**Interactive voice systems.** ITU-T Recommendation G.114 sets one-way mouth-to-ear delay
+targets: **under 150 ms** is transparent, **150-400 ms** is usable but degrades interactivity
+and callers begin to notice, and **over 400 ms** is unacceptable for interactive conversation.
+
+Taken together, a defensible budget for a spoken sales agent:
+
+| band | budget | meaning |
+|---|---|---|
+| human-equivalent | **~200 ms** | indistinguishable from a person taking their turn |
+| good | **< 400 ms** | G.114's outer limit for interactive speech |
+| tolerable | 400 ms - 1 s | noticeably slow; a person would fill it with a sound |
+| broken | **> 1 s** | reads as a failure, not a pause |
+
+### Where PitchBot actually sits
+
+Measured end to end by `probe_time_to_first_audio.py` on the shipped English path -
+real detector, real transcriber with early detection, real engine, real voice:
+
+| stage | measured | share | multiples of the 200 ms human gap |
+|---|---:|---:|---:|
+| waiting out `end_silence_ms` to decide the buyer stopped | 700 ms | 27% | **3.5x** |
+| transcription | ~1,717 ms | 66% | **8.6x** |
+| planning the reply | ~3 ms | 0.1% | 0.02x |
+| synthesis to first audio (`medium` voice) | ~167 ms | 6% | 0.8x |
+| **total** | **~2,587 ms** | | **12.9x** |
+
+So the agent answers about **thirteen times slower than a person would**, and **6.5x past
+G.114's outer limit** for interactive voice. Two consequences follow that were not visible
+while latency was reported as a system quantity:
+
+**1. The endpointer alone blows the budget.** `end_silence_ms` is 700 ms, so before a single
+instruction runs the agent is already 1.75x past G.114's 400 ms ceiling and 3.5x past the
+human gap. No amount of model optimisation reaches "near real time" while a fixed 700 ms wait
+precedes it. Humans do not wait for silence; they *predict* the end of a turn from syntax and
+prosody, which is what turn-end prediction models exist to do. Lowering the threshold trades
+against interrupting a buyer who is only pausing - a real trade, and one this project has not
+yet measured.
+
+**2. The `high` voice costs 1.6 human turn-gaps.** The +322 ms that `en_US-ljspeech-high` adds
+over a `medium` voice is not a rounding error at this scale: it is **more than the entire
+human conversational gap**, spent on timbre. That reframes the choice recorded above - it is
+not "nicer voice, slightly slower", it is "nicer voice, at the cost of one and a half turns'
+worth of human-scale latency".
+
+### The mitigation this project already built, and does not use
+
+The literature is consistent that **filled pauses and backchannels reduce *perceived* delay
+even when measured delay is unchanged** - see *Real-time Latency Reduction With A Filler-based
+Conversational Approach*, and *Improving Impressions of Response Delay in AI-based Spoken
+Dialogue Systems* (IEEE, 2024). A listener who hears "hmm, okay" is not waiting; a listener who
+hears nothing is.
+
+`src/pitchbot/speech/backchannel.py` implements exactly this, with phrases in English, Hindi
+and Telugu, and `SpeechTurnPipeline` exposes an `on_thinking` hook to fire it.
+
+**It is wired only in `cli/talk.py`.** `SimulatorService.create_speech_pipeline` never passes
+`on_thinking`, so the WebSocket path - the browser, and every deployment built on it - has no
+filler at all and spends the full ~2.6 s in complete silence. The one research-backed
+mitigation in the codebase is connected to the path a developer uses and not to the path a
+buyer uses.
+
+Two numbers bound the fix. `FIRST_AFTER_MS` is 700 ms, measured *after* the endpoint, so even
+on the CLI the earliest filler lands ~1,400 ms after the buyer stops - 7x the human gap. A
+filler that is meant to cover a 2.6 s silence should probably start nearer the endpoint than
+that, and the endpoint wait itself is unfillable by construction.
+
+Neither is changed here. Both are now measured, cited, and named, which is what was missing.
