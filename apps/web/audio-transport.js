@@ -1,6 +1,13 @@
 const MAX_QUEUE_ITEMS = 24;
 const MAX_BUFFERED_BYTES = 512 * 1024;
-const MAX_CHUNK_BYTES = 256 * 1024;
+
+// What the server's detector accepts: mono 16-bit PCM at 16 kHz, in 10, 20 or 30 ms frames.
+// 30 ms is the largest of those, so it is the fewest messages per second that still fits.
+const TARGET_SAMPLE_RATE_HZ = 16_000;
+const FRAME_SAMPLES = 480;
+const FRAME_BYTES = FRAME_SAMPLES * 2;
+const PCM_MEDIA_TYPE = `audio/pcm;rate=${TARGET_SAMPLE_RATE_HZ};channels=1;bits=16`;
+const WORKLET_URL = "/simulator/pcm-worklet.js";
 
 export class AudioTransport {
   constructor(onDiagnostics, onMessage, onBinary) {
@@ -10,7 +17,9 @@ export class AudioTransport {
     this.queue = [];
     this.dropped = 0;
     this.socket = null;
-    this.recorder = null;
+    this.context = null;
+    this.source = null;
+    this.worklet = null;
     this.stream = null;
     this.reconnectAttempts = 0;
     this.reconnectTimer = null;
@@ -66,15 +75,27 @@ export class AudioTransport {
   }
 
   async start(sessionId) {
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-      throw new Error("Microphone recording is not supported by this browser.");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Microphone capture is not supported by this browser.");
+    }
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      throw new Error("Microphone capture is not supported by this browser.");
     }
     this.stop();
     const generation = this.generation;
     this.stopped = false;
+
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
     } catch (error) {
       this.stopped = true;
       throw error;
@@ -84,15 +105,51 @@ export class AudioTransport {
       return false;
     }
     this.stream = stream;
-    const preferred = "audio/webm;codecs=opus";
-    const options = MediaRecorder.isTypeSupported(preferred) ? { mimeType: preferred } : undefined;
-    this.recorder = new MediaRecorder(this.stream, options);
-    this.recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) this.enqueue(event.data);
-    };
+
     try {
-      this.connect(sessionId, this.recorder.mimeType, generation);
-      this.recorder.start(250);
+      // Asking the context for 16 kHz makes the browser resample the microphone for us,
+      // which is the only resampler here worth trusting.
+      const context = new AudioContextClass({ sampleRate: TARGET_SAMPLE_RATE_HZ });
+      this.context = context;
+      if (!context.audioWorklet) {
+        throw new Error(
+          "This browser cannot capture raw audio (no AudioWorklet), so the microphone " +
+            "cannot be used here. Refusing to fall back to a recorder the server cannot " +
+            "decode, which would look like a working microphone that is never heard.",
+        );
+      }
+      // Not every browser honours the requested rate. Sending 16 kHz-shaped frames from a
+      // 48 kHz context would put three times as much audio in each frame as its byte count
+      // claims, and the server times an utterance by summing frame durations - so it would
+      // silently mis-scale every endpointing threshold rather than fail.
+      if (context.sampleRate !== TARGET_SAMPLE_RATE_HZ) {
+        throw new Error(
+          `This browser captures at ${context.sampleRate} Hz and will not resample to ` +
+            `${TARGET_SAMPLE_RATE_HZ} Hz, which the server's detector requires.`,
+        );
+      }
+      if (context.state === "suspended") await context.resume();
+      await context.audioWorklet.addModule(WORKLET_URL);
+      if (this.stopped || generation !== this.generation) return false;
+
+      this.source = context.createMediaStreamSource(stream);
+      this.worklet = new AudioWorkletNode(context, "pcm-frame-splitter", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: 1,
+        processorOptions: { frameSamples: FRAME_SAMPLES },
+      });
+      this.worklet.port.onmessage = (event) => this.enqueue(event.data);
+      this.source.connect(this.worklet);
+      // A worklet whose output goes nowhere is not guaranteed to be pulled by the graph.
+      // Routing it through a silent gain keeps it running without playing the buyer's own
+      // voice back at them.
+      const muted = context.createGain();
+      muted.gain.value = 0;
+      this.worklet.connect(muted);
+      muted.connect(context.destination);
+
+      this.connect(sessionId, PCM_MEDIA_TYPE, generation);
     } catch (error) {
       this.stop();
       throw error;
@@ -100,17 +157,24 @@ export class AudioTransport {
     return true;
   }
 
-  enqueue(blob) {
-    if (blob.size > MAX_CHUNK_BYTES) {
+  enqueue(frame) {
+    const size = frame.byteLength ?? frame.size ?? 0;
+    if (size !== FRAME_BYTES) {
+      // The server's detector accepts one exact frame length and rejects everything else,
+      // so a frame of any other size cannot be classified and would be counted there as a
+      // detector fault. Dropping it here instead keeps that visible in the diagnostics
+      // rather than as silence the buyer cannot explain.
       this.dropped += 1;
       this.report();
       return;
     }
     if (this.queue.length >= MAX_QUEUE_ITEMS) {
+      // Oldest first: a backlog means the socket is behind, and the buyer's most recent
+      // speech is worth more than the speech they have already moved on from.
       this.queue.shift();
       this.dropped += 1;
     }
-    this.queue.push(blob);
+    this.queue.push(frame);
     this.report();
     this.flush();
   }
@@ -132,10 +196,23 @@ export class AudioTransport {
     this.generation += 1;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
-    if (this.recorder && this.recorder.state !== "inactive") this.recorder.stop();
+    if (this.worklet) {
+      // Dropping the handler first: a frame delivered during teardown would otherwise be
+      // queued for a socket that is closing, and counted as a drop that never happened.
+      this.worklet.port.onmessage = null;
+      this.worklet.disconnect();
+    }
+    if (this.source) this.source.disconnect();
+    if (this.context && this.context.state !== "closed") {
+      // Closing releases the audio hardware. Failures are ignored on purpose: this runs on
+      // every stop, including ones that follow an error, and must not raise a second time.
+      this.context.close().catch(() => {});
+    }
     if (this.stream) this.stream.getTracks().forEach((track) => track.stop());
     if (this.socket) this.socket.close(1000, "stopped");
-    this.recorder = null;
+    this.worklet = null;
+    this.source = null;
+    this.context = null;
     this.stream = null;
     this.socket = null;
     this.queue = [];

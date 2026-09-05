@@ -300,3 +300,43 @@ All notable changes to PitchBot are documented here.
   mismatch is untouched here.
 - Transcription remains the dominant term in a turn, now that it is measured once per sentence
   rather than four times.
+
+### Fixed (PR 48)
+
+- **The browser was never heard.** `apps/web/audio-transport.js` recorded with
+  `MediaRecorder` (WebM/Opus) while `WebRtcVoiceActivityDetector` accepts only 320/640/960-byte
+  mono 16-bit PCM, and nothing in the server decodes Opus. Every frame was rejected, counted as
+  a detector failure and treated as silence: **120 frames in, 0 utterances out**, turn-taking
+  never leaving `idle`. `docs/TRY_IT_LOCALLY.md` documented exactly that combination.
+
+  The browser now captures raw PCM through an `AudioWorklet` (`apps/web/pcm-worklet.js`),
+  regrouping the audio thread's 128-sample blocks into 480-sample (30 ms) int16 frames, with
+  the `AudioContext` asked for 16 kHz so the browser resamples. Verified three ways: the
+  worklet's arithmetic in Node (278/278 frames exactly 960 bytes, **max per-sample delta 0**),
+  those exact bytes through the real server pipeline (**278/278 accepted, 0 dropped, 1
+  utterance, full transcript**), and a real headless Chrome fed a WAV as its microphone (2,655
+  frames, every one 960 bytes, real signal, 0 dropped).
+
+  A browser that will not resample to 16 kHz now fails loudly instead of sending frames whose
+  byte count misrepresents their duration - the mistake PR 47 fixed on the server side.
+
+- **A microphone could evict the conversation from its own timeline.** Each audio frame
+  appended an `AUDIO_METADATA` event, and `events` is a `deque(maxlen=200)` shared with turns
+  and outcomes. At the browser's new 33 frames a second the timeline was entirely audio within
+  six seconds; at the old 4 a second it took fifty. The audio-chunk cap also closed the socket
+  with `1013` after 60 s, and the client reconnected into the same wall - 83 sockets in one run.
+
+  Frames are still counted individually for the capacity guard, but a timeline entry is
+  appended for the first frame and then every 500 (~15 s), carrying cumulative chunk and byte
+  counts. `acknowledged_sequence` on the audio socket is now the frame's own sequence rather
+  than the sequence of an event that no longer exists per frame.
+
+### Deferred (PR 48)
+
+- The live-browser check does not reach a transcript: Chrome's fake capture device loops the
+  WAV, so no trailing silence ever arrives to endpoint on. The end-to-end hop is covered by
+  feeding the worklet's own bytes to the real pipeline instead.
+- The agent's voice is `en_US-joe-medium`, chosen for being CC0 rather than for how it sounds.
+  It is male and flat. `en_GB-alba-medium` (female, CC BY 4.0) and `te_IN-padmavathi-medium`
+  (female, CC BY 4.0) are licence-clean alternatives; every reviewed `hi_IN` female voice is
+  non-commercial, so Hindi remains an owner decision.
