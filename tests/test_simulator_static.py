@@ -15,16 +15,36 @@ def test_simulator_static_assets_exist_and_use_safe_rendering() -> None:
     html = (WEB / "index.html").read_text(encoding="utf-8")
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     transport = (WEB / "audio-transport.js").read_text(encoding="utf-8")
+    worklet = (WEB / "pcm-worklet.js").read_text(encoding="utf-8")
 
     assert "Simulation only" in html
     assert 'meta name="referrer" content="no-referrer"' in html
     assert "innerHTML" not in javascript
     assert "textContent" in javascript
     assert "MAX_QUEUE_ITEMS = 24" in transport
-    assert "MAX_CHUNK_BYTES = 256 * 1024" in transport
-    assert "MediaRecorder.isTypeSupported" in transport
     assert "http://" not in javascript + transport
     assert "https://" not in javascript + transport
+
+    # The browser must capture raw PCM, not `MediaRecorder`'s WebM/Opus. Nothing in the
+    # server decodes Opus and the detector accepts only 320/640/960-byte PCM frames, so a
+    # recorder here means every frame is rejected and the buyer is never heard.
+    assert "MediaRecorder" not in transport
+    assert "audioWorklet.addModule" in transport
+    assert "TARGET_SAMPLE_RATE_HZ = 16_000" in transport
+    assert "FRAME_SAMPLES = 480" in transport
+    # A browser that will not resample must fail loudly rather than send frames whose byte
+    # count misrepresents their duration - the endpointer times an utterance by summing them.
+    assert "context.sampleRate !== TARGET_SAMPLE_RATE_HZ" in transport
+    assert 'registerProcessor("pcm-frame-splitter"' in worklet
+
+
+def test_the_capture_worklet_is_reachable_from_the_page() -> None:
+    """`addModule` fetches by URL, so a worklet that is not served is a runtime failure."""
+
+    transport = (WEB / "audio-transport.js").read_text(encoding="utf-8")
+
+    assert 'WORKLET_URL = "/simulator/pcm-worklet.js"' in transport
+    assert (WEB / "pcm-worklet.js").is_file()
 
 
 def test_simulator_static_and_websocket_routes_are_registered() -> None:

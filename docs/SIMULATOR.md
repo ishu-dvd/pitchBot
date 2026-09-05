@@ -14,7 +14,7 @@ It currently supports:
 - Bounded session timelines and session-scoped history with no cross-session `lead_ref` lookup.
 - Playback interruption using browser speech synthesis cancellation.
 - Deterministic English/Hindi/Hinglish replay fixtures.
-- Microphone capture through `MediaRecorder`, preferring Opus where supported.
+- Microphone capture as raw PCM through an `AudioWorklet`, in 30 ms frames of mono 16-bit audio at 16 kHz.
 - Same-origin WebSocket audio transport with bounded browser queues, backpressure, capped reconnects, and chunk limits.
 - Explicit session closure and capacity recovery.
 - Session-scoped deterministic discovery, requirement revisions, repetition handling, and evidence-grounded Hot/Warm/Cold/Review outcomes.
@@ -130,9 +130,10 @@ classified by a `VoiceActivityDetector`, fed to a `TurnTaking` state machine
 - No PSTN, WhatsApp call, live WhatsApp message, durable callback, or binary artifact action.
 - No speech-to-text or local TTS provider integration. Turn-taking is wired end to end,
   but the default transcriber is an explicit unavailable stub.
-- No acoustic voice-activity model. `MockVoiceActivityDetector` is a byte-size heuristic
-  that works only because Opus is variable-bitrate; it is a placeholder for developing
-  and testing endpointing, not a measured detector.
+- No acoustic voice-activity model by default. `MockVoiceActivityDetector` is a byte-size
+  heuristic and is a placeholder for developing and testing endpointing, not a measured
+  detector. It accepts any frame length, which is why it kept passing while the real
+  detector rejected every frame the browser sent; the browser now captures PCM instead.
 - No model-backed/free-form extraction; the current conversation rules are deterministic and intentionally bounded.
 - No use of recalled claims in reply generation, classification, or action policy; recall is display-only.
 - No PPTX renderer; sample decks are dependency-free structured previews from fixed templates.

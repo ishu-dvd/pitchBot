@@ -1766,3 +1766,80 @@ still dialing. `_dispatch_one` re-reads the record and refuses to dispatch anyth
 no longer `SCHEDULED`. That guard **survived mutation testing on first attempt** - the
 pre-existing cancel test excludes the record at snapshot time, so the guard never fired -
 and a test for exactly that interleaving was added.
+
+## The browser was never heard (2026-09-06)
+
+`probe_browser_path_with_real_vad.py`. `apps/web/audio-transport.js` recorded with
+`MediaRecorder`, which produces WebM/Opus, and sent a chunk every 250 ms.
+`WebRtcVoiceActivityDetector` accepts **only** 320, 640 or 960 bytes of mono 16-bit PCM.
+Nothing in `src/pitchbot` decodes Opus - a search for opus / webm / ffmpeg / av. / soundfile
+/ pydub finds one comment and no code.
+
+Fed browser-shaped frames, the real detector rejected every one:
+
+    3814 bytes -> PermanentAdapterError: webrtcvad requires [320, 640, 960] bytes ...
+    120 browser-shaped frames through the pipeline
+      utterances produced : 0
+      frames dropped      : 120
+      turn-taking state   : idle
+
+Every frame was rejected, counted as a detector failure and treated as silence. The pipeline
+is right to survive that - a detector fault must not end a call - but the buyer was never
+heard, and nothing said so. `docs/TRY_IT_LOCALLY.md` told the reader to install
+`webrtc-vad` and open the page, which is a combination that cannot work.
+
+**Why the suite passed:** `MockVoiceActivityDetector` is *designed* to accept encoded-length
+proxies - see the Opus variable-bitrate note in `adapters/mocks.py` - so every audio-socket
+test exercised a detector that accepts anything. The same shape of blind spot as PR 47,
+where every turn-taking test used a 1,024-byte frame that was not measurable.
+
+### The browser now captures PCM
+
+An `AudioWorklet` regroups the audio thread's 128-sample blocks into 480-sample (30 ms)
+int16 frames, and the `AudioContext` is asked for 16 kHz so the browser does the resampling.
+Verified in three independent places, because each covers what the others stub:
+
+**1. The worklet's arithmetic** (`verify_pcm_worklet.js`, real worklet code in Node):
+
+| check | result |
+|---|---|
+| frames of exactly 960 bytes | 278/278 |
+| max per-sample delta after a round trip | **0** - nothing lost or reordered across block boundaries |
+| a +2.5 sample | saturates at 32767 rather than wrapping |
+| absent input | keeps the processor alive |
+
+**2. Those bytes through the real server** (`verify_browser_frames_end_to_end.py`):
+
+| | WebM/Opus (before) | PCM worklet (after) |
+|---|---:|---:|
+| frames the detector accepted | 0/120 | **278/278** |
+| frames dropped | 120 | **0** |
+| utterances | 0 | **1** |
+| transcript | - | the full sentence |
+| `detect_language_ms` | - | 1,550 ms |
+
+**3. A real browser with a fake microphone** (`verify_browser_live.js`, headless Chrome fed a
+WAV as its capture device): 2,655 frames sent, **every one 960 bytes**, peak 21,813 and max
+RMS 7,763 - real signal, not silence - with **0 dropped** and a stable socket.
+
+The third check does not reach a transcript, and that is a limitation of the harness rather
+than of the product: Chrome's fake device loops the file, so 79.7 s of audio arrived from an
+8.37 s WAV and there is never the trailing silence an endpointer needs. The second check
+covers that final hop with the same bytes.
+
+### What the change to PCM broke, and why it was already broken
+
+At 250 ms the browser sent 4 frames a second; at 30 ms it sends **33**. Each frame appended
+one `AUDIO_METADATA` event to the session timeline, and that made two things fail:
+
+- The audio-chunk cap (2,000) was reached after 60 s of speech, and the socket was closed
+  with `1013`. The browser reconnected and hit it again: **83 sockets in one run**.
+- More quietly, `events` is a `deque(maxlen=200)` **shared with the conversation**. A spoken
+  conversation's own turns were evicted by its own microphone - in six seconds at 33 fps, and
+  in fifty seconds at the old 4 fps. The rate change did not introduce this; it exposed it.
+
+Frames are still counted individually, which is what the capacity guard reads, but a timeline
+entry is appended for the first frame and then every 500 (about 15 s of speech), carrying
+cumulative counts. The event is evidence that audio arrived and was not retained - a property
+of the stream, not of one frame - and the timeline goes back to being a record of the
+conversation.

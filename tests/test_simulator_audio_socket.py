@@ -338,7 +338,14 @@ def test_speech_never_reaches_the_timeline_or_the_utterance_report(
     for event in audio_events:
         assert event["text"] is None
         assert event["metadata"]["audio_retained"] is False
-        assert set(event["metadata"]) == {"byte_count", "media_type", "audio_retained"}
+        # Counts and a media type, and nothing that could carry what was said.
+        assert set(event["metadata"]) == {
+            "byte_count",
+            "media_type",
+            "audio_retained",
+            "chunks_received",
+            "bytes_received",
+        }
 
 
 def test_the_buyer_can_interrupt_the_agent(

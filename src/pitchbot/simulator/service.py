@@ -137,6 +137,12 @@ class SessionCapacityError(RuntimeError):
 
 _LEAD_ID_NAMESPACE = UUID("a327c17a-6d9f-4c26-b255-5366e5bb8d1d")
 
+# One audio-metadata event per this many frames, plus one for the first frame. At 30 ms
+# frames that is an entry roughly every 15 seconds of speech: enough to evidence that audio
+# is arriving and is not retained, few enough that the microphone cannot evict the
+# conversation from a 200-entry timeline.
+AUDIO_METADATA_EVENT_EVERY = 500
+
 
 @dataclass(slots=True)
 class _TurnOperation:
@@ -158,6 +164,7 @@ class _Session:
     contact_policy: ContactPolicy
     next_sequence: int = 1
     audio_chunks_received: int = 0
+    audio_bytes_received: int = 0
     approved_preview_count: int = 0
     closing: bool = False
     recovered: bool = False
@@ -174,7 +181,9 @@ class SimulatorService:
         max_sessions: int = 100,
         max_events_per_session: int = 200,
         max_history_events_per_lead: int = 500,
-        max_audio_chunks_per_session: int = 2_000,
+        # 30 ms frames rather than the browser's old 250 ms ones, so the same wall-clock
+        # budget needs 8.3x the count: this is ~10 minutes of continuous speech.
+        max_audio_chunks_per_session: int = 20_000,
         max_turn_operations_per_session: int = 100,
         conversation_engine: ConversationEngine | None = None,
         conversation_journal: ConversationJournal | None = None,
@@ -738,7 +747,25 @@ class SimulatorService:
         self,
         session_id: UUID,
         metadata: AudioMetadata,
-    ) -> SimulatorEvent:
+    ) -> SimulatorEvent | None:
+        """Account for one audio frame, and occasionally say so on the timeline.
+
+        Returns the event when one was appended, and ``None`` otherwise.
+
+        This used to append one event per frame, which was survivable only because the
+        browser sent four a second. It now sends **33** - 30 ms frames are the only shape
+        the voice-activity detector accepts - and one event per frame breaks two things at
+        that rate. The audio-chunk cap was reached after 60 s of speech and the socket was
+        closed with `1013`; and, more quietly, `events` is a `deque(maxlen=200)`, so a
+        spoken conversation's own turns were evicted from its timeline by its microphone
+        within six seconds.
+
+        The event exists as evidence that audio arrived and was not retained, which is a
+        property of the stream rather than of any one frame. Counting every frame and
+        recording periodically keeps that evidence, and keeps the timeline a record of the
+        conversation rather than of the microphone.
+        """
+
         session = self._get_session(session_id)
         async with session.lock:
             self._ensure_session_active(session_id, session)
@@ -746,6 +773,10 @@ class SimulatorService:
             if session.audio_chunks_received >= self._max_audio_chunks_per_session:
                 raise RuntimeError("Simulator audio metadata capacity reached")
             session.audio_chunks_received += 1
+            session.audio_bytes_received += metadata.byte_count
+            first = session.audio_chunks_received == 1
+            if not first and session.audio_chunks_received % AUDIO_METADATA_EVENT_EVERY:
+                return None
             return self._append_event(
                 session,
                 SimulatorEventType.AUDIO_METADATA,
@@ -754,6 +785,8 @@ class SimulatorService:
                     "byte_count": metadata.byte_count,
                     "media_type": metadata.media_type,
                     "audio_retained": False,
+                    "chunks_received": session.audio_chunks_received,
+                    "bytes_received": session.audio_bytes_received,
                 },
             )
 

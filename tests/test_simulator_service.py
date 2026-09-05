@@ -310,12 +310,59 @@ async def test_interruption_and_audio_store_metadata_only(
     )
 
     assert interrupted.events[-1].event_type is SimulatorEventType.INTERRUPTION
+    assert audio_event is not None, "the first frame of a stream is always recorded"
     assert audio_event.metadata == {
         "byte_count": 120,
         "media_type": "audio/webm;codecs=opus",
         "audio_retained": False,
+        # Cumulative, because an event is no longer appended per frame: at 33 frames a
+        # second that evicted the conversation from its own 200-entry timeline.
+        "chunks_received": 1,
+        "bytes_received": 120,
     }
     assert audio_event.text is None
+
+
+@pytest.mark.asyncio
+async def test_audio_metadata_is_counted_every_frame_but_recorded_periodically() -> None:
+    """The evidence is a property of the stream, not of each frame.
+
+    A 30 ms frame is the only shape the detector accepts, so the browser sends 33 a second.
+    One timeline entry each would be 33 a second of "audio arrived" in a `deque(maxlen=200)`
+    shared with the conversation - the buyer's own turns would be gone in six seconds.
+    """
+
+    service = SimulatorService(
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+        max_sessions=3,
+        max_events_per_session=200,
+        max_audio_chunks_per_session=2_000,
+    )
+    session = service.create_session(CreateSessionRequest(lead_ref="audio-cadence"))
+    metadata = AudioMetadata(
+        byte_count=960,
+        media_type="audio/pcm;rate=16000;channels=1;bits=16",
+        captured_at=datetime.now(UTC),
+    )
+
+    recorded = [
+        await service.record_audio_metadata(session.session_id, metadata) for _ in range(1_002)
+    ]
+    appended = [event for event in recorded if event is not None]
+
+    # The first frame, then one per AUDIO_METADATA_EVENT_EVERY.
+    assert len(appended) == 3
+    assert recorded[0] is not None, "the start of a stream is always recorded"
+    assert appended[-1].metadata["chunks_received"] == 1_000
+    assert appended[-1].metadata["bytes_received"] == 960_000
+    assert appended[-1].metadata["audio_retained"] is False
+
+    # Every frame is still counted, which is what the capacity guard reads.
+    timeline = service.get_session(session.session_id).events
+    audio_events = [
+        event for event in timeline if event.event_type is SimulatorEventType.AUDIO_METADATA
+    ]
+    assert len(audio_events) == 3, "1,002 frames must not become 1,002 timeline entries"
 
 
 @pytest.mark.asyncio

@@ -413,7 +413,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
                 await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
                 return
             try:
-                event = await simulator_service.record_audio_metadata(
+                await simulator_service.record_audio_metadata(
                     session_id,
                     AudioMetadata(
                         byte_count=len(audio),
@@ -428,6 +428,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
                 await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
                 return
 
+            acknowledged = sequence
             frame = await pipeline.push(
                 AudioChunk(
                     data=audio,
@@ -439,7 +440,11 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
             await socket.send_json(
                 {
                     "type": "ack",
-                    "acknowledged_sequence": event.sequence,
+                    # The frame's own sequence. It used to be the sequence of the timeline
+                    # event each frame appended, which stopped being one-per-frame when a
+                    # microphone at 33 frames a second began evicting the conversation from
+                    # its own timeline.
+                    "acknowledged_sequence": acknowledged,
                     "byte_count": len(audio),
                     "audio_retained": False,
                     "state": pipeline.turn_taking.state.value,
