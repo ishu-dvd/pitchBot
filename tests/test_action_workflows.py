@@ -788,6 +788,51 @@ async def test_dispatching_due_callbacks_does_not_block_an_unrelated_session() -
 
 
 @pytest.mark.asyncio
+async def test_a_callback_canceled_mid_batch_is_not_dispatched_anyway() -> None:
+    """A dispatch batch is not a claim over the callbacks it has not reached yet.
+
+    This is the race that per-callback locking introduces and must therefore close. The
+    batch dials one callback at a time; while it is dialing the first, a cancel for the
+    second is free to run, because they are different callbacks and no longer share a lock.
+    Dispatching the second from the batch's stale snapshot would silently undo that cancel
+    and place a call the buyer asked not to receive.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    telephony = SlowDialTelephonyAdapter()
+    service = CallbackService(
+        scheduler=MockSchedulerAdapter(),
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    for identifier in ("aaa-first", "zzz-second"):
+        await service.schedule(
+            CallbackRequest(
+                lead_id=uuid4(),
+                callback_id=identifier,
+                run_at=clock.now() + timedelta(minutes=1),
+                timezone="UTC",
+                idempotency_key=f"schedule-{identifier}",
+            ),
+            eligible_context(),
+        )
+    clock.advance(timedelta(minutes=1))
+
+    # Both are due, and the batch dials them in callback-id order.
+    dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
+    await telephony.dialing.wait()
+
+    canceled = await service.cancel("zzz-second", idempotency_key="cancel-mid-batch")
+    assert canceled.status is CallbackStatus.CANCELED
+
+    dispatched = await dispatch
+    assert [record.request.callback_id for record in dispatched] == ["aaa-first"]
+    assert service.get("zzz-second").status is CallbackStatus.CANCELED
+    assert len(telephony.actions) == 1, "the canceled callback must not have been dialed"
+
+
+@pytest.mark.asyncio
 async def test_cancel_claim_prevents_concurrent_due_dispatch() -> None:
     clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
     scheduler = BlockingCancelAdapter()
