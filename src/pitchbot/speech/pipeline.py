@@ -74,6 +74,16 @@ class UtteranceResult:
     confidence: float | None
     transcribe_ms: float
     dropped_frames: int
+    detect_language_ms: float | None = None
+    """How long the early language detection took, or ``None`` when none was used.
+
+    ``None`` covers three different situations that all mean "no hint was applied": early
+    detection is switched off, the transcriber does not support it, or it was still running
+    when the buyer stopped and was abandoned rather than waited for. Only the last of those
+    is interesting, and it is the one the operator cannot otherwise see - a detection that
+    never lands leaves transcription paying the auto-detect cost this feature exists to
+    remove, with nothing in the logs to say so.
+    """
 
     @property
     def is_turn(self) -> bool:
@@ -187,7 +197,7 @@ class SpeechTurnPipeline:
         Zero disables the whole mechanism, which is the behaviour that shipped before it
         existed: one auto-detecting transcription after the buyer stops.
         """
-        self._detection_task: asyncio.Task[object | None] | None = None
+        self._detection_task: asyncio.Task[tuple[object | None, float]] | None = None
         self._detection_started = False
 
     @property
@@ -318,9 +328,24 @@ class SpeechTurnPipeline:
             return
         payload = b"".join(chunk.data for chunk in self._buffer)
         self._detection_started = True
-        self._detection_task = asyncio.create_task(transcriber.detect_prefix_language(payload))
+        self._detection_task = asyncio.create_task(self._timed_detection(transcriber, payload))
 
-    def _take_detection_hint(self) -> object | None:
+    @staticmethod
+    async def _timed_detection(
+        transcriber: EarlyDetectingTranscriber, payload: bytes
+    ) -> tuple[object | None, float]:
+        """Detect, and carry back how long it took.
+
+        Timed here rather than where the result is consumed because the two are not the
+        same interval: this runs while the buyer is still speaking, and is read some time
+        after it finished.
+        """
+
+        started = perf_counter()
+        hint = await transcriber.detect_prefix_language(payload)
+        return hint, (perf_counter() - started) * 1000
+
+    def _take_detection_hint(self) -> tuple[object | None, float | None]:
         """Consume a finished early detection, or give up on an unfinished one.
 
         Deliberately does not wait. The utterance is already endpointed, so waiting would
@@ -331,17 +356,18 @@ class SpeechTurnPipeline:
         task = self._detection_task
         self._detection_task = None
         if task is None:
-            return None
+            return None, None
         if not task.done():
             task.cancel()
-            return None
+            return None, None
         if task.cancelled():
-            return None
+            return None, None
         error = task.exception()
         if error is not None:
             logger.warning("Early language detection failed", exc_info=error)
-            return None
-        return task.result()
+            return None, None
+        hint, elapsed = task.result()
+        return hint, elapsed
 
     def _cancel_detection(self) -> None:
         """Abandon an in-flight detection whose utterance no longer exists.
@@ -390,7 +416,7 @@ class SpeechTurnPipeline:
         chunks = self._buffer
         # Before _release_audio, which cancels any in-flight detection along with the
         # buffer it was computed from.
-        hint = self._take_detection_hint()
+        hint, detect_ms = self._take_detection_hint()
         self._release_audio()
         if self._on_thinking is not None:
             # Before the await, so the listener starts counting from the moment the buyer
@@ -420,6 +446,7 @@ class SpeechTurnPipeline:
                 UtteranceOutcome.LANGUAGE_UNSUPPORTED,
                 elapsed,
                 dropped,
+                detect_ms,
             )
         except (AdapterError, RuntimeError, ValueError):
             # Transcription is best effort. A failure loses one utterance; it must never
@@ -431,12 +458,17 @@ class SpeechTurnPipeline:
                 UtteranceOutcome.TRANSCRIBER_UNAVAILABLE,
                 elapsed,
                 dropped,
+                detect_ms,
             )
         elapsed = (perf_counter() - started) * 1000
         if best is None or not best.text.strip():
-            return self._result(segment, UtteranceOutcome.NO_SPEECH_RECOGNIZED, elapsed, dropped)
+            return self._result(
+                segment, UtteranceOutcome.NO_SPEECH_RECOGNIZED, elapsed, dropped, detect_ms
+            )
         if best.confidence < self._min_confidence:
-            return self._result(segment, UtteranceOutcome.LOW_CONFIDENCE, elapsed, dropped)
+            return self._result(
+                segment, UtteranceOutcome.LOW_CONFIDENCE, elapsed, dropped, detect_ms
+            )
         return UtteranceResult(
             segment=segment,
             outcome=UtteranceOutcome.TRANSCRIBED,
@@ -445,6 +477,7 @@ class SpeechTurnPipeline:
             confidence=best.confidence,
             transcribe_ms=elapsed,
             dropped_frames=dropped,
+            detect_language_ms=detect_ms,
         )
 
     async def _best_transcript(
@@ -477,6 +510,7 @@ class SpeechTurnPipeline:
         outcome: UtteranceOutcome,
         transcribe_ms: float,
         dropped_frames: int,
+        detect_language_ms: float | None = None,
     ) -> UtteranceResult:
         return UtteranceResult(
             segment=segment,
@@ -486,6 +520,7 @@ class SpeechTurnPipeline:
             confidence=None,
             transcribe_ms=transcribe_ms,
             dropped_frames=dropped_frames,
+            detect_language_ms=detect_language_ms,
         )
 
 

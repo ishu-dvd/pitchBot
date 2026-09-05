@@ -11,6 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from pitchbot.adapters.contracts import SynthesizedAudioChunk, TranscriptChunk
 from pitchbot.adapters.mocks import MockSpeechToTextAdapter, MockVoiceActivityDetector
+from pitchbot.config import settings as app_settings
 from pitchbot.domain import LanguageCode
 from pitchbot.main import app
 from pitchbot.simulator import router as router_module
@@ -39,6 +40,9 @@ def client() -> TestClient:
 
 @pytest.fixture(autouse=True)
 def fresh_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The audio socket is deny-by-default; these tests are about what it does once a
+    # deployment has opted in to accepting live audio.
+    monkeypatch.setattr(app_settings, "enable_real_time_audio", True)
     monkeypatch.setattr(
         router_module.simulator_service,
         "_speech_detector",
@@ -137,6 +141,49 @@ def utterance_after(socket: Any, frames: list[bytes]) -> dict[str, Any]:
         assert message["type"] == "ack"
         assert message["audio_retained"] is False
     return cast(dict[str, Any], socket.receive_json())
+
+
+def test_the_audio_socket_is_refused_when_real_time_audio_is_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default deployment does not accept a live microphone stream.
+
+    `enable_real_time_audio` was inert: `README.md` and `.env.example` both promised
+    "real-time audio disabled by default" while the socket stayed mounted and reachable.
+    An operator reading either would have believed audio ingest was off.
+    """
+
+    session_id = new_session(client, "gated-lead")
+    monkeypatch.setattr(app_settings, "enable_real_time_audio", False)
+
+    with pytest.raises(Exception):  # noqa: B017 - starlette raises on a rejected handshake
+        with client.websocket_connect(
+            f"/api/simulator/sessions/{session_id}/audio", headers=ORIGIN
+        ):
+            pass
+
+
+def test_a_disabled_socket_refuses_before_it_looks_up_the_session(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refusal must not distinguish a real session id from an invented one."""
+
+    monkeypatch.setattr(app_settings, "enable_real_time_audio", False)
+    real = new_session(client, "gated-real")
+
+    for session_id in (real, "00000000-0000-4000-8000-000000000000"):
+        with pytest.raises(Exception):  # noqa: B017 - rejected handshake
+            with client.websocket_connect(
+                f"/api/simulator/sessions/{session_id}/audio", headers=ORIGIN
+            ):
+                pass
+
+
+def test_health_reports_whether_live_audio_is_accepted(client: TestClient) -> None:
+    body = client.get("/health").json()
+    assert body["real_time_audio_enabled"] is app_settings.enable_real_time_audio
 
 
 def test_the_socket_announces_that_audio_is_not_retained(

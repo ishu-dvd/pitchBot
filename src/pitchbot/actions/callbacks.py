@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -35,6 +36,60 @@ class _PendingSchedule:
     incarnation: int
 
 
+class _CallbackLocks:
+    """One lock per callback id, created on demand and dropped when nobody holds it.
+
+    A single service-wide lock was held across every adapter call, which are network calls
+    in production. That made two sessions scheduling two *different* callbacks wait for
+    each other: measured with a 200 ms adapter, ten sessions took 2,057 ms rather than the
+    ~200 ms the work actually needs, and one dispatch batch of ten made an unrelated
+    session's `schedule` wait 2,241 ms.
+
+    Serialising two operations on the *same* callback is a real requirement - that is what
+    keeps a cancel from racing a dispatch. Serialising two operations on *different*
+    callbacks never was. Keying the lock by callback id keeps the first and drops the
+    second.
+
+    Nothing else needs a lock. Every state transition in this service runs to completion
+    without awaiting, and asyncio does not interleave code that does not await, so those
+    sections are already atomic - including the capacity check, which reads the records and
+    the pending schedules and inserts in one synchronous step.
+
+    Only ever one lock is held at a time, so there is no acquisition order to get wrong.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._holders: dict[str, int] = {}
+
+    @asynccontextmanager
+    async def acquire(self, key: str) -> AsyncIterator[None]:
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        # Counted before awaiting, so a waiter keeps the lock alive for the holder it is
+        # queued behind; dropping it on release would hand the next caller a new lock and
+        # let both run at once.
+        self._holders[key] = self._holders.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._holders[key] - 1
+            if remaining:
+                self._holders[key] = remaining
+            else:
+                del self._holders[key]
+                del self._locks[key]
+
+    @property
+    def live_keys(self) -> int:
+        """How many locks exist. Zero when the service is idle; never grows unbounded."""
+
+        return len(self._locks)
+
+
 class CallbackService:
     def __init__(
         self,
@@ -64,14 +119,14 @@ class CallbackService:
         self._callback_incarnations: dict[str, int] = {}
         self._cleanup_attempts: dict[tuple[str, int], int] = {}
         self._incarnation_sequence = 0
-        self._lock = asyncio.Lock()
+        self._locks = _CallbackLocks()
 
     async def schedule(
         self,
         request: CallbackRequest,
         context: ActionAuthorizationContext,
     ) -> CallbackRecord:
-        async with self._lock:
+        async with self._locks.acquire(request.callback_id):
             return await self._schedule(request, context)
 
     async def _schedule(
@@ -160,7 +215,7 @@ class CallbackService:
         return record
 
     async def cancel(self, callback_id: str, *, idempotency_key: str) -> CallbackRecord:
-        async with self._lock:
+        async with self._locks.acquire(callback_id):
             return await self._cancel(callback_id, idempotency_key=idempotency_key)
 
     async def _cancel(self, callback_id: str, *, idempotency_key: str) -> CallbackRecord:
@@ -218,14 +273,14 @@ class CallbackService:
         self,
         context_for: Callable[[CallbackRequest], ActionAuthorizationContext],
     ) -> tuple[CallbackRecord, ...]:
-        async with self._lock:
-            return await self._dispatch_due(context_for)
+        """Dial every callback that is due, one at a time, holding no service-wide claim.
 
-    async def _dispatch_due(
-        self,
-        context_for: Callable[[CallbackRequest], ActionAuthorizationContext],
-    ) -> tuple[CallbackRecord, ...]:
-        dispatched: list[CallbackRecord] = []
+        The due set is chosen once, synchronously. Each callback is then dispatched under
+        its own lock and re-checked first, because a batch is not a claim: a callback this
+        batch has not reached yet may be canceled or torn down while an earlier one is
+        still dialing, and it must not then be dispatched anyway.
+        """
+
         due = sorted(
             (
                 record
@@ -235,30 +290,53 @@ class CallbackService:
             ),
             key=lambda item: (item.request.run_at, item.request.callback_id),
         )
-        for record in due:
-            context = context_for(record.request)
-            decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
-            if decision.reasons:
-                updated = record.model_copy(
-                    update={
-                        "status": CallbackStatus.BLOCKED,
-                        "block_reasons": (BlockReason.POLICY_CHANGED, *decision.reasons),
-                        "updated_at": self._clock.now(),
-                    }
-                )
-            else:
-                operation_key = f"dispatch:{record.request.idempotency_key}"
-                result = await self._telephony.dial(f"lead:{record.request.lead_id}", operation_key)
-                updated = record.model_copy(
-                    update={
-                        "status": CallbackStatus.DISPATCHED,
-                        "provider_reference": result.provider_reference,
-                        "updated_at": self._clock.now(),
-                    }
-                )
-            self._records[record.request.callback_id] = updated
-            dispatched.append(updated)
+        dispatched: list[CallbackRecord] = []
+        for snapshot in due:
+            callback_id = snapshot.request.callback_id
+            async with self._locks.acquire(callback_id):
+                updated = await self._dispatch_one(callback_id, context_for)
+            if updated is not None:
+                dispatched.append(updated)
         return tuple(dispatched)
+
+    async def _dispatch_one(
+        self,
+        callback_id: str,
+        context_for: Callable[[CallbackRequest], ActionAuthorizationContext],
+    ) -> CallbackRecord | None:
+        record = self._records.get(callback_id)
+        if record is None or record.status is not CallbackStatus.SCHEDULED:
+            # Canceled, torn down, or already dispatched since the due set was taken.
+            return None
+        if record.request.run_at > self._clock.now():
+            return None
+        context = context_for(record.request)
+        decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
+        if decision.reasons:
+            updated = record.model_copy(
+                update={
+                    "status": CallbackStatus.BLOCKED,
+                    "block_reasons": (BlockReason.POLICY_CHANGED, *decision.reasons),
+                    "updated_at": self._clock.now(),
+                }
+            )
+        else:
+            operation_key = f"dispatch:{record.request.idempotency_key}"
+            result = await self._telephony.dial(f"lead:{record.request.lead_id}", operation_key)
+            if callback_id not in self._records:
+                # Teardown removed the callback while the dial was in flight. The dial
+                # itself cannot be undone, but resurrecting the record would leave a
+                # dispatched callback attached to a session that no longer exists.
+                return None
+            updated = record.model_copy(
+                update={
+                    "status": CallbackStatus.DISPATCHED,
+                    "provider_reference": result.provider_reference,
+                    "updated_at": self._clock.now(),
+                }
+            )
+        self._records[callback_id] = updated
+        return updated
 
     def get(self, callback_id: str) -> CallbackRecord:
         try:
@@ -267,116 +345,137 @@ class CallbackService:
             raise LookupError("Callback not found") from error
 
     async def remove_by_prefix(self, callback_id_prefix: str, operation_key_prefix: str) -> None:
-        async with self._lock:
-            pending_schedule_keys = tuple(
-                key
-                for key, pending in self._pending_schedules.items()
-                if pending.request.callback_id.startswith(callback_id_prefix)
+        """Tear down one session's callbacks, each under its own lock.
+
+        Teardown cancels once per callback, so holding a service-wide lock for the whole
+        sweep made ending a session with several callbacks stall every other session for
+        the sum of those cancels.
+        """
+
+        pending_schedule_keys = tuple(
+            key
+            for key, pending in self._pending_schedules.items()
+            if pending.request.callback_id.startswith(callback_id_prefix)
+        )
+        for key in pending_schedule_keys:
+            pending = self._pending_schedules.get(key)
+            if pending is None:
+                continue
+            async with self._locks.acquire(pending.request.callback_id):
+                await self._remove_pending_schedule(key)
+        callback_ids = tuple(
+            callback_id
+            for callback_id in self._records
+            if callback_id.startswith(callback_id_prefix)
+        )
+        for callback_id in callback_ids:
+            async with self._locks.acquire(callback_id):
+                await self._remove_record(callback_id)
+        self._release_failed_cancellations(callback_id_prefix)
+        if isinstance(self._scheduler, EphemeralOperationStore):
+            self._scheduler.clear_operations(operation_key_prefix)
+            self._scheduler.clear_operations(f"cleanup:{callback_id_prefix}")
+        if isinstance(self._telephony, EphemeralOperationStore):
+            self._telephony.clear_operations(f"dispatch:{operation_key_prefix}")
+
+    async def _remove_pending_schedule(self, key: str) -> None:
+        pending = self._pending_schedules.get(key)
+        if pending is None:
+            return
+        cancellation_key = self._pending_schedule_cancellations.get(key)
+        if cancellation_key is None:
+            cancellation_key = self._next_cleanup_key(
+                pending.request.callback_id,
+                pending.incarnation,
             )
-            for key in pending_schedule_keys:
-                pending = self._pending_schedules[key]
-                cancellation_key = self._pending_schedule_cancellations.get(key)
-                if cancellation_key is None:
-                    cancellation_key = self._next_cleanup_key(
-                        pending.request.callback_id,
-                        pending.incarnation,
-                    )
-                    self._pending_schedule_cancellations[key] = cancellation_key
-                try:
-                    await self._scheduler.cancel(
-                        pending.request.callback_id,
-                        cancellation_key,
-                    )
-                except PermanentAdapterError:
-                    self._pending_schedule_cancellations.pop(key, None)
-                    self._record_failed_cancellation(
-                        cancellation_key,
-                        pending.request.callback_id,
-                    )
-                    raise
-                self._pending_schedules.pop(key, None)
-                self._pending_schedule_cancellations.pop(key, None)
-                self._cleanup_attempts.pop(
-                    (pending.request.callback_id, pending.incarnation),
-                    None,
+            self._pending_schedule_cancellations[key] = cancellation_key
+        try:
+            await self._scheduler.cancel(
+                pending.request.callback_id,
+                cancellation_key,
+            )
+        except PermanentAdapterError:
+            self._pending_schedule_cancellations.pop(key, None)
+            self._record_failed_cancellation(
+                cancellation_key,
+                pending.request.callback_id,
+            )
+            raise
+        self._pending_schedules.pop(key, None)
+        self._pending_schedule_cancellations.pop(key, None)
+        self._cleanup_attempts.pop(
+            (pending.request.callback_id, pending.incarnation),
+            None,
+        )
+
+    async def _remove_record(self, callback_id: str) -> None:
+        record = self._records.get(callback_id)
+        if record is None:
+            return
+        if record.status in {
+            CallbackStatus.SCHEDULED,
+            CallbackStatus.CANCELLATION_REQUIRED,
+        }:
+            cancellation_key = self._next_cleanup_key(
+                callback_id,
+                self._callback_incarnations[callback_id],
+            )
+            self._records[callback_id] = record.model_copy(
+                update={
+                    "status": CallbackStatus.CANCELLATION_PENDING,
+                    "updated_at": self._clock.now(),
+                }
+            )
+            self._pending_cancellations[callback_id] = cancellation_key
+            try:
+                await self._scheduler.cancel(callback_id, cancellation_key)
+            except PermanentAdapterError:
+                self._records[callback_id] = record.model_copy(
+                    update={
+                        "status": CallbackStatus.CANCELLATION_REQUIRED,
+                        "updated_at": self._clock.now(),
+                    }
                 )
-            callback_ids = tuple(
-                callback_id
-                for callback_id in self._records
-                if callback_id.startswith(callback_id_prefix)
-            )
-            for callback_id in callback_ids:
-                record = self._records[callback_id]
-                if record.status in {
-                    CallbackStatus.SCHEDULED,
-                    CallbackStatus.CANCELLATION_REQUIRED,
-                }:
-                    cancellation_key = self._next_cleanup_key(
-                        callback_id,
-                        self._callback_incarnations[callback_id],
-                    )
-                    self._records[callback_id] = record.model_copy(
-                        update={
-                            "status": CallbackStatus.CANCELLATION_PENDING,
-                            "updated_at": self._clock.now(),
-                        }
-                    )
-                    self._pending_cancellations[callback_id] = cancellation_key
-                    try:
-                        await self._scheduler.cancel(callback_id, cancellation_key)
-                    except PermanentAdapterError:
-                        self._records[callback_id] = record.model_copy(
-                            update={
-                                "status": CallbackStatus.CANCELLATION_REQUIRED,
-                                "updated_at": self._clock.now(),
-                            }
-                        )
-                        self._pending_cancellations.pop(callback_id, None)
-                        self._record_failed_cancellation(cancellation_key, callback_id)
-                        raise
-                elif record.status is CallbackStatus.CANCELLATION_PENDING:
-                    cancellation_key = self._pending_cancellations[callback_id]
-                    try:
-                        await self._scheduler.cancel(callback_id, cancellation_key)
-                    except PermanentAdapterError:
-                        self._records[callback_id] = record.model_copy(
-                            update={
-                                "status": CallbackStatus.CANCELLATION_REQUIRED,
-                                "updated_at": self._clock.now(),
-                            }
-                        )
-                        self._pending_cancellations.pop(callback_id, None)
-                        self._record_failed_cancellation(cancellation_key, callback_id)
-                        raise
-                elif record.status is CallbackStatus.DISPATCHED and isinstance(
-                    self._scheduler, EphemeralOperationStore
-                ):
-                    await self._scheduler.cancel(
-                        callback_id,
-                        self._next_cleanup_key(
-                            callback_id,
-                            self._callback_incarnations[callback_id],
-                        ),
-                    )
                 self._pending_cancellations.pop(callback_id, None)
-                operation_keys = tuple(
-                    key
-                    for key, result in self._operation_results.items()
-                    if result.request.callback_id == callback_id
+                self._record_failed_cancellation(cancellation_key, callback_id)
+                raise
+        elif record.status is CallbackStatus.CANCELLATION_PENDING:
+            cancellation_key = self._pending_cancellations[callback_id]
+            try:
+                await self._scheduler.cancel(callback_id, cancellation_key)
+            except PermanentAdapterError:
+                self._records[callback_id] = record.model_copy(
+                    update={
+                        "status": CallbackStatus.CANCELLATION_REQUIRED,
+                        "updated_at": self._clock.now(),
+                    }
                 )
-                for key in operation_keys:
-                    self._operation_fingerprints.pop(key, None)
-                    self._operation_results.pop(key, None)
-                incarnation = self._callback_incarnations.pop(callback_id, None)
-                if incarnation is not None:
-                    self._cleanup_attempts.pop((callback_id, incarnation), None)
-                self._records.pop(callback_id, None)
-            self._release_failed_cancellations(callback_id_prefix)
-            if isinstance(self._scheduler, EphemeralOperationStore):
-                self._scheduler.clear_operations(operation_key_prefix)
-                self._scheduler.clear_operations(f"cleanup:{callback_id_prefix}")
-            if isinstance(self._telephony, EphemeralOperationStore):
-                self._telephony.clear_operations(f"dispatch:{operation_key_prefix}")
+                self._pending_cancellations.pop(callback_id, None)
+                self._record_failed_cancellation(cancellation_key, callback_id)
+                raise
+        elif record.status is CallbackStatus.DISPATCHED and isinstance(
+            self._scheduler, EphemeralOperationStore
+        ):
+            await self._scheduler.cancel(
+                callback_id,
+                self._next_cleanup_key(
+                    callback_id,
+                    self._callback_incarnations[callback_id],
+                ),
+            )
+        self._pending_cancellations.pop(callback_id, None)
+        operation_keys = tuple(
+            key
+            for key, result in self._operation_results.items()
+            if result.request.callback_id == callback_id
+        )
+        for key in operation_keys:
+            self._operation_fingerprints.pop(key, None)
+            self._operation_results.pop(key, None)
+        incarnation = self._callback_incarnations.pop(callback_id, None)
+        if incarnation is not None:
+            self._cleanup_attempts.pop((callback_id, incarnation), None)
+        self._records.pop(callback_id, None)
 
     def _blocked(self, request: CallbackRequest, *reasons: BlockReason) -> CallbackRecord:
         record = CallbackRecord(

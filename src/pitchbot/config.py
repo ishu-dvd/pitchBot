@@ -18,14 +18,10 @@ class Settings(BaseSettings):
     enable_telephony: bool = False
     enable_whatsapp: bool = False
     enable_external_network: bool = False
-    # INERT: nothing reads this flag. The audio socket in the simulator is always
-    # available, so the README's "real-time audio disabled by default" claim is a
-    # documented intention, not a code-enforced gate. Before any live channel ships
-    # this must either gate the audio socket or be removed. See docs/PROGRESS.md
-    # (PR 29, Deferred). The safety-relaxation knobs (require_ai_disclosure,
-    # require_dnd_check, require_calling_hours, allowlist_enabled) were removed in
-    # PR 29 because the ActionPolicy enforces those gates unconditionally and a
-    # switch that disables a mandatory safety gate is strictly less safe than none.
+    # Gates the simulator's audio WebSocket, which accepts a live microphone stream.
+    # Deny-by-default, matching every other speech capability: a deployment accepts live
+    # audio only when it says so. This was inert until PR 46 - the flag existed, the README
+    # promised it disabled real-time audio, and the socket was mounted regardless.
     enable_real_time_audio: bool = False
     enable_hosted_demo: bool = False
     enable_durable_history: bool = False

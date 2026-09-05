@@ -33,6 +33,48 @@ from pitchbot.adapters.mocks import (
 from pitchbot.domain import ActionType, ContactPolicy, JsonValue, LanguageCode, LeadTemperature
 
 
+class ConcurrencyProbeScheduleAdapter(MockSchedulerAdapter):
+    """Counts how many schedule calls are inside the adapter at the same moment.
+
+    The adapter is where the network latency lives, so overlap here is the only thing
+    that distinguishes a service whose callers wait for each other from one whose callers
+    do not.
+    """
+
+    def __init__(self, *, hold: float = 0.05) -> None:
+        super().__init__()
+        self._hold = hold
+        self.concurrent = 0
+        self.peak_concurrent = 0
+
+    async def schedule(
+        self,
+        job_key: str,
+        run_at: datetime,
+        payload: Mapping[str, JsonValue],
+        idempotency_key: str,
+    ) -> ActionResult:
+        self.concurrent += 1
+        self.peak_concurrent = max(self.peak_concurrent, self.concurrent)
+        try:
+            await asyncio.sleep(self._hold)
+            return await super().schedule(job_key, run_at, payload, idempotency_key)
+        finally:
+            self.concurrent -= 1
+
+
+class SlowDialTelephonyAdapter(MockTelephonyAdapter):
+    def __init__(self, *, hold: float = 0.05) -> None:
+        super().__init__()
+        self._hold = hold
+        self.dialing = asyncio.Event()
+
+    async def dial(self, contact_ref: str, idempotency_key: str) -> ActionResult:
+        self.dialing.set()
+        await asyncio.sleep(self._hold)
+        return await super().dial(contact_ref, idempotency_key)
+
+
 class BlockingScheduleAdapter(MockSchedulerAdapter):
     def __init__(self) -> None:
         super().__init__()
@@ -655,6 +697,94 @@ async def test_concurrent_callback_admission_cannot_exceed_capacity() -> None:
     with pytest.raises(RuntimeError, match="capacity"):
         await second
     assert len(scheduler.actions) == 1
+
+
+@pytest.mark.asyncio
+async def test_unrelated_callbacks_are_scheduled_concurrently() -> None:
+    """Two sessions scheduling different callbacks must not wait for each other.
+
+    Every adapter call in this service is a network call in production. Measured with a
+    200 ms adapter (`probe_callback_contention.py`), ten sessions each scheduling once took
+    2,057 ms - exactly ten times one call - because a single service-wide lock was held
+    across the adapter. Nothing about two different callbacks requires that.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    scheduler = ConcurrencyProbeScheduleAdapter()
+    service = CallbackService(
+        scheduler=scheduler,
+        telephony=MockTelephonyAdapter(),
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+
+    def request(identifier: str) -> CallbackRequest:
+        return CallbackRequest(
+            lead_id=uuid4(),
+            callback_id=identifier,
+            run_at=clock.now() + timedelta(minutes=1),
+            timezone="UTC",
+            idempotency_key=f"schedule-{identifier}",
+        )
+
+    results = await asyncio.gather(
+        *(service.schedule(request(f"lead-{index}"), eligible_context()) for index in range(5))
+    )
+
+    assert all(record.status is CallbackStatus.SCHEDULED for record in results)
+    assert scheduler.peak_concurrent == 5
+
+
+@pytest.mark.asyncio
+async def test_dispatching_due_callbacks_does_not_block_an_unrelated_session() -> None:
+    """A dispatch batch holds no claim over callbacks that are not in it.
+
+    The batch dials once per due callback. Holding a service-wide lock for the whole batch
+    made an unrelated session's `schedule` wait for every dial in it: measured at 2,241 ms
+    behind ten 200 ms dials, and a real telephony dial is far slower than 200 ms.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    telephony = SlowDialTelephonyAdapter()
+    service = CallbackService(
+        scheduler=MockSchedulerAdapter(),
+        telephony=telephony,
+        policy=ActionPolicy(clock=clock),
+        clock=clock,
+    )
+    for index in range(3):
+        await service.schedule(
+            CallbackRequest(
+                lead_id=uuid4(),
+                callback_id=f"due-{index}",
+                run_at=clock.now() + timedelta(minutes=1),
+                timezone="UTC",
+                idempotency_key=f"schedule-due-{index}",
+            ),
+            eligible_context(),
+        )
+    clock.advance(timedelta(minutes=1))
+
+    dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
+    await telephony.dialing.wait()
+
+    # The batch is mid-dial. A different session arriving now is not part of it.
+    newcomer = await asyncio.wait_for(
+        service.schedule(
+            CallbackRequest(
+                lead_id=uuid4(),
+                callback_id="unrelated",
+                run_at=clock.now() + timedelta(minutes=5),
+                timezone="UTC",
+                idempotency_key="schedule-unrelated",
+            ),
+            eligible_context(),
+        ),
+        timeout=0.02,
+    )
+
+    assert newcomer.status is CallbackStatus.SCHEDULED
+    assert len(await dispatch) == 3
 
 
 @pytest.mark.asyncio

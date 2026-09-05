@@ -7,6 +7,7 @@ from httpx import Response
 from starlette.testclient import TestClient
 
 from pitchbot.config import Settings
+from pitchbot.config import settings as app_settings
 from pitchbot.main import app
 from pitchbot.security import CredentialStore, RateLimiter, parse_api_keys
 from pitchbot.simulator import router as router_module
@@ -34,6 +35,17 @@ def enforcing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         router_module, "rate_limiter", RateLimiter(capacity=100, refill_per_second=100.0)
     )
+
+
+@pytest.fixture
+def audio_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Open the audio gate, so these tests exercise authentication and not the gate.
+
+    Without this the socket refuses before it ever looks at a credential, and
+    `test_websocket_without_a_key_is_closed` would pass for the wrong reason.
+    """
+
+    monkeypatch.setattr(app_settings, "enable_real_time_audio", True)
 
 
 def _create(client: TestClient, headers: dict[str, str] | None = None) -> Response:
@@ -99,7 +111,7 @@ def test_rate_limit_refuses_and_advertises_when_to_return(
     assert int(second.headers["Retry-After"]) >= 1
 
 
-@pytest.mark.usefixtures("enforcing")
+@pytest.mark.usefixtures("enforcing", "audio_enabled")
 def test_websocket_without_a_key_is_closed(client: TestClient) -> None:
     session = _create(client, headers={"X-API-Key": SECRET}).json()
     with pytest.raises(Exception):  # noqa: B017 - starlette raises on a rejected handshake
@@ -109,7 +121,7 @@ def test_websocket_without_a_key_is_closed(client: TestClient) -> None:
             pass
 
 
-@pytest.mark.usefixtures("enforcing")
+@pytest.mark.usefixtures("enforcing", "audio_enabled")
 def test_websocket_accepts_the_key_as_a_subprotocol(client: TestClient) -> None:
     """A browser cannot set a header on a WebSocket, so the key travels as a subprotocol."""
 

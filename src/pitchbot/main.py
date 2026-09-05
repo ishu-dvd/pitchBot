@@ -98,6 +98,10 @@ def health() -> dict[str, str | bool]:
         "telephony_enabled": settings.enable_telephony,
         "whatsapp_enabled": settings.enable_whatsapp,
         "external_network_enabled": settings.enable_external_network,
+        # Whether the audio WebSocket will accept a connection at all. Distinct from
+        # `speech_transcription_enabled`: a deployment can have a transcriber configured
+        # and still refuse live audio, and until this flag was wired it always accepted.
+        "real_time_audio_enabled": settings.enable_real_time_audio,
         # Which speech providers are actually running, so "why is nothing being
         # transcribed" is answerable without reading logs or configuration.
         "speech_detector": speech_providers.detector_id,
