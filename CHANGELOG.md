@@ -340,3 +340,34 @@ All notable changes to PitchBot are documented here.
   It is male and flat. `en_GB-alba-medium` (female, CC BY 4.0) and `te_IN-padmavathi-medium`
   (female, CC BY 4.0) are licence-clean alternatives; every reviewed `hi_IN` female voice is
   non-commercial, so Hindi remains an owner decision.
+### Changed (PR 49)
+
+- **The agent has a female voice, at a higher quality tier, under a better licence.**
+  `en_US-joe-medium` was male and `medium`, chosen in PR 33 for being CC0 rather than for how
+  it sounded. The documented default is now **`en_US-ljspeech-high`**: female, `high` quality,
+  and public domain. Telugu moves from `te_IN-venkatesh-medium` to the female
+  `te_IN-padmavathi-medium`, still CC-BY-4.0.
+
+  The quality tier is half the answer to "robotic": a `high` model is larger and carries more
+  prosody than a `medium` one. Piper publishes three `high` English voices and two are female,
+  so the requirement cost nothing - the new default is female **and** higher quality **and**
+  needs no attribution, where the old one did require none but was male and `medium`.
+
+- Four voices added to the reviewed licence table, each verified from its upstream MODEL_CARD:
+  `en_US-ljspeech-high`, `en_GB-cori-high` and `en_US-kristin-medium` (public domain), and
+  `en_GB-southern_english_female-low` (CC-BY-SA-4.0). `en_GB-jenny_dioco-medium` is
+  deliberately **excluded**: its card says only "See URL", and an unread licence is denied.
+
+- `PUBLIC_DOMAIN` is a distinct `VoiceLicense` rather than an alias of `CC0`. They behave
+  identically at the gate but are not the same claim - CC0 is a waiver instrument, "public
+  domain" is the publisher's assertion about the training data - and collapsing them would
+  lose which one was actually reviewed.
+
+### Unchanged (PR 49)
+
+- **Hindi still has no commercially usable voice**, including the female
+  `hi_IN-priyamvada-medium` (CC-BY-NC-SA-4.0). Telugu remains the only Indic language this
+  project can speak commercially. Hindi text is unaffected.
+- Probe audio remains flatter than the product: probes pass `noise_scale=0` /
+  `noise_w_scale=0` so a corpus item's SHA-256 can cover the exact file, and that is precisely
+  the variation that makes a voice sound alive. `speech_tts_deterministic` defaults to `False`.

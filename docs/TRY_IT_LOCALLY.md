@@ -161,12 +161,14 @@ one for you. Put `.onnx` files (and their `.onnx.json` sidecars) in a directory:
 ```bash
 mkdir -p models/piper
 cd models/piper
-# English, CC0 - usable commercially
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json
-# Telugu, CC-BY-4.0 - usable commercially with attribution
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/venkatesh/medium/te_IN-venkatesh-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/venkatesh/medium/te_IN-venkatesh-medium.onnx.json
+# English: female, `high` quality, public domain - usable commercially, no attribution.
+# The quality tier is not cosmetic: a `high` model is larger and carries more prosody than
+# a `medium` one, which is most of what makes a synthetic voice sound mechanical.
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json
+# Telugu: female, CC-BY-4.0 - usable commercially with attribution
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/padmavathi/medium/te_IN-padmavathi-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/padmavathi/medium/te_IN-padmavathi-medium.onnx.json
 cd ../..
 
 pitchbot-talk --speak
@@ -176,12 +178,32 @@ pitchbot-talk --language te --speak
 The banner prints which voice was chosen and its licence:
 
 ```
-  voice     : te_IN-venkatesh-medium (CC-BY-4.0)
+  voice     : te_IN-padmavathi-medium (CC-BY-4.0)
 ```
 
 If it says **NOT licensed for commercial use**, that is not a bug — it is most of Piper's
 catalogue, and every published Hindi voice. See the licence table in
 [`docs/BENCHMARKS.md`](BENCHMARKS.md).
+
+### Choosing a voice
+
+The reviewed options that a commercial deployment may use, all female except the first:
+
+| voice | language | quality | licence | attribution |
+|---|---|---|---|---|
+| `en_US-joe-medium` *(male)* | English | medium | CC0-1.0 | no |
+| **`en_US-ljspeech-high`** | English | **high** | public domain | no |
+| `en_GB-cori-high` | English (GB) | **high** | public domain | no |
+| `en_US-kristin-medium` | English | medium | public domain | no |
+| `en_GB-alba-medium` | English (GB) | medium | CC-BY-4.0 | yes |
+| `en_GB-southern_english_female-low` | English (GB) | low | CC-BY-SA-4.0 | yes |
+| `te_IN-padmavathi-medium` | Telugu | medium | CC-BY-4.0 | yes |
+
+**Hindi has no commercially usable voice at all.** All three published `hi_IN` voices are
+CC-BY-NC-SA or carry an unresolved licence, including the female `hi_IN-priyamvada-medium`.
+Speaking Hindi aloud commercially is an owner decision that needs a licence PitchBot cannot
+supply; set `PITCHBOT_SPEECH_TTS_ALLOW_NON_COMMERCIAL=true` only if evaluation-only use is
+what you intend. Hindi *text* is unaffected.
 
 Audio plays through whatever your OS already has (`winsound`, `afplay`, `paplay`, `aplay`).
 No audio library is installed.

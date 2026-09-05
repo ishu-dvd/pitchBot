@@ -42,6 +42,7 @@ from pitchbot.adapters.piper_tts import (
     PCM_MEDIA_TYPE,
     PIPER_AVAILABLE,
     PROVIDER_ID,
+    PUBLIC_DOMAIN,
     PiperSynthesisOptions,
     PiperTextToSpeechAdapter,
     PiperVoiceRegistry,
@@ -186,6 +187,45 @@ def test_catalog_offers_at_least_one_commercially_usable_english_voice() -> None
     }
     assert _VOICE_ID in usable
     assert KNOWN_VOICE_LICENSES[_VOICE_ID] is CC0
+
+
+def test_a_commercially_usable_female_voice_exists_at_the_high_quality_tier() -> None:
+    """The first reviewed English voice was male and `medium`, chosen for its licence.
+
+    A buyer hears the agent, not its licence, and "female, and not obviously synthetic" is a
+    product requirement rather than a preference. Both are satisfiable without weakening the
+    licence gate: these are public domain, so they need no attribution either.
+
+    Pinned so that removing the last usable option is a deliberate act.
+    """
+
+    for voice_id in ("en_US-ljspeech-high", "en_GB-cori-high"):
+        license_ = KNOWN_VOICE_LICENSES[voice_id]
+        assert license_ is PUBLIC_DOMAIN
+        assert license_.permits_commercial_use is True
+        assert license_.attribution_required is False
+        assert voice_id.endswith("-high"), "the quality tier is part of the requirement"
+
+
+def test_public_domain_is_recorded_separately_from_cc0() -> None:
+    """They behave identically at the gate, and are not the same claim.
+
+    CC0 is a waiver instrument with text to point at. "public domain" is the publisher's
+    assertion about the training data. Collapsing them would lose which was reviewed.
+    """
+
+    assert PUBLIC_DOMAIN is not CC0
+    assert PUBLIC_DOMAIN.identifier != CC0.identifier
+    assert PUBLIC_DOMAIN.permits_commercial_use == CC0.permits_commercial_use
+    assert PUBLIC_DOMAIN.attribution_required == CC0.attribution_required
+
+
+def test_telugu_offers_a_commercially_usable_female_voice() -> None:
+    """Telugu remains the only Indic language this project can speak commercially."""
+
+    license_ = KNOWN_VOICE_LICENSES["te_IN-padmavathi-medium"]
+    assert license_.permits_commercial_use is True
+    assert license_.attribution_required is True
 
 
 def test_unresolvable_license_is_treated_as_denied() -> None:
