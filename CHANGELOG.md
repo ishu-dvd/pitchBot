@@ -188,3 +188,60 @@ All notable changes to PitchBot are documented here.
   restart loses history - fine for a scrape target, not a substitute for a time-series store.
 - Telugu below the confidence floor still costs 37.7 s, because refusing on an uncertain guess
   would silence a buyer the model might have understood.
+
+### Added (PR 46)
+
+- Per-callback locking in `CallbackService`. A single service-wide lock was held across every
+  adapter call, and those are network calls, so two sessions scheduling two *different*
+  callbacks waited for each other. Measured with a 200 ms adapter, ten concurrent sessions
+  took 2,057 ms rather than the ~205 ms the work needs (**10.0x**), and an unrelated
+  `schedule` queued **2,241 ms** behind a ten-callback dispatch batch. Both are now flat at
+  one adapter call. Serialising two operations on the same callback is a real requirement and
+  is kept; serialising operations on different callbacks never was.
+- `TurnStage.DETECT_LANGUAGE` and `TurnStage.SYNTHESIZE` are recorded. Both were declared and
+  never called, which left PR 44's early-detection work invisible in production and the
+  reply-audio path - the only thing standing between the buyer and hearing a voice -
+  unmeasured. `UtteranceResult.detect_language_ms` reports the detection duration as data and
+  is `None` when no hint landed, so an abandoned detection cannot look like time well spent.
+- `real_time_audio_enabled` in `GET /health`, so which way a deployment is configured is
+  answerable without reading its environment.
+
+### Changed (PR 46)
+
+- `PITCHBOT_ENABLE_REAL_TIME_AUDIO` now gates the simulator's audio WebSocket. It was inert:
+  the flag existed, `README.md` and `.env.example` both promised "real-time audio disabled by
+  default", and the socket was mounted and reachable regardless. It is deny-by-default like
+  every other speech capability. **The browser demo must now set it**; the `pitchbot-talk`
+  voice loop captures the microphone directly and is unaffected.
+- `dispatch_due` re-reads each record under that callback's lock and refuses to dispatch
+  anything no longer `SCHEDULED`. A batch is no longer a claim over callbacks it has not
+  reached, so a cancel may land while an earlier callback in the batch is still dialing.
+
+### Fixed (PR 46)
+
+- A cancel landing mid-batch could have been silently undone by the batch's stale snapshot,
+  placing a call the buyer asked not to receive. This race only became reachable once
+  callbacks stopped sharing one lock, and it is closed by the re-read above.
+
+### Deferred (PR 46)
+
+- A dispatch batch still dials sequentially (2,054 ms for ten 200 ms dials). Parallelising it
+  is a question about what a telephony provider will accept, not a locking one, and nothing
+  here measured that.
+- Transcription is **91% of the buyer's wait** (2,417 ms of 2,646 ms in English, measured end
+  to end to the first audio frame). Unchanged by this PR and still the dominant term.
+- Access-log correlation still needs middleware: uvicorn logs after the request context exits.
+- Hindi numerals transcribe poorly enough that the budget is not extracted where the English
+  equivalent is - an STT-quality gap, not a latency one.
+- Metrics remain per process and in memory.
+
+### Found by the new metric (PR 46)
+
+- **Early language detection does not land on short utterances.** A live turn produced four
+  utterances from ~16 s of speech, none long enough for detection (2.0 s of buffered audio
+  plus a flat ~1.6 s pass) to finish before the endpoint, so every one was started and
+  abandoned. On a single long utterance it lands and works exactly as PR 44 measured
+  (`detect_language_ms` 1,644 ms; `transcribe_ms` 4,337 -> 2,266 ms with early detection on).
+  The wasted work is bounded at one pass per utterance. Whether to lower
+  `early_detection_seconds`, or skip detection for utterances unlikely to reach it, is now
+  answerable from traffic rather than guesswork - and is deliberately not changed here.
