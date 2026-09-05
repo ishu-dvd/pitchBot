@@ -1911,3 +1911,61 @@ corpus item's SHA-256 to cover the exact file and VITS duration sampling is othe
 non-deterministic. Zeroing those is exactly what removes the natural variation in timing, so
 **probe audio is flatter than the product**. `speech_tts_deterministic` defaults to `False`,
 so a real deployment never sounded as mechanical as a probe sample did.
+
+## What a better-sounding voice costs, and whether anything beats Piper (2026-09-06)
+
+Prompted by "can GitHub repos help with the voice - voicebox or something faster".
+
+Two candidates were eliminated before any code ran:
+
+- **Meta Voicebox** - the weights were never released. It is research-only, and every GitHub
+  project using the name is unrelated to Meta's model.
+- **Coqui XTTS-v2** - Coqui Public Model License, non-commercial. Fails the licence gate, and
+  the project is discontinued.
+
+That leaves **Kokoro-82M** (Apache-2.0) as the credible CPU-class alternative, and it is
+interesting for a reason beyond speed: it publishes Hindi voices, and every Piper `hi_IN`
+voice is non-commercial, which is a standing blocker in this project. Search results describe
+it as "blazing fast" and "faster than Piper" while conceding that "direct head-to-head
+benchmarks are scarce", so `probe_tts_alternatives.py` measured it here. `kokoro-onnx` was
+used rather than the PyTorch package: it installs on onnxruntime with no torch, and the whole
+environment is 179 MB.
+
+Median of 3, same sentence, both engines warmed first, CPU:
+
+| engine / voice | tier | first audio | total | realtime |
+|---|---|---:|---:|---:|
+| piper `en_US-joe-medium` *(outgoing)* | medium | **126 ms** | 362 ms | 16.5x |
+| piper `en_US-kristin-medium` | medium | 157 ms | 433 ms | 15.7x |
+| piper `en_GB-alba-medium` | medium | **182 ms** | 452 ms | 13.7x |
+| piper `en_US-ljspeech-high` | **high** | **448 ms** | 1,508 ms | 4.2x |
+| piper `en_GB-cori-high` | **high** | 477 ms | 1,496 ms | 4.3x |
+| piper `hi_IN-priyamvada-medium` | medium | 156 ms | 269 ms | 22.3x |
+| kokoro `af_heart` (en) | - | **2,683 ms** | 2,683 ms | 2.5x |
+| kokoro `hf_alpha` (hi) | - | 2,187 ms | 2,187 ms | 2.5x |
+
+### Kokoro is not faster here. It is 6x slower, and it cannot start early
+
+2,683 ms to first audio against Piper's 126 ms. The gap is worse than the totals suggest,
+because `kokoro-onnx` returns the whole clip from one call: first audio and last audio are the
+same moment. Piper yields sentence by sentence, so it can begin speaking before the rest of
+the reply exists - which is the difference between a pause and a silence in a conversation.
+
+Kokoro's Hindi remains the one thing it offers that Piper cannot: an Apache-2.0 voice for a
+language where every Piper voice is non-commercial. At 2,187 ms to first audio that is a trade
+of latency for licence, not an improvement, and it is **not taken here**. It is recorded
+because it is the only route to commercial Hindi speech found so far.
+
+### The quality tier is not free, and this corrects the PR that introduced it
+
+`high` was chosen for sounding less mechanical. It costs **+322 ms to first audio** over the
+voice it replaces (448 ms against 126 ms) and drops realtime factor from 16.5x to 4.2x, so one
+CPU serves roughly a quarter as many concurrent calls.
+
+That is a real trade and it is the owner's to make, but it must be made in the open: PRs 44,
+46 and 47 each fought for a few hundred milliseconds of exactly this kind of time, and a voice
+change that silently returns 322 ms of it would undo part of that work without saying so.
+
+The low-latency female option is **`en_GB-alba-medium`**: 182 ms, only 56 ms more than the
+outgoing male voice, CC-BY-4.0, and confirmed female at 203 Hz. The high-fidelity option is
+`en_US-ljspeech-high` at 448 ms. Both are documented; neither is hidden behind the other.

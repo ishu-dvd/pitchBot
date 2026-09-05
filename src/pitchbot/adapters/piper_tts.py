@@ -279,6 +279,11 @@ KNOWN_VOICE_LICENSES: Final[Mapping[str, VoiceLicense]] = {
     # Female and `high` quality. The tier matters as much as the speaker: a `high` model is
     # larger and carries more prosody, which is most of what "robotic" describes. Both are
     # confirmed female by measurement (236 Hz and 202 Hz median F0) rather than by name.
+    #
+    # The tier is not free. Measured on CPU, a `high` voice reaches its first audio in ~448 ms
+    # against ~126 ms for a `medium` one, and its realtime factor falls from ~16x to ~4x. That
+    # is a quality-for-latency trade an operator must make deliberately, so both tiers stay
+    # listed and `docs/TRY_IT_LOCALLY.md` prints the cost next to the choice.
     "en_US-ljspeech-high": PUBLIC_DOMAIN,
     "en_GB-cori-high": PUBLIC_DOMAIN,
     # Speaker unverified: 160 Hz median F0 falls between the adult male and female bands, so

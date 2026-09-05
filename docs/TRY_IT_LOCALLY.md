@@ -187,25 +187,38 @@ catalogue, and every published Hindi voice. See the licence table in
 
 ### Choosing a voice
 
-The reviewed options a commercial deployment may use. `median F0` is the measured median
-fundamental frequency of a synthesised sentence — a check that the "female" label is not
-merely inferred from the voice's name. Adult male speech sits near 85–155 Hz and adult female
-speech near 175–255 Hz; a voice in between is reported as unverified rather than forced into
-one or the other.
+The reviewed options a commercial deployment may use. Two measured columns, because both
+matter and they pull against each other:
 
-| voice | language | quality | median F0 | licence | attribution |
-|---|---|---|---|---|---|
-| `en_US-joe-medium` *(male)* | English | medium | 104 Hz | CC0-1.0 | no |
-| **`en_US-ljspeech-high`** *(female)* | English | **high** | **236 Hz** | public domain | no |
-| `en_GB-cori-high` *(female)* | English (GB) | **high** | 202 Hz | public domain | no |
-| `en_US-kristin-medium` *(unverified)* | English | medium | 160 Hz | public domain | no |
-| `en_GB-alba-medium` *(female)* | English (GB) | medium | 203 Hz | CC-BY-4.0 | yes |
-| `en_GB-southern_english_female-low` | English (GB) | low | — | CC-BY-SA-4.0 | yes |
-| `te_IN-padmavathi-medium` *(female)* | Telugu | medium | 197 Hz | CC-BY-4.0 | yes |
+- **median F0** — the measured median fundamental frequency of a synthesised sentence, so the
+  "female" label is not merely inferred from the voice's name. Adult male speech sits near
+  85–155 Hz and adult female near 175–255 Hz; a voice in between is reported as unverified.
+- **first audio** — how long until the buyer hears anything. This is the number a
+  conversation is judged on, and the `high` quality tier is **not free**.
+
+| voice | language | quality | median F0 | first audio | licence | attribution |
+|---|---|---|---|---|---|---|
+| `en_US-joe-medium` *(male)* | English | medium | 104 Hz | 126 ms | CC0-1.0 | no |
+| **`en_GB-alba-medium`** *(female)* | English (GB) | medium | 203 Hz | **182 ms** | CC-BY-4.0 | yes |
+| `en_US-kristin-medium` *(unverified)* | English | medium | 160 Hz | 157 ms | public domain | no |
+| **`en_US-ljspeech-high`** *(female)* | English | **high** | 236 Hz | **448 ms** | public domain | no |
+| `en_GB-cori-high` *(female)* | English (GB) | **high** | 202 Hz | 477 ms | public domain | no |
+| `en_GB-southern_english_female-low` | English (GB) | low | — | — | CC-BY-SA-4.0 | yes |
+| `te_IN-padmavathi-medium` *(female)* | Telugu | medium | 197 Hz | — | CC-BY-4.0 | yes |
+
+**Pick by what you are optimising.** `en_GB-alba-medium` is female and costs only 56 ms more
+than the outgoing male voice. `en_US-ljspeech-high` sounds markedly less mechanical — that is
+what the `high` tier buys — but adds **322 ms to every reply** and drops the realtime factor
+from 16.5× to 4.2×, so one CPU serves roughly a quarter as many concurrent calls. The download
+commands above use `ljspeech-high`; swap in `alba-medium` if latency matters more than polish.
 
 `en_US-kristin-medium` is listed as **unverified**, not female: at 160 Hz it falls inside the
 band where the measurement cannot distinguish the two, and the licence table should not carry
 a label that rests on a first name.
+
+Measurements: [`docs/BENCHMARKS.md`](BENCHMARKS.md). **Kokoro-82M was measured and rejected** —
+Apache-2.0 and it has Hindi, but 2,683 ms to first audio against Piper's 126 ms, and it cannot
+begin speaking before the whole clip exists. **Meta Voicebox** has no released weights.
 
 **Hindi has no commercially usable voice at all.** All three published `hi_IN` voices are
 CC-BY-NC-SA or carry an unresolved licence, including the female `hi_IN-priyamvada-medium`.

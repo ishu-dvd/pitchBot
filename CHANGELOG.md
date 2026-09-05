@@ -379,3 +379,24 @@ All notable changes to PitchBot are documented here.
   where male and female cannot be separated, so it is now recorded as **unverified**. The two
   voices actually recommended are unambiguous: `en_US-ljspeech-high` at 236 Hz and
   `en_GB-cori-high` at 202 Hz, against the outgoing `en_US-joe-medium` at 104 Hz.
+
+### Measured and rejected (PR 49)
+
+- **Kokoro-82M** (Apache-2.0) is the only credible open-weights CPU alternative to Piper, and
+  it publishes Hindi voices where Piper has none that are commercially usable. Measured here
+  it is **6x slower to first audio** - 2,683 ms against Piper's 126 ms in English, 2,187 ms
+  against 156 ms in Hindi - and `kokoro-onnx` returns the whole clip from one call, so it
+  cannot begin speaking before the reply is finished the way Piper's per-sentence streaming
+  can. Not adopted. Recorded because its Hindi remains the only route found so far to
+  commercial Hindi *speech*.
+- **Meta Voicebox** has no released weights; it is research-only, and GitHub projects using
+  the name are unrelated. **Coqui XTTS-v2** is non-commercial and discontinued.
+
+### Corrected before merge, second pass (PR 49)
+
+- The `high` quality tier was recommended for sounding less mechanical without measuring what
+  it costs. It costs **+322 ms to first audio** (448 ms against 126 ms) and drops the realtime
+  factor from 16.5x to 4.2x. PRs 44, 46 and 47 each fought for a few hundred milliseconds of
+  exactly this kind of time, so returning some of it silently would have undone part of that
+  work. Both tiers are now documented with their measured cost, and `en_GB-alba-medium` is
+  offered as the low-latency female option at 182 ms - 56 ms more than the outgoing male voice.
