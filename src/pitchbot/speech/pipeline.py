@@ -31,6 +31,10 @@ MIN_TRANSCRIPT_CONFIDENCE = 0.3
 
 _PCM_SAMPLE_RATE_HZ = 16_000
 _PCM_SAMPLE_WIDTH_BYTES = 2
+# The frame lengths WebRTC's detector accepts. A byte count that maps onto one of these at
+# the chunk's own sample rate is PCM of exactly that duration; anything else is encoded or
+# proxy data whose length says nothing about how long it lasts.
+_PCM_FRAME_DURATIONS_MS: frozenset[int] = frozenset((10, 20, 30))
 """The one audio shape this path carries: 16 kHz mono 16-bit PCM.
 
 Only used to turn a duration into a byte count for the early-detection threshold. Every
@@ -266,7 +270,7 @@ class SpeechTurnPipeline:
         frame = SpeechFrame(
             sequence=chunk.sequence,
             byte_count=len(chunk.data),
-            duration_ms=self._frame_duration_ms,
+            duration_ms=self._duration_of(chunk),
             is_speech=activity is not None and activity.is_speech,
             captured_at=chunk.captured_at,
         )
@@ -292,6 +296,34 @@ class SpeechTurnPipeline:
             self._release_audio()
             return None
         return await self._transcribe(segment)
+
+    def _duration_of(self, chunk: AudioChunk) -> int:
+        """How much time this frame actually represents.
+
+        Every threshold the endpointer owns - `end_silence_ms`, `max_utterance_ms`,
+        `min_speech_ms`, `barge_in_speech_ms` - is a sum of these. Getting it wrong does not
+        raise: it silently rescales the buyer's clock.
+
+        It was wrong. `frame_duration_ms` defaults to 250 because the browser client calls
+        `MediaRecorder.start(250)`, and `SimulatorService.create_speech_pipeline` never
+        overrode it, so the socket path counted a 30 ms microphone frame as 250 ms - **8.3x**.
+        `max_utterance_ms` then fired after 80 frames, which is 2.4 s of real speech rather
+        than 20 s, and a buyer speaking one continuous sentence was cut into fragments, each
+        answered as though it were a separate remark. Measured live: 8.4 s of continuous
+        English became **four** utterances and four replies.
+
+        Mono 16-bit PCM carries its own duration, so it is derived rather than assumed. The
+        result is only trusted when it is a frame length WebRTC's detector accepts (10, 20 or
+        30 ms), which is exactly the set for which "these bytes are PCM at this rate" is a
+        safe reading. Anything else - an encoded frame from `MediaRecorder`, a length proxy
+        from a benchmark source - keeps the configured value, because its byte count says
+        nothing about its duration.
+        """
+
+        measured = len(chunk.data) / _PCM_SAMPLE_WIDTH_BYTES / chunk.sample_rate_hz * 1_000
+        if measured.is_integer() and int(measured) in _PCM_FRAME_DURATIONS_MS:
+            return int(measured)
+        return self._frame_duration_ms
 
     def _buffer_audio(self, chunk: AudioChunk) -> None:
         if self._oversize or self._transcriber is None:

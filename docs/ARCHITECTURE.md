@@ -658,3 +658,5 @@ the model''s words fill headings and bullets, and every connecting sentence is f
 in `deliberation/artifacts.py`, so a reviewer can see exactly which parts a model influenced.
 Both are labelled a draft in the buyer''s language, and the scaffolding contains no digits at
 all — so a price or a date cannot appear in one by construction.
+
+The socket path derives each frame's duration from the frame itself. `SpeechTurnPipeline` treats mono 16-bit PCM as self-describing — bytes / (rate x 2) — and trusts the result only when it lands on a frame length WebRTC's detector accepts (10, 20 or 30 ms). Anything else, such as an encoded `MediaRecorder` chunk or a benchmark length proxy, keeps the configured `frame_duration_ms`. This matters because every endpointing threshold (`min_speech_ms`, `barge_in_speech_ms`, `end_silence_ms`, `max_utterance_ms`) is a sum of frame durations: assuming one client's 250 ms timeslice made the endpointer 8.3x fast for a 30 ms microphone frame, cutting continuous speech into fragments that were each answered separately.

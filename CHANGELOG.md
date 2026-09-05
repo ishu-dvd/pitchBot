@@ -245,3 +245,58 @@ All notable changes to PitchBot are documented here.
   The wasted work is bounded at one pass per utterance. Whether to lower
   `early_detection_seconds`, or skip detection for utterances unlikely to reach it, is now
   answerable from traffic rather than guesswork - and is deliberately not changed here.
+
+### Fixed (PR 47)
+
+- **The endpointer counted a 30 ms microphone frame as 250 ms.**
+  `SpeechTurnPipeline.frame_duration_ms` defaults to 250 because the browser client calls
+  `MediaRecorder.start(250)`, and `SimulatorService.create_speech_pipeline` never passed a
+  value, so every threshold the endpointer owns was scaled by **8.3x** on the socket path:
+  `max_utterance_ms` fired after 2.4 s of real speech rather than 20 s, `end_silence_ms` after
+  90 ms rather than 700, and `barge_in_speech_ms` after 60 ms rather than 300.
+
+  A buyer speaking one continuous sentence was cut off, the agent took the floor, the buyer's
+  continued speech was classified as barge-in, and the cycle repeated. Measured live on 8.4 s
+  of one English sentence: **four utterances and four replies became one**, the transcript went
+  from *"We run a retail shop and hide our butt."* plus three fragments to the whole sentence,
+  transcription fell from **16,951 ms to 1,866 ms** (9.1x), the budget was extracted where it
+  previously was not, and `detect_language` recorded for the first time.
+
+  Frame duration is now derived from the frame: mono 16-bit PCM carries its own duration, and
+  it is trusted only when it lands on a length WebRTC's detector accepts (10, 20 or 30 ms).
+  Encoded `MediaRecorder` frames and benchmark length-proxies keep the configured value,
+  because their byte count says nothing about how long they last.
+
+  `dropped_frames` was 0 throughout and nothing was logged - the only symptom was a
+  conversation that behaved badly. The suite passed because every existing turn-taking test
+  uses 1,024-byte frames, which is 32 ms of PCM and therefore not measurable, so all of them
+  were unintentionally testing the fallback path.
+
+### Retracted (PR 47)
+
+- PR 46 reported that **early language detection does not land on short utterances**, and that
+  short utterances are what a real endpointer produces. Both halves were artefacts of the bug
+  above: the short utterances were manufactured by a 2.4 s cutoff. With frame duration
+  measured, the same speech is one utterance and detection lands on the first turn. No tuning
+  of `early_detection_seconds` is called for.
+
+### Measured and not taken (PR 47)
+
+- **Whisper's remaining decoding knobs are already exhausted.** `temperature`,
+  `without_timestamps` and `condition_on_previous_text` all move latency by less than 3%; the
+  temperature fallback ladder never fires. `without_timestamps` additionally *changed* the
+  Hindi transcript, and a latency win that changes what the buyer said is not a win.
+- **Transcription cost is nearly flat in utterance length** - 1,833 ms for 3.2 s of audio
+  against 2,245 ms for 16.1 s, because Whisper pads every clip to a 30 s window. The number of
+  utterances drives the bill, not their length.
+- **`base` is 2.9x faster than `small` on English** (681 ms vs 1,979 ms) but 3.5 points worse
+  on CER, and returns Arabic script for Hindi. A per-language model choice stays open for
+  English; it is not taken on one sentence of evidence.
+
+### Deferred (PR 47)
+
+- The browser sends WebM/Opus, which WebRTC's detector cannot process at all - it accepts only
+  10/20/30 ms PCM. The browser path therefore still depends on a detector that can, and that
+  mismatch is untouched here.
+- Transcription remains the dominant term in a turn, now that it is measured once per sentence
+  rather than four times.

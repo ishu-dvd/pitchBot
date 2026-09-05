@@ -2358,3 +2358,87 @@ So the feature works, and works on the wrong shape of input. The waste is bounde
 per utterance, and the tuning question that follows is now answerable from traffic. Left
 alone in this PR: changing `early_detection_seconds` on the strength of one observation would
 repeat the mistake this metric exists to prevent.
+
+## PR 47 - One sentence, four replies: the endpointer's clock was 8.3x fast
+
+The PR started as an attack on the dominant latency term - transcription, ~91% of the buyer's
+wait in every measurement so far. It ended somewhere else, having found that the running
+product was cutting buyers off mid-sentence.
+
+### Two hypotheses, measured and abandoned
+
+**Whisper's remaining decoding knobs.** The adapter already sets `beam_size=1`,
+`compute_type=int8`, `vad_filter=False`. `temperature` looked promising: it is a fallback
+ladder that re-decodes a segment up to six times when confidence thresholds fail, which is
+what hard audio should trigger. It never fires. All variants within 3% of baseline on both
+languages, and `without_timestamps` *changed* the Hindi transcript.
+
+**Endpointing configuration.** With four utterances coming out of one sentence, the obvious
+suspects were `end_silence_ms` (700) and the VAD aggressiveness. Measured: the largest
+intra-sentence silence gap in that audio is **360 ms**, and in the exact live sentence, zero
+gaps at the shipped mode. The sentence could not split at any setting. Both dials were
+innocent.
+
+### The actual cause
+
+`SpeechTurnPipeline.frame_duration_ms` defaults to **250 ms**, because the browser client
+calls `MediaRecorder.start(250)`. `SimulatorService.create_speech_pipeline` never passed a
+value. `cli/talk.py` does - it passes `FRAME_MS` - which is why the CLI voice loop was fine
+and only the socket path was broken.
+
+Every threshold the endpointer owns is a sum of frame durations, so counting a 30 ms frame as
+250 ms rescaled the buyer's clock by 8.3x:
+
+| threshold | configured | fired after | real audio |
+|---|---:|---:|---:|
+| `min_speech_ms` | 200 | 1 frame | 30 ms |
+| `barge_in_speech_ms` | 300 | 2 frames | 60 ms |
+| `end_silence_ms` | 700 | 3 frames | 90 ms |
+| `max_utterance_ms` | 20,000 | 80 frames | **2.4 s** |
+
+A buyer speaking continuously was cut off at 2.4 s, the agent took the floor, the continued
+speech became barge-in, and it repeated.
+
+### Live, before and after
+
+8.4 s of one English sentence at a true 30 ms cadence, real VAD, real transcriber, real voice:
+
+|  | before | after |
+|---|---|---|
+| utterances / replies | 4 / 4 | 1 / 1 |
+| transcript | "We run a retail shop and hide our butt." + 3 fragments | the whole sentence |
+| transcription | 16,951 ms | **1,866 ms** |
+| `detect_language` | never recorded | recorded, first turn |
+| budget extracted | no | yes |
+
+`dropped_frames` was 0 and nothing was logged. The only symptom was a conversation that
+behaved badly - which is the kind of defect no amount of green CI finds.
+
+### Why the suite missed it
+
+Every turn-taking test builds 1,024-byte frames. That is 32 ms of PCM, which is not a length
+WebRTC accepts and therefore not measurable, so all of them were unintentionally exercising
+the fallback path. The fix trusts a measured duration only when it lands on 10, 20 or 30 ms -
+exactly the set for which "these bytes are PCM at this rate" is a safe reading - so encoded
+frames and benchmark length-proxies keep the configured value.
+
+### What this retracts
+
+PR 46 concluded that early detection "does not land on short utterances, and short utterances
+are what a real endpointer produces from ordinary speech." The short utterances were
+manufactured by the 2.4 s cutoff. Detection now lands on the first turn, and the tuning
+question PR 46 raised does not exist. The metric still earned its place: it made a bug visible
+that had been mistaken for a property of the world.
+
+### Validation
+
+1,119 passed / 19 skipped (was 1,116). 1,069 / 69 clean venv. ruff, format, `mypy src tests`
+clean. 4/4 mutations caught. Live server before and after.
+
+### Deferred
+
+- The browser sends WebM/Opus, which WebRTC's detector cannot process at all. The browser path
+  depends on a detector that can, and that mismatch is untouched.
+- Transcription is still the dominant term - now paid once per sentence instead of four times.
+- `base` is 2.9x faster than `small` on English but 3.5 CER points worse and unusable for
+  Hindi. A per-language model choice stays open; one sentence is not enough evidence.
