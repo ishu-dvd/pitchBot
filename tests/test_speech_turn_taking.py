@@ -243,6 +243,83 @@ async def run(engine: SpeechTurnPipeline, count: int, *, size: int = 1_024) -> l
     return [await engine.push(chunk(index, size=size)) for index in range(count)]
 
 
+# --------------------------------------------------------------------------------------
+# A frame's duration is measured, not assumed
+# --------------------------------------------------------------------------------------
+
+PCM_30MS_BYTES = 960  # 30 ms of 16 kHz mono 16-bit PCM, the shape microphone.py captures
+
+
+def measuring_pipeline(*, decisions: list[bool], frame_duration_ms: int) -> SpeechTurnPipeline:
+    return SpeechTurnPipeline(
+        detector=MockVoiceActivityDetector(decisions=list(decisions)),
+        transcriber=_ScriptedTranscriber([]),
+        language=LanguageCode.ENGLISH,
+        config=TurnTakingConfig(
+            min_speech_ms=200,
+            end_silence_ms=700,
+            max_utterance_ms=20_000,
+            barge_in_speech_ms=300,
+        ),
+        frame_duration_ms=frame_duration_ms,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pcm_frames_are_timed_by_their_own_length_not_the_configured_default() -> None:
+    """The bug that cut buyers off mid-sentence.
+
+    `frame_duration_ms` defaults to 250 because the browser calls `MediaRecorder.start(250)`,
+    and `create_speech_pipeline` never overrode it. A 30 ms microphone frame was therefore
+    counted as 250 ms - 8.3x - so `max_utterance_ms` fired after 80 frames, which is 2.4 s of
+    real speech rather than 20 s. Measured live, 8.4 s of continuous English became four
+    utterances, each answered as a separate remark.
+
+    100 frames is well past that 80-frame cliff and nowhere near 20 s of real audio.
+    """
+
+    engine = measuring_pipeline(decisions=[True] * 100, frame_duration_ms=250)
+    results = await run(engine, 100, size=PCM_30MS_BYTES)
+
+    assert all(getattr(item, "utterance", None) is None for item in results), (
+        "3 s of continuous speech must not be endpointed by a 20 s maximum"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_frame_whose_length_is_not_pcm_keeps_the_configured_duration() -> None:
+    """An encoded frame's byte count says nothing about how long it lasts.
+
+    `MediaRecorder` sends WebM/Opus, and the benchmark sources send length proxies. Neither
+    can be measured, so both must keep using the value the caller configured.
+    """
+
+    # 1 KiB is 32 ms of PCM - not a frame length WebRTC accepts - so it is not treated as
+    # measurable, and the configured 250 ms stands. 80 x 250 ms reaches the 20 s maximum.
+    engine = measuring_pipeline(decisions=[True] * 80, frame_duration_ms=250)
+    results = await run(engine, 80, size=1_024)
+
+    assert any(getattr(item, "utterance", None) is not None for item in results), (
+        "an unmeasurable frame must still be counted at the configured duration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_trailing_silence_closes_a_pcm_utterance_at_its_real_duration() -> None:
+    """`end_silence_ms` is a sum of frame durations too, so it was 8.3x short as well."""
+
+    # 20 frames of speech, then silence. At 30 ms a 700 ms threshold needs 24 silent frames;
+    # 20 of them must not be enough.
+    engine = measuring_pipeline(decisions=[True] * 20 + [False] * 20, frame_duration_ms=250)
+    results = await run(engine, 40, size=PCM_30MS_BYTES)
+    assert all(getattr(item, "utterance", None) is None for item in results)
+
+    # Four more silent frames crosses 700 ms of real silence and closes it.
+    engine = measuring_pipeline(decisions=[True] * 20 + [False] * 24, frame_duration_ms=250)
+    results = await run(engine, 44, size=PCM_30MS_BYTES)
+    assert any(getattr(item, "utterance", None) is not None for item in results)
+
+
 @pytest.mark.asyncio
 async def test_an_endpointed_utterance_is_transcribed_once() -> None:
     transcript = TranscriptChunk(

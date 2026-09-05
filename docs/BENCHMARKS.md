@@ -1600,6 +1600,123 @@ existed there was no way to see which case a deployment was actually in. Whether
 reach the threshold, is now a question that can be answered from traffic instead of guessed.
 Not changed here: it is a tuning decision that deserves its own measurement.
 
+> **Retracted (PR 47).** "Short ones are what a real endpointer produces from ordinary
+> speech" was wrong, and it was wrong because of a bug rather than because of speech. The
+> socket path counted every 30 ms frame as 250 ms, so `max_utterance_ms` fired after 2.4 s of
+> real audio and *manufactured* the short utterances this paragraph generalised from. With
+> the frame duration measured rather than assumed, the same 8.4 s of speech is one utterance,
+> and early detection lands on the first turn. No tuning of `early_detection_seconds` is
+> called for. The metric still did its job - it made a bug visible that had been mistaken for
+> a property of the world.
+
+## One sentence, four replies: the endpointer's clock was 8.3x fast (2026-09-05)
+
+`SpeechTurnPipeline.frame_duration_ms` defaults to **250 ms** because the browser client
+calls `MediaRecorder.start(250)`, and `SimulatorService.create_speech_pipeline` never passed
+a value. Every threshold the endpointer owns is a sum of frame durations:
+
+| threshold | configured | reached after (30 ms PCM frames) | real audio |
+|---|---:|---:|---:|
+| `min_speech_ms` | 200 | 1 frame | 30 ms |
+| `barge_in_speech_ms` | 300 | 2 frames | 60 ms |
+| `end_silence_ms` | 700 | 3 frames | 90 ms |
+| `max_utterance_ms` | 20,000 | 80 frames | **2.4 s** |
+
+So a buyer speaking continuously was cut off after 2.4 s, the agent took the floor, the
+buyer's continued speech was classified as barge-in, and the cycle repeated. Measured against
+a live server with `webrtc` + `faster-whisper` + `piper`, feeding 8.4 s of one English
+sentence at a true 30 ms cadence:
+
+| | before | after |
+|---|---|---|
+| utterances | **4** | **1** |
+| replies | 4, buyer interrupted 3x mid-clause | 1 |
+| transcript | *"We run a retail shop and hide our butt."* + 3 fragments | *"We run a retail shop in Hyderabad, and our budget is around 50,000 rupees for the first phase of the website."* |
+| transcription | 4,510 + 4,875 + 3,327 + 3,238 = **16,951 ms** | **1,866 ms** (9.1x less) |
+| `detect_language` recorded | never | **yes, first turn** |
+| budget extracted | no | yes |
+
+`dropped_frames` was 0 throughout: nothing failed, and nothing logged. The only symptom was a
+conversation that behaved badly.
+
+Three earlier findings were consequences of this one, and are corrected above and below:
+
+- PR 46's "early detection does not land on short utterances" — the short utterances were
+  manufactured by this bug.
+- The four-fragment transcript quoted in PR 46 as evidence about endpointing.
+- The apparent need to tune `end_silence_ms` or the VAD aggressiveness.
+
+The fix measures rather than assumes: mono 16-bit PCM carries its own duration, so it is
+computed from the byte count and trusted only when it lands on a frame length WebRTC's
+detector accepts (10, 20 or 30 ms) — exactly the set for which "these bytes are PCM at this
+rate" is safe to read. Encoded frames from `MediaRecorder`, and the length-proxy frames the
+benchmark sources emit, keep the configured value, because their byte count says nothing
+about how long they last.
+
+### Why the tests did not catch it
+
+`tests/test_speech_turn_taking.py` builds frames of 1,024 bytes, which is 32 ms of PCM — not
+a length WebRTC accepts, and therefore not measurable. Every existing test was, without
+intending to be, a test of the fallback path. That is why the whole suite passed while the
+running product cut buyers off mid-sentence, and it is the argument for the live checks this
+project keeps insisting on.
+
+## Two hypotheses that were wrong first (2026-09-05)
+
+Both were measured and abandoned before the frame-duration bug was found. They are recorded
+because each closes off a direction that looks obviously worth trying.
+
+### Whisper's remaining decoding knobs are already taken
+
+`probe_transcription_knobs.py`. The adapter sets `beam_size=1`, `compute_type=int8` and
+`vad_filter=False`, and leaves `temperature`, `without_timestamps` and
+`condition_on_previous_text` at their defaults. `temperature` looked like a hidden cost: it is
+a fallback ladder that re-decodes a whole segment up to six times when confidence thresholds
+fail, which is exactly what audio the model finds hard should trigger.
+
+It does not trigger. Every variant landed within 3% of baseline, on both English and Hindi:
+
+| variant | en | hi |
+|---|---:|---:|
+| baseline (shipped) | 1,900 ms | 2,447 ms |
+| `temperature=0` only | 1,882 ms (0.99x) | 2,426 ms (0.99x) |
+| `without_timestamps` | 1,900 ms (1.00x) | 2,376 ms (0.97x) |
+| `condition_on_previous_text=False` | 1,878 ms (0.99x) | 2,421 ms (0.99x) |
+| all three | 1,913 ms (1.01x) | 2,393 ms (0.98x) |
+
+No knob is worth taking, and none is worth the risk: `without_timestamps` moved Hindi CER from
+20.7% to 17.2%, which is a *transcript change*, and a latency win that changes what the buyer
+is recorded as having said is not a win.
+
+### Transcription cost is nearly flat in utterance length
+
+`probe_transcription_cost_shape.py`. Whisper pads every clip to a 30 s window before the
+encoder runs, so cost is dominated by a fixed term:
+
+| audio | median | per audio second |
+|---|---:|---:|
+| 3.2 s | 1,833 ms | 579 ms |
+| 5.7 s | 1,908 ms | 335 ms |
+| 9.2 s | 2,030 ms | 221 ms |
+| 16.1 s | 2,245 ms | 139 ms |
+
+A 5x longer utterance costs 22% more. **The number of utterances is what drives the bill, not
+their length** — which is why the frame-duration bug was expensive as well as rude: four
+utterances where there should have been one is roughly four times the transcription work.
+
+The same probe priced the model sizes, and confirms `small` is the floor for anything but
+English:
+
+| model | en | | hi | | script |
+|---|---:|---:|---:|---:|---|
+| `tiny` | 418 ms | 34.8% CER | 2,310 ms | 103.4% CER | 0% Devanagari |
+| `base` | 681 ms | 20.9% CER | 764 ms | 87.9% CER | 0% Devanagari (returns Arabic script) |
+| `small` | 1,979 ms | 17.4% CER | 2,615 ms | 20.7% CER | 100% Devanagari |
+
+`base` is 2.9x faster than `small` on English but 3.5 points worse, and produces Arabic script
+for Hindi — so a per-language model choice remains possible for English only, and is not taken
+here on the strength of one sentence.
+
 ## One slow callback blocked every other session (2026-09-05)
 
 `probe_callback_contention.py`. `CallbackService` guarded all of its state with a single
