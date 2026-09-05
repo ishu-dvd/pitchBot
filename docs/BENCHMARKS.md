@@ -1853,19 +1853,39 @@ each voice at a **quality tier**, and a `high` model is larger and carries more 
 `medium` one - so "robotic" is partly the tier. The catalogue (`voices.json`, 244 KB, fetched
 2026-09-06) has exactly three `high` English voices; two of them are female.
 
-Licences verified from each voice's upstream MODEL_CARD, not from the catalogue index:
+Licences verified from each voice's upstream MODEL_CARD, not from the catalogue index.
+`median F0` is measured (see below), because "female" was otherwise inferred from a first name:
 
-| voice | quality | licence | commercial | attribution |
-|---|---|---|---|---|
-| `en_US-joe-medium` *(previous, male)* | medium | CC0-1.0 | yes | no |
-| **`en_US-ljspeech-high`** | **high** | **public domain** | **yes** | **no** |
-| `en_GB-cori-high` | **high** | public domain | yes | no |
-| `en_US-kristin-medium` | medium | public domain | yes | no |
-| `en_GB-alba-medium` | medium | CC-BY-4.0 | yes | yes |
-| `en_GB-southern_english_female-low` | low | CC-BY-SA-4.0 | yes | yes |
-| `te_IN-padmavathi-medium` | medium | CC-BY-4.0 | yes | yes |
-| `hi_IN-priyamvada-medium` | medium | CC-BY-NC-SA-4.0 | **NO** | yes |
-| `en_GB-jenny_dioco-medium` | medium | *"See URL"* - unresolved | **NO** | - |
+| voice | quality | median F0 | licence | commercial | attribution |
+|---|---|---|---|---|---|
+| `en_US-joe-medium` *(previous, male)* | medium | 104 Hz | CC0-1.0 | yes | no |
+| **`en_US-ljspeech-high`** *(female)* | **high** | **236 Hz** | **public domain** | **yes** | **no** |
+| `en_GB-cori-high` *(female)* | **high** | 202 Hz | public domain | yes | no |
+| `en_US-kristin-medium` *(unverified)* | medium | 160 Hz | public domain | yes | no |
+| `en_GB-alba-medium` *(female)* | medium | 203 Hz | CC-BY-4.0 | yes | yes |
+| `en_GB-southern_english_female-low` | low | - | CC-BY-SA-4.0 | yes | yes |
+| `te_IN-padmavathi-medium` *(female)* | medium | 197 Hz | CC-BY-4.0 | yes | yes |
+| `hi_IN-priyamvada-medium` *(female)* | medium | 204 Hz | CC-BY-NC-SA-4.0 | **NO** | yes |
+| `en_GB-jenny_dioco-medium` | medium | - | *"See URL"* - unresolved | **NO** | - |
+
+### The label was checked, and one of them did not survive it
+
+`verify_voice_pitch.py` estimates the fundamental frequency of a synthesised sentence per
+voiced frame by autocorrelation and reports the median. Adult male speech sits near 85-155 Hz
+and adult female speech near 175-255 Hz, which is enough to check a *label* - it cannot
+establish a speaker's identity and is not meant to.
+
+Six of the seven labels held. **`en_US-kristin-medium` did not**: at 160 Hz it falls inside
+the band where the measurement cannot separate the two, so it is recorded as **unverified**
+rather than female. The label had come from the first name, which is not evidence.
+
+The first version of that script also had to be corrected: it set the male ceiling and the
+female floor to the same 165 Hz, which made its own "ambiguous" verdict unreachable and would
+have reported this borderline voice as confidently *male*. A check that cannot express
+uncertainty manufactures it in the opposite direction.
+
+The two voices actually recommended are unambiguous - `en_US-ljspeech-high` at 236 Hz and
+`en_GB-cori-high` at 202 Hz, against the outgoing `en_US-joe-medium` at 104 Hz.
 
 So the requirement was satisfiable without any trade: female **and** a higher quality tier
 **and** a better licence than the voice it replaces. `public domain` is recorded as its own

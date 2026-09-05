@@ -371,3 +371,11 @@ All notable changes to PitchBot are documented here.
 - Probe audio remains flatter than the product: probes pass `noise_scale=0` /
   `noise_w_scale=0` so a corpus item's SHA-256 can cover the exact file, and that is precisely
   the variation that makes a voice sound alive. `speech_tts_deterministic` defaults to `False`.
+
+### Corrected before merge (PR 49)
+
+- `en_US-kristin-medium` was listed as **female** on the strength of its first name. Measuring
+  the synthesised audio put its median fundamental frequency at **160 Hz**, inside the band
+  where male and female cannot be separated, so it is now recorded as **unverified**. The two
+  voices actually recommended are unambiguous: `en_US-ljspeech-high` at 236 Hz and
+  `en_GB-cori-high` at 202 Hz, against the outgoing `en_US-joe-medium` at 104 Hz.

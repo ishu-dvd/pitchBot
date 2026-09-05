@@ -277,9 +277,12 @@ voice through a gate on the strength of a document nobody has read.
 KNOWN_VOICE_LICENSES: Final[Mapping[str, VoiceLicense]] = {
     # --- English, commercially usable -------------------------------------------------
     # Female and `high` quality. The tier matters as much as the speaker: a `high` model is
-    # larger and carries more prosody, which is most of what "robotic" describes.
+    # larger and carries more prosody, which is most of what "robotic" describes. Both are
+    # confirmed female by measurement (236 Hz and 202 Hz median F0) rather than by name.
     "en_US-ljspeech-high": PUBLIC_DOMAIN,
     "en_GB-cori-high": PUBLIC_DOMAIN,
+    # Speaker unverified: 160 Hz median F0 falls between the adult male and female bands, so
+    # the licence table does not claim a gender it cannot support.
     "en_US-kristin-medium": PUBLIC_DOMAIN,
     "en_US-joe-medium": CC0,
     "en_US-libritts_r-medium": CC_BY_4_0,

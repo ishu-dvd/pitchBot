@@ -187,17 +187,25 @@ catalogue, and every published Hindi voice. See the licence table in
 
 ### Choosing a voice
 
-The reviewed options that a commercial deployment may use, all female except the first:
+The reviewed options a commercial deployment may use. `median F0` is the measured median
+fundamental frequency of a synthesised sentence — a check that the "female" label is not
+merely inferred from the voice's name. Adult male speech sits near 85–155 Hz and adult female
+speech near 175–255 Hz; a voice in between is reported as unverified rather than forced into
+one or the other.
 
-| voice | language | quality | licence | attribution |
-|---|---|---|---|---|
-| `en_US-joe-medium` *(male)* | English | medium | CC0-1.0 | no |
-| **`en_US-ljspeech-high`** | English | **high** | public domain | no |
-| `en_GB-cori-high` | English (GB) | **high** | public domain | no |
-| `en_US-kristin-medium` | English | medium | public domain | no |
-| `en_GB-alba-medium` | English (GB) | medium | CC-BY-4.0 | yes |
-| `en_GB-southern_english_female-low` | English (GB) | low | CC-BY-SA-4.0 | yes |
-| `te_IN-padmavathi-medium` | Telugu | medium | CC-BY-4.0 | yes |
+| voice | language | quality | median F0 | licence | attribution |
+|---|---|---|---|---|---|
+| `en_US-joe-medium` *(male)* | English | medium | 104 Hz | CC0-1.0 | no |
+| **`en_US-ljspeech-high`** *(female)* | English | **high** | **236 Hz** | public domain | no |
+| `en_GB-cori-high` *(female)* | English (GB) | **high** | 202 Hz | public domain | no |
+| `en_US-kristin-medium` *(unverified)* | English | medium | 160 Hz | public domain | no |
+| `en_GB-alba-medium` *(female)* | English (GB) | medium | 203 Hz | CC-BY-4.0 | yes |
+| `en_GB-southern_english_female-low` | English (GB) | low | — | CC-BY-SA-4.0 | yes |
+| `te_IN-padmavathi-medium` *(female)* | Telugu | medium | 197 Hz | CC-BY-4.0 | yes |
+
+`en_US-kristin-medium` is listed as **unverified**, not female: at 160 Hz it falls inside the
+band where the measurement cannot distinguish the two, and the licence table should not carry
+a label that rests on a first name.
 
 **Hindi has no commercially usable voice at all.** All three published `hi_IN` voices are
 CC-BY-NC-SA or carry an unresolved licence, including the female `hi_IN-priyamvada-medium`.
