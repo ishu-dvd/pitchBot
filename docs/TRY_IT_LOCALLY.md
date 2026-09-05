@@ -318,12 +318,19 @@ correctly. The model is opt-in for exactly this reason.
 
 ```bash
 pip install -e ".[piper-tts,faster-whisper,webrtc-vad]"
+$env:PITCHBOT_ENABLE_REAL_TIME_AUDIO = "true"   # bash: export PITCHBOT_ENABLE_REAL_TIME_AUDIO=true
 uvicorn pitchbot.main:app --reload
 ```
 
 Open <http://127.0.0.1:8000>. This is the full path: microphone in, voice activity
 detection, transcription, the same conversation engine, and the reply spoken back over the
 audio socket.
+
+The flag is required. The audio socket accepts a live microphone stream, so it is
+deny-by-default like every other speech capability — without it the socket refuses the
+handshake and the page reports that it could not connect. `GET /health` reports
+`real_time_audio_enabled` so you can check which way a server is configured. The
+`pitchbot-talk` loop in section 4 captures the microphone directly and is unaffected.
 
 ---
 

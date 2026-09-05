@@ -201,6 +201,54 @@ async def test_a_finished_detection_reaches_transcription_as_a_hint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_landed_detection_reports_how_long_it_took() -> None:
+    """The duration is data on the result; the router is what turns it into a metric.
+
+    Without it, the one thing an operator cannot see is whether this feature is working:
+    a detection that never lands leaves transcription paying the auto-detect cost the
+    feature exists to remove, and looks identical to one that lands.
+    """
+
+    transcriber = RecordingTranscriber(
+        detected=DetectedLanguage(language=LanguageCode.ENGLISH, probability=0.95),
+        detect_delay_s=0.01,
+    )
+    pipeline = _pipeline(transcriber, early_seconds=0.5)
+    await _speak(pipeline, 4)
+    await asyncio.sleep(0.05)  # let the detection task complete
+    utterance = await _finish(pipeline, start=100)
+    assert utterance is not None
+    assert utterance.detect_language_ms is not None
+    assert utterance.detect_language_ms >= 10.0
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_detection_reports_no_duration() -> None:
+    """It contributed nothing, so reporting a time would make wasted work look productive."""
+
+    transcriber = RecordingTranscriber(
+        detected=DetectedLanguage(language=LanguageCode.ENGLISH, probability=0.95),
+        detect_delay_s=30.0,
+    )
+    pipeline = _pipeline(transcriber, early_seconds=0.5)
+    await _speak(pipeline, 4)
+    await asyncio.sleep(0)
+    utterance = await _finish(pipeline, start=100)
+    assert utterance is not None
+    assert utterance.detect_language_ms is None
+
+
+@pytest.mark.asyncio
+async def test_a_detection_that_never_ran_reports_no_duration() -> None:
+    transcriber = PlainTranscriber()
+    pipeline = _pipeline(transcriber, early_seconds=0.5)
+    await _speak(pipeline, 4)
+    utterance = await _finish(pipeline, start=100)
+    assert utterance is not None
+    assert utterance.detect_language_ms is None
+
+
+@pytest.mark.asyncio
 async def test_an_unfinished_detection_is_abandoned_rather_than_waited_for() -> None:
     """The utterance has already ended, so waiting would add to the very gap this shrinks."""
 

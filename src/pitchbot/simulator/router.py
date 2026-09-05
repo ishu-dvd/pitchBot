@@ -342,6 +342,18 @@ def replay(scenario_id: str) -> dict[str, object]:
 
 @router.websocket("/sessions/{session_id}/audio")
 async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
+    if not settings.enable_real_time_audio:
+        # Read through the module rather than captured at import, so the flag reflects the
+        # running configuration and not a startup snapshot.
+        #
+        # This endpoint accepts a live microphone stream. Until now the flag that claims to
+        # gate it was inert - `README.md` and `.env.example` both promised "real-time audio
+        # disabled by default" while the socket was mounted and reachable regardless. An
+        # operator reading either would have believed audio ingest was off. Refused first,
+        # before the session is even looked up, so a disabled deployment tells a caller
+        # nothing about which session ids exist.
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     if not is_allowed_websocket_origin(
         websocket.headers.get("origin"),
         websocket.headers.get("host"),
@@ -363,7 +375,13 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
     # Every write goes through the lock, because the reply-audio task writes to this same
     # socket concurrently with the loop below and interleaved writes corrupt the stream.
     socket = LockedSocket(websocket.send_json, websocket.send_bytes)
-    sender = ReplyAudioSender(socket, simulator_service.speech_synthesizer)
+    sender = ReplyAudioSender(
+        socket,
+        simulator_service.speech_synthesizer,
+        on_first_frame=lambda milliseconds, language: record_stage(
+            TurnStage.SYNTHESIZE, milliseconds, language=language.value
+        ),
+    )
     sequence = 0
     try:
         await socket.send_json(
@@ -483,6 +501,10 @@ async def _handle_utterance(
     language_label = (result.language or LanguageCode.UNKNOWN).value
     record_utterance(language=language_label, outcome=result.outcome.value)
     record_stage(TurnStage.TRANSCRIBE, result.transcribe_ms, language=language_label)
+    if result.detect_language_ms is not None:
+        # Only recorded when a hint actually landed. A detection that was abandoned
+        # unfinished contributed nothing and would otherwise look like time well spent.
+        record_stage(TurnStage.DETECT_LANGUAGE, result.detect_language_ms, language=language_label)
     if not result.is_turn or result.text is None:
         await socket.send_json(message)
         return True

@@ -1517,6 +1517,11 @@ Stages are recorded **separately** - `detect_language`, `transcribe`, `plan`, `s
 `total` - because a single turn-latency number hides the only term that has ever mattered:
 transcription was 3,982 ms of a 4,507 ms English turn.
 
+> **Correction (PR 46).** That sentence was not true when it was written. Five stages were
+> *declared*; three were *recorded*. `detect_language` and `synthesize` had no call site at
+> all, which meant the early-detection work of PR 44 was invisible in production and the
+> reply-audio path was unmeasured. Both are recorded from PR 46 onwards.
+
 Bucket edges stop at 30 s deliberately. A conventional set topping out at 10 s would have put
 Telugu's 37.7 s in `+Inf`, hiding the worst number in the project inside the one bucket nobody
 reads.
@@ -1525,3 +1530,122 @@ Verified against a live server: one real turn produced
 `pitchbot_turns_total{disposition="continue",language="en"} 1`,
 `pitchbot_turn_stage_ms_count{language="en",stage="plan"} 1`, and
 `pitchbot_metrics_dropped_series_total 0`.
+
+## What the buyer actually waits for (2026-09-05)
+
+`probe_time_to_first_audio.py`. The server reports one latency number per spoken turn:
+
+    turn_latency_ms = end_silence_ms + transcribe_ms + engine_ms
+
+That is assembled from parts and stops when the reply *text* exists. But the buyer is
+waiting to hear a voice, and reply audio is synthesised in a background task outside that
+number. The hypothesis going in was that a meaningful amount of the wait was therefore
+invisible.
+
+**The hypothesis was wrong, and that is the useful result.** Real WebRTC detector, real
+faster-whisper with the PR 44 early detection, the real engine, real Piper through the real
+`ReplyAudio` framing, frames delivered at their true 30 ms cadence, median of 3:
+
+| lang | reported | transcript | reply text | first audio | unreported |
+|------|---------:|-----------:|-----------:|------------:|-----------:|
+| en   | 2,646 ms | 2,417 ms   | 2,420 ms   | **2,587 ms** | **-59 ms** |
+| hi   | 3,205 ms | 3,041 ms   | 3,043 ms   | **3,160 ms** | **-45 ms** |
+
+Synthesis reaches its first frame in ~167 ms, and the reported number *overstates* the real
+wait by ~2%. So there was no hidden latency to recover, and no case for restructuring the
+reply path. Two things follow that are worth keeping:
+
+- **Transcription is 91% of the buyer's wait** (2,417 ms of 2,646 ms in English). It was the
+  problem before this probe and it still is; nothing else is close.
+- The `synthesize` stage is recorded from PR 46 not because it is slow but because nothing
+  could have told us if it became slow. A longer reply, a heavier voice or a loaded CPU all
+  move it, and it sits outside every number the server previously reported.
+
+Also visible in the Hindi row: `पचास हजा रुब़ए` came back garbled enough that the budget was
+not extracted, while English `50,000 rupees` was. The reply differs accordingly - Hindi asked
+what the business sells, English acknowledged the budget. That is an STT-quality gap, not a
+latency one, and it is not addressed here.
+
+## The new metric immediately found something (2026-09-05)
+
+`verify_live_stages.py` drove one real spoken turn against a running server, frames at their
+true 30 ms cadence, with `webrtc` + `faster-whisper` + `piper` all configured. `synthesize`
+recorded on the first turn. **`detect_language` recorded nothing at all.**
+
+That is not a plumbing fault. The server's endpointer split ~16 s of buyer speech into four
+short utterances - *"We run a retail shop and hide our butt."*, *"and our budget is around
+50th"*, *"thousand rupees for the first days of the"*, *"website."* - and early detection
+needs roughly `early_detection_seconds` (2.0 s) of buffered speech **plus** its own flat
+~1.6 s to finish before the endpoint arrives. None of those four utterances lasted long
+enough, so every detection was started and then abandoned.
+
+`verify_detect_language_ms.py` confirms the other half against the real adapter, by giving it
+one utterance long enough to land:
+
+| early detection | `detect_language_ms` | `transcribe_ms` |
+|---|---:|---:|
+| 2.0 s (shipped) | **1,644 ms** | **2,266 ms** |
+| off (pre-PR-44) | `None` | 4,337 ms |
+
+Two things follow. The 1,644 ms matches the flat detection cost measured in PR 44 exactly,
+and the 4,337 -> 2,266 ms drop re-confirms that win independently, on a different sentence,
+with identical transcripts.
+
+And the operational finding, which is the point of having the metric: **early detection pays
+off on long utterances and is wasted on short ones**, and short ones are what a real
+endpointer produces from ordinary speech. The work is bounded - one abandoned detection pass
+per utterance, documented in `_cancel_detection` - but it is not free, and until this metric
+existed there was no way to see which case a deployment was actually in. Whether
+`early_detection_seconds` should be lowered, or detection skipped for utterances unlikely to
+reach the threshold, is now a question that can be answered from traffic instead of guessed.
+Not changed here: it is a tuning decision that deserves its own measurement.
+
+## One slow callback blocked every other session (2026-09-05)
+
+`probe_callback_contention.py`. `CallbackService` guarded all of its state with a single
+`asyncio.Lock`, and every public method held that lock across an adapter call - the
+scheduler for `schedule`/`cancel`, the telephony provider once per due callback in
+`dispatch_due`, and once per callback in `remove_by_prefix`. Those are network calls.
+
+Measured with a 200 ms adapter, which is optimistic for a telephony dial:
+
+| scenario | before | after |
+|---|---:|---:|
+| 1 session schedules once | 215 ms | 200 ms |
+| 2 sessions, concurrently | 412 ms | 206 ms |
+| 5 sessions, concurrently | 1,027 ms | 204 ms |
+| 10 sessions, concurrently | **2,057 ms** | **205 ms** |
+| unrelated `schedule` during a 1-callback dispatch batch | 393 ms | 190 ms |
+| unrelated `schedule` during a 5-callback batch | 1,221 ms | 189 ms |
+| unrelated `schedule` during a 10-callback batch | **2,241 ms** | **190 ms** |
+
+Concurrent scheduling was exactly serial - ten sessions cost ten times one call. After
+keying the lock by callback id it is flat at one call, a **10.0x** improvement at ten
+sessions, and an unrelated caller no longer waits behind a batch at all: its wait is
+constant regardless of how many callbacks the batch contains.
+
+The batch itself is still sequential (2,054 ms for ten dials) and deliberately so. Dialing a
+batch in parallel is a decision about what a telephony provider will accept, not a locking
+question, and nothing here measured that.
+
+Two things made this safe to change rather than delicate:
+
+- **Serialising two operations on the same callback is a real requirement; on different
+  callbacks it never was.** The lock is keyed by callback id, so the requirement is kept and
+  the accident is dropped. Only one lock is ever held at a time, so there is no acquisition
+  order to get wrong.
+- **Nothing else needs a lock.** Every state transition in the service runs to completion
+  without awaiting, and asyncio does not interleave code that does not await - including the
+  capacity check, which reads the records and the pending schedules and inserts in one
+  synchronous step.
+
+The two hardest existing tests - concurrent admission against capacity, and a cancel claim
+beating a concurrent dispatch - both still pass unchanged, which is the evidence that the
+per-callback lock preserves the semantics the service was written for.
+
+It does open one genuinely new race, because a batch no longer holds a claim over callbacks
+it has not reached: a cancel can now land while an earlier callback in the same batch is
+still dialing. `_dispatch_one` re-reads the record and refuses to dispatch anything that is
+no longer `SCHEDULED`. That guard **survived mutation testing on first attempt** - the
+pre-existing cancel test excludes the record at snapshot time, so the guard never fired -
+and a test for exactly that interleaving was added.

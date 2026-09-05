@@ -120,6 +120,78 @@ async def drain(sender: ReplyAudioSender) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_time_to_the_first_frame_is_reported() -> None:
+    """Reply audio is a background task, so nothing else can time it.
+
+    `TurnStage.SYNTHESIZE` was declared and never recorded, which left the only number a
+    voice product is judged on - how long until the buyer hears anything - unmeasurable in
+    production. Measured at ~167 ms for a short English reply
+    (`probe_time_to_first_audio.py`), which is small; the point is that it is now visible
+    when it stops being small.
+    """
+
+    seen: list[tuple[float, LanguageCode]] = []
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(
+        socket.locked(),
+        StubSynthesizer(chunk(2_048)),
+        frame_bytes=1_024,
+        on_first_frame=lambda milliseconds, language: seen.append((milliseconds, language)),
+    )
+
+    await sender.start("hello", LanguageCode.ENGLISH)
+    await drain(sender)
+
+    assert len(seen) == 1, "reported once per reply, not once per frame"
+    milliseconds, language = seen[0]
+    assert milliseconds >= 0.0
+    assert language is LanguageCode.ENGLISH
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_produces_no_audio_reports_no_timing() -> None:
+    """Piper returns nothing for punctuation-only text; there was no first frame to time."""
+
+    seen: list[tuple[float, LanguageCode]] = []
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(
+        socket.locked(),
+        StubSynthesizer(),
+        frame_bytes=1_024,
+        on_first_frame=lambda milliseconds, language: seen.append((milliseconds, language)),
+    )
+
+    await sender.start("...", LanguageCode.ENGLISH)
+    await drain(sender)
+
+    assert seen == []
+    assert socket.typed(REPLY_AUDIO_END)["frame_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failing_timing_callback_does_not_cost_the_reply() -> None:
+    """Measuring a reply must never be able to stop it being spoken."""
+
+    def explode(milliseconds: float, language: LanguageCode) -> None:
+        raise RuntimeError("metrics backend is down")
+
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(
+        socket.locked(),
+        StubSynthesizer(chunk(2_048)),
+        frame_bytes=1_024,
+        on_first_frame=explode,
+    )
+
+    await sender.start("hello", LanguageCode.ENGLISH)
+    await drain(sender)
+
+    assert socket.typed(REPLY_AUDIO_BEGIN)["sample_rate_hz"] == RATE
+    assert socket.typed(REPLY_AUDIO_END)["failed"] is False
+    assert socket.frames
+
+
+@pytest.mark.asyncio
 async def test_a_reply_is_announced_streamed_and_terminated() -> None:
     socket = RecordingSocket()
     sender = ReplyAudioSender(

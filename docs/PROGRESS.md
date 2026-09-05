@@ -2252,3 +2252,109 @@ series, and uvicorn's access lines came out as JSON.
 - **Telugu below the confidence floor still costs 37.7 s**, because refusing on an uncertain
   guess would silence a buyer the model might have understood.
 - **`enable_real_time_audio` is still inert.**
+
+## PR 46 - Stop serialising unrelated callbacks, and honour what the config claims
+
+Three things the code declared and did not do. Two of the five backlog items I carried out
+of PR 45 turned out to be wrong when checked, which is the reason this PR checked them
+before designing anything.
+
+### What was wrong in my own backlog
+
+- **"Turn-path history read is unbounded"** - refuted. `conversation/journal.py` already has
+  `_HistoryBudget`, `max_history_events`, `history_deadline_ms` and `with_history_bounds`,
+  and `simulator/service.py` wires them. The item was stale.
+- **"Reply audio hides a meaningful amount of latency"** - refuted by measurement, and this
+  was the intended centrepiece of the PR. See below.
+
+### What the buyer actually waits for
+
+`probe_time_to_first_audio.py` drove the real detector, the real transcriber with PR 44's
+early detection, the real engine and real Piper, at a true 30 ms frame cadence, and timed
+from the buyer's last frame of speech to the first byte of reply audio.
+
+The reported `turn_latency_ms` **overstates** the real wait by ~2% (en 2,646 ms reported vs
+2,587 ms to first audio). Synthesis reaches its first frame in ~167 ms. There was no hidden
+latency and no case for restructuring the reply path.
+
+What the probe did establish: **transcription is 91% of the buyer's wait**, which was true
+before and remains the only term that matters.
+
+`SYNTHESIZE` is recorded anyway - not because it is slow, but because nothing could have
+told us if it became slow, and it sits outside every number the server reported.
+
+### The defect that was real
+
+`CallbackService` held one service-wide `asyncio.Lock` across every adapter call, and those
+are network calls. Measured with a 200 ms adapter: ten sessions each scheduling one callback
+took **2,057 ms** - exactly serial - and an unrelated `schedule` waited **2,241 ms** behind a
+ten-callback dispatch batch. After keying the lock by callback id both are flat at one
+adapter call (205 ms and 190 ms), a **10.0x** improvement, and the unrelated caller's wait no
+longer grows with batch size at all.
+
+Two observations made this a small change rather than a delicate one:
+
+1. Serialising two operations on the *same* callback is a real requirement; on *different*
+   callbacks it never was. Keying by callback id keeps the first and drops the second, and
+   only one lock is ever held at a time so there is no acquisition order to get wrong.
+2. **Nothing else needs a lock.** Every state transition in the service runs without
+   awaiting, and asyncio does not interleave code that does not await - including the
+   capacity check, which reads records and pending schedules and inserts in one synchronous
+   step. The lock was only ever load-bearing *across* the adapter await.
+
+The two hardest existing tests - concurrent admission against capacity, and a cancel claim
+beating a concurrent dispatch - pass unchanged. That is the evidence the semantics survived.
+
+### The race this introduced, and how it was caught
+
+A batch no longer holds a claim over callbacks it has not reached, so a cancel can land while
+an earlier callback in the batch is still dialing. `_dispatch_one` re-reads the record and
+refuses anything no longer `SCHEDULED`.
+
+**That guard survived mutation testing.** The pre-existing cancel test excludes the record at
+snapshot time, so the guard never fired and removing it changed nothing. A test for exactly
+that interleaving was added, and the mutation is now caught. Five of five mutations are
+load-bearing.
+
+### The flag that gated nothing
+
+`enable_real_time_audio` was inert while the audio WebSocket was mounted and reachable, so
+`README.md` and `.env.example` both promised a gate that did not exist. It now gates the
+socket, deny-by-default like every other speech capability, checked *before* the session
+lookup so a disabled deployment reveals nothing about which session ids exist. `GET /health`
+reports it. The browser demo must now set it; `pitchbot-talk` captures directly and is
+unaffected, and the browser client already treats close code 1008 as terminal so a refusal
+does not become a reconnect loop.
+
+### Validation
+
+1,116 passed / 19 skipped (was 1,104). 1,066 / 69 in a clean venv with no optional extra.
+ruff, ruff format and `mypy src tests` clean. Five mutation checks, all caught.
+
+### Deferred
+
+- **A dispatch batch still dials sequentially** (2,054 ms for ten 200 ms dials). Parallelising
+  it is a question about what a telephony provider will accept, not a locking one.
+- **Transcription is still 91% of the wait.** Nothing here changes that.
+- **Access-log correlation** still needs middleware; uvicorn logs after the context exits.
+- **Hindi numerals transcribe poorly enough that the budget is not extracted** where the
+  English equivalent is. An STT-quality gap, not a latency one.
+- **Metrics remain per process and in memory.**
+- **Telugu below the confidence floor still costs 37.7 s.**
+
+### Found by the new metric
+
+Recording `detect_language` immediately paid for itself. A live spoken turn recorded
+`synthesize` on the first reply and **nothing at all** for `detect_language`: the endpointer
+split ~16 s of speech into four short utterances, and early detection needs 2.0 s of buffered
+audio plus its own flat ~1.6 s before the endpoint arrives. Every detection was started and
+abandoned.
+
+Given one long utterance it lands and behaves exactly as PR 44 measured - `detect_language_ms`
+1,644 ms, and `transcribe_ms` 4,337 ms -> 2,266 ms with it on, identical transcripts - which
+also re-confirms that win independently on a different sentence.
+
+So the feature works, and works on the wrong shape of input. The waste is bounded at one pass
+per utterance, and the tuning question that follows is now answerable from traffic. Left
+alone in this PR: changing `early_detection_seconds` on the strength of one observation would
+repeat the mistake this metric exists to prevent.

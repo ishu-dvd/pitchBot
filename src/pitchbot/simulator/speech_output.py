@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import Final, Protocol
 
 from pitchbot.adapters.contracts import TextToSpeechAdapter
@@ -121,11 +122,15 @@ class ReplyAudioSender:
         *,
         frame_bytes: int = DEFAULT_FRAME_BYTES,
         max_bytes: int = DEFAULT_MAX_REPLY_BYTES,
+        on_first_frame: Callable[[float, LanguageCode], None] | None = None,
     ) -> None:
         self._socket = socket
         self._synthesizer = synthesizer
         self._frame_bytes = frame_bytes
         self._max_bytes = max_bytes
+        # Reported rather than recorded here, so this module keeps no opinion about
+        # metrics and stays testable without one. The caller decides what to do with it.
+        self._on_first_frame = on_first_frame
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -171,6 +176,14 @@ class ReplyAudioSender:
             {"type": REPLY_AUDIO_END, "aborted": True, "reason": "interrupted"}
         )
 
+    def _report_first_frame(self, milliseconds: float, language: LanguageCode) -> None:
+        if self._on_first_frame is None:
+            return
+        try:
+            self._on_first_frame(milliseconds, language)
+        except Exception:  # noqa: BLE001 - measuring a reply must never cost the reply
+            logger.warning("Reply audio timing callback failed", exc_info=True)
+
     async def _speak(
         self,
         synthesizer: TextToSpeechAdapter,
@@ -186,12 +199,17 @@ class ReplyAudioSender:
         )
         failed = False
         begun = False
+        started = perf_counter()
         try:
             async for frame in audio:
                 if not begun:
                     # The sample rate belongs to the voice and is unknown until the first
                     # frame exists, so the stream cannot be announced any earlier.
                     begun = True
+                    # Taken before the send: this is how long the buyer waited for the
+                    # voice to start, and putting the socket write inside it would blame
+                    # synthesis for the network.
+                    self._report_first_frame((perf_counter() - started) * 1000, language)
                     if not await self._socket.try_send_json(
                         {
                             "type": REPLY_AUDIO_BEGIN,

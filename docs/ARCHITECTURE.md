@@ -448,6 +448,10 @@ The implemented conversation engine treats buyer text only as untrusted conversa
 
 The implemented action policy separately verifies disclosure, synthetic consent, contact eligibility, opt-out, conversation disposition, classification state, and quota. Callback dispatch rechecks policy at fake-time execution. Current adapters are in-memory mocks only; an approved preview never implies a live call, message, durable schedule, or generated binary file.
 
+`CallbackService` locks per callback id rather than service-wide. Every adapter call it makes is a network call, and a single lock held across those made two sessions scheduling two *different* callbacks wait for each other — ten concurrent sessions cost ten times one call. Operations on the *same* callback are still serialised, which is what keeps a cancel from racing a dispatch; operations on different callbacks are independent. Nothing else takes a lock: every state transition runs to completion without awaiting, and asyncio does not interleave code that does not await, so those sections — including the capacity check — are already atomic. Because a dispatch batch no longer holds a claim over callbacks it has not reached, each dial re-reads its record and refuses anything no longer `SCHEDULED`.
+
+The audio WebSocket accepts a live microphone stream and is gated by `PITCHBOT_ENABLE_REAL_TIME_AUDIO`, deny-by-default alongside every other speech capability. The gate is checked before the session is looked up, so a disabled deployment reveals nothing about which session ids exist, and `GET /health` reports `real_time_audio_enabled`.
+
 ## Provider boundaries
 
 Planned interfaces:
