@@ -596,3 +596,14 @@ All notable changes to PitchBot are documented here.
 
 - `Preloadable` moved to `pitchbot.adapters.contracts` so a wrapper can name it;
   `pitchbot.speech.providers` re-exports it unchanged.
+
+- **`pitchbot-talk --language mixed` could not speak.** `VOICE_PREFIXES` held `en_`, `hi_`
+  and `te_` and nothing for `mixed`, so the CLI returned "no voice mapping for language
+  'mixed'" - while `OPENERS` already had a Hinglish greeting and the reply tables already
+  answered in Hinglish. The one place a person actually hears this product was the one
+  place it stayed silent. The CLI now prefers Supertonic for Hindi and Hinglish (the two
+  languages it was measured winning), leaves English and Telugu to Piper, falls back to a
+  Hindi voice for Hinglish while saying that is what it is, and names the right extra per
+  language when nothing is installed. A test asserts `OPENERS` and `VOICE_PREFIXES` have
+  the same keys, so a language the CLI will open a conversation in can never again be one
+  it cannot say.

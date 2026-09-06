@@ -495,3 +495,27 @@ best legal Piper option scores 49.9%, which is not a voice so much as a noise.
 It costs latency - roughly 1,130 ms per sentence against Piper's 126-448 ms - and the model
 has **no Telugu**, which is why it is a route rather than a replacement. See
 [BENCHMARKS.md](BENCHMARKS.md).
+
+### In the CLI
+
+`pitchbot-talk` picks its own voices and needs no `.env`. With the extra installed it
+reaches for Supertonic on Hindi and Hinglish and leaves English and Telugu to Piper, and it
+prints which one it chose:
+
+```
+  voice     : supertonic-3 (OpenRAIL-M, downloads on first use) - commercial use
+              permitted; generated audio must be disclaimed as machine generated
+```
+
+Without it, Hinglish falls back to a Hindi Piper voice reading romanised text and says so,
+because a 43.4% CER voice is worth demonstrating but not worth mistaking for the one the
+server ships:
+
+```
+  voice     : hi_IN-pratham-medium (CC-BY-NC-SA-4.0) - NOT licensed for commercial use
+              - a Hindi voice reading romanised text (43.4% CER measured);
+              install ".[supertonic-tts]" for the 21.2% one
+```
+
+Unlike the server, the CLI downloads weights on first use: the alternative here is no Hindi
+voice at all, and a try-it tool with no voice is not evidence of anything.
