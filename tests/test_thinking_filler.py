@@ -70,11 +70,21 @@ class RecordingSocket:
 
 
 class StubSynthesizer:
-    """Records what it was asked to say, which is the whole point of a filler test."""
+    """Records what it was asked to say, which is the whole point of a filler test.
 
-    def __init__(self, *, gate: asyncio.Event | None = None) -> None:
+    ``delay_s`` holds the stream open *between* chunks so a filler can be genuinely
+    mid-speech when the reply arrives. Without it a stub finishes inside one event-loop
+    tick, and a test that then asserts the reply did not chop the filler off proves
+    nothing: it would pass even if the reply aborted every filler it ever saw.
+    """
+
+    def __init__(
+        self, *, gate: asyncio.Event | None = None, chunks: int = 1, delay_s: float = 0.0
+    ) -> None:
         self.spoken: list[tuple[str, LanguageCode]] = []
         self._gate = gate
+        self._chunks = chunks
+        self._delay_s = delay_s
 
     async def synthesize(
         self,
@@ -84,7 +94,10 @@ class StubSynthesizer:
         self.spoken.append((text, language))
         if self._gate is not None:
             await self._gate.wait()
-        yield chunk()
+        for index in range(self._chunks):
+            if index and self._delay_s:
+                await asyncio.sleep(self._delay_s)
+            yield chunk()
 
 
 def build(
@@ -219,19 +232,22 @@ async def test_settle_lets_the_filler_finish_instead_of_cutting_it_off() -> None
 
     A clipped syllable sounds like a fault where a completed one sounds like a person, so
     the reply waits for the filler rather than overwriting it.
+
+    The filler is deliberately still streaming when the reply arrives - three chunks with
+    a real gap between them. A stub that finished instantly would let this pass even if
+    ``settle`` did nothing at all.
     """
 
-    synthesizer = StubSynthesizer()
-    socket, sender, filler, _ = build(synthesizer=synthesizer, first_after_ms=5)
+    synthesizer = StubSynthesizer(chunks=3, delay_s=0.05)
+    socket, sender, filler, _ = build(synthesizer=synthesizer, first_after_ms=1)
 
     filler.start()
-    await asyncio.sleep(0.03)
+    await asyncio.sleep(0.02)
+    assert sender.streaming, "the filler must still be speaking for this test to mean anything"
     await filler.settle()
+    assert not sender.streaming, "settle must wait for the filler, not abandon it"
     await sender.start("The answer.", LanguageCode.ENGLISH)
-    for _ in range(200):
-        if not sender.streaming:
-            break
-        await asyncio.sleep(0)
+    await sender.drain()
 
     ends = socket.of_type(REPLY_AUDIO_END)
     assert [item["aborted"] for item in ends] == [False, False]
