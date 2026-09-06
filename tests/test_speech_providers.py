@@ -488,6 +488,7 @@ async def test_preload_loads_both_models_and_is_a_no_op_by_default() -> None:
 # --------------------------------------------------------------------------------------
 
 
+@requires_piper
 def test_supertonic_is_off_by_default_and_piper_still_serves_everything() -> None:
     """The route must be opt-in: its weights carry a content-disclosure obligation."""
 
@@ -525,6 +526,7 @@ def test_a_missing_supertonic_dependency_refuses_to_fall_back_to_piper(
         build_text_to_speech(_voice_settings(speech_tts_supertonic_languages="hi"))
 
 
+@requires_piper
 def test_hindi_is_routed_away_from_piper_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

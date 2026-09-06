@@ -249,6 +249,10 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
     provider = TtsProvider(settings.speech_tts_provider)
     if provider is TtsProvider.NONE:
         return None, NO_SYNTHESIZER_ID
+    # Parsed and gated before anything else is checked. A language name that does not exist
+    # is a typo the operator must fix whichever optional extra happens to be missing, and
+    # reporting the *other* missing dependency first would send them to fix the wrong file.
+    routed_languages = _supertonic_languages(settings)
     if not PIPER_AVAILABLE:
         raise PermanentAdapterError(
             f"speech_tts_provider={provider.value!r} is configured but the optional "
@@ -277,9 +281,9 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
         synthesis=DETERMINISTIC_SYNTHESIS if settings.speech_tts_deterministic else None,
     )
     mapped = ",".join(sorted(spec.voice_id for spec in specs))
-    routes = _supertonic_routes(settings)
-    if not routes:
+    if not routed_languages:
         return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+    routes = _supertonic_routes(settings, routed_languages)
     routed = ",".join(sorted(language.value for language in routes))
     return (
         LanguageRoutedTextToSpeech(adapter, routes),
@@ -287,17 +291,16 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
     )
 
 
-def _supertonic_routes(settings: Settings) -> dict[LanguageCode, TextToSpeechAdapter]:
-    """Languages handed to Supertonic instead of Piper, or an empty map.
+def _supertonic_languages(settings: Settings) -> list[LanguageCode]:
+    """Which languages are routed away from Piper, validated but not yet built.
 
-    Every failure is a refusal to start, for the same reason the Piper path refuses: a
-    server that comes up without the engine it was configured with speaks in some other
-    voice, and nobody is told.
+    Separate from building the adapter so that a configuration mistake is reported before
+    any other optional dependency is looked for.
     """
 
-    codes = [code.strip() for code in settings.speech_tts_supertonic_languages.split(",")]
     languages: list[LanguageCode] = []
-    for code in codes:
+    for raw in settings.speech_tts_supertonic_languages.split(","):
+        code = raw.strip()
         if not code:
             continue
         try:
@@ -314,9 +317,7 @@ def _supertonic_routes(settings: Settings) -> dict[LanguageCode, TextToSpeechAda
                 f"{sorted(item.value for item in SUPERTONIC_LANGUAGES)}"
             )
         languages.append(language)
-    if not languages:
-        return {}
-    if not SUPERTONIC_AVAILABLE:
+    if languages and not SUPERTONIC_AVAILABLE:
         raise PermanentAdapterError(
             "speech_tts_supertonic_languages is set but the optional dependency is not "
             f"installed. Install it with: {SUPERTONIC_INSTALL_HINT}. Refusing to fall back "
@@ -324,6 +325,15 @@ def _supertonic_routes(settings: Settings) -> dict[LanguageCode, TextToSpeechAda
             "under a commercial licence - falling back would silently ship a voice this "
             "project denies."
         )
+    return languages
+
+
+def _supertonic_routes(
+    settings: Settings,
+    languages: list[LanguageCode],
+) -> dict[LanguageCode, TextToSpeechAdapter]:
+    """One Supertonic adapter, shared by every language routed to it."""
+
     logger.warning(
         "Supertonic is enabled for %s. Its weights are OpenRAIL-M: Attachment A clause (e) "
         "requires that generated content be expressly and intelligibly disclaimed as "
