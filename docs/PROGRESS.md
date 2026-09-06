@@ -2478,6 +2478,10 @@ clean. 4/4 mutations caught. Live server before and after.
   6. **Direct questions are answered (`domain/catalog.py`, `conversation/planning.py`).**
      New `SOCIAL_PROOF` and `NEXT_STEPS` stances with copy in all four languages, answered
      before the conversation continues. Corpus 2/7 -> 7/7.
+  7. **A question is rephrased rather than repeated (`conversation/planning.py`,
+     `conversation/engine.py`).** `LanguagePhrases.ask_again` for every slot in every
+     language, selected from the `asked_slot_counts` the planner already received.
+     `MAX_ASKS_PER_SLOT` is unchanged, so the agent pushes no longer than before.
 - **Safety decisions:** No new data may leave a conversation. The deck reads the same
   allowlisted business type and pattern-matched budget/timing that `build_follow_up`
   already released to WhatsApp, and `DeckRequest` bounds them again so a hand-assembled

@@ -2835,3 +2835,36 @@ AGENT : The process is short: we confirm what you need, you review a sample, and
 ```
 
 `requested_features` is now `catalog,online-payments`; the spurious `whatsapp` is gone.
+
+
+## The last verbatim repeat (2026-09-07)
+
+Re-running the call after the two fixes above left one robotic exchange:
+
+```
+AGENT : ...What should the website let your customers do?
+BUYER : Right now everything is on WhatsApp and it is getting hard to manage.
+AGENT : What should the website let your customers do?
+```
+
+The same sentence, immediately, with no sign the buyer had spoken. This is the defect the
+closing sequence already fixed, one level down - and the state it needed was already there:
+`asked_slot_counts` is passed to `plan_reply` so a slot is not asked forever, and the same
+count says whether this is a first attempt or a second.
+
+A second attempt now rephrases and lowers the bar rather than repeating:
+
+| slot | first | second |
+|---|---|---|
+| features | "What should the website let your customers do?" | "To put it another way, what should a customer be able to do on the site?" |
+| budget | "What budget range are you working with?" | "Even a rough range helps me scope this - what are you thinking?" |
+| timeline | "When would you like this live?" | "Roughly when would you want this live?" |
+
+`MAX_ASKS_PER_SLOT` is untouched, so this changes the wording and not how long the agent
+pushes - two attempts, then the planner moves on.
+
+One ordering detail worth recording, because a mutation caught it: the engine increments
+`asked_slot_counts` **before** rendering, so the count has to be read into a local first.
+Reading it after the increment makes every first ask render as a re-ask.
+
+The recorded call now contains no repeated sentence anywhere.

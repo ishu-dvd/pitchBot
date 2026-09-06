@@ -706,6 +706,12 @@ All notable changes to PitchBot are documented here.
   their time. Question recognition went from 2 of 7 to 7 of 7. The credibility answer names
   nobody: PitchBot is synthetic, and a fabricated client list would be a lie told to a
   buyer.
+- **A question the buyer did not answer is rephrased, not repeated.** Turn 1 of the
+  recorded call asked what the website should let customers do; the buyer replied with a
+  statement of pain; turn 2 returned that same sentence and nothing else. A second attempt
+  now rephrases and lowers the bar - *"even a rough range helps me scope this"* - in all
+  four languages. `MAX_ASKS_PER_SLOT` still stops at two attempts, so this changes the
+  wording, not how long the agent pushes. The recorded call now repeats no sentence at all.
 
 ### Deferred (PR 54)
 
