@@ -670,3 +670,31 @@ All notable changes to PitchBot are documented here.
 
   The same run confirms the timing fix itself: first filler **925 ms** measured against
   **920 ms** predicted from audio time.
+
+
+### Changed (PR 54)
+
+- **A deck now says what the buyer said, in the buyer's language.** Running one apparel
+  call end to end showed the deck ignoring the conversation that produced it: the buyer
+  stated a budget of 150000 and a three-month deadline, the engine captured both, and the
+  deck read `Sample Business: Apparel commerce` with three canned bullets. The same deck
+  came out byte-identical in English, Hindi and Telugu, despite `DeckRequest` rejecting an
+  unspecified language. It now opens with what the buyer said and is written from a
+  complete per-language table.
+- **The close no longer repeats itself.** Once every slot was filled, the agent returned
+  *"That covers what I need. Would a short demo or a written proposal help more?"* on three
+  consecutive turns, twice as the answer to a direct question. The close is now a
+  three-step sequence in all four languages: ask, offer something concrete, then stop
+  pushing.
+- **`PITCHBOT_MAX_CALL_MINUTES` and `PITCHBOT_MAX_TURNS` are enforced.** The duration cap
+  had no consumer at all, so a session accepted turns a day after it began. The turn cap
+  was applied only when durable history was enabled, so the default deployment ran on
+  `ConversationEngine`'s default of 100 rather than the configured 80. Set
+  `PITCHBOT_MAX_CALL_MINUTES=0` to disable the duration cap.
+
+### Deferred (PR 54)
+
+- A buyer saying *"everything is on WhatsApp and it is getting hard to manage"* is a
+  statement of pain, and the extractor records it as a request for the WhatsApp feature.
+- A social-proof question - *"who else have you built something like this for?"* - matches
+  no intent, so it receives whatever the planner was already going to say.

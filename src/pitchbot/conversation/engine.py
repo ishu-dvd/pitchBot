@@ -35,6 +35,7 @@ from pitchbot.conversation.state import ConversationState
 from pitchbot.deliberation.briefing import Briefing, SitePlan, Topic
 from pitchbot.domain import (
     Classification,
+    Intent,
     IntentEvidence,
     LanguageCode,
     LeadTemperature,
@@ -266,7 +267,18 @@ class ConversationEngine:
                 state.asked_slot_counts[plan.ask.value] = (
                     state.asked_slot_counts.get(plan.ask.value, 0) + 1
                 )
-            reply = render_reply(plan, language, repeated=repeated, switched=switched)
+            reply = render_reply(
+                plan,
+                language,
+                repeated=repeated,
+                switched=switched,
+                closing_count=state.closing_count,
+            )
+            if plan.is_closing and plan.intent is not Intent.READY:
+                # Counted here for the same reason the asks are: only the engine knows a
+                # reply was actually sent, and a plan computed and discarded must not make
+                # the agent believe it has already closed.
+                state.closing_count += 1
 
         classification = self._classify(state)
         state.phase = self._phase_for(classification)

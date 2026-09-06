@@ -2442,3 +2442,45 @@ clean. 4/4 mutations caught. Live server before and after.
 - Transcription is still the dominant term - now paid once per sentence instead of four times.
 - `base` is 2.9x faster than `small` on English but 3.5 CER points worse and unusable for
   Hindi. A per-language model choice stays open; one sentence is not enough evidence.
+
+
+## PR 54: A deck worth handing over, and a close that does not loop
+
+- **Branch:** `feat/human-selling`
+- **Status:** Open.
+- **Base:** Merged PR 53 commit `458676d`.
+- **Scope:** Product quality found by running one apparel sales call end to end, plus the
+  two call limits that configuration declared and nothing enforced.
+  1. **The two call limits are enforced (`config.py`, `simulator/service.py`,
+     `simulator/router.py`).** `max_call_minutes` had no consumer anywhere in the tree - a
+     probe took a turn on a day-old session and it was accepted. Checked where a *new*
+     turn operation is registered, so an interrupted client can still retry a turn it
+     already earned; 0 disables it, following `speech_transcribe_timeout_ms`. Looking at
+     the other branch of `_build_service` for the same mistake found `max_turns` passed
+     only when durable history was enabled, so the default deployment ran on
+     `ConversationEngine`'s own default of 100 rather than the configured 80.
+  2. **The deck carries the conversation (`actions/deck_content.py`, `actions/decks.py`,
+     `actions/models.py`, `actions/workflows.py`, `simulator/service.py`).** It opens with
+     what the buyer said - business, features, budget, timing - because that is what a
+     buyer opens a deck to check. `preview_deck` now takes the same minimised
+     `FollowUpSummary` the WhatsApp branch builds, so exactly one function decides what a
+     conversation may emit and the deck cannot widen it.
+  3. **The deck is written in the language it was asked for (`actions/deck_content.py`).**
+     Four complete tables, validated on construction so a missing industry or feature
+     fails at import rather than in front of a customer.
+  4. **The close stops repeating (`conversation/planning.py`, `conversation/state.py`,
+     `conversation/engine.py`).** A three-step sequence in all four languages, driven by a
+     transient `closing_count`.
+- **Safety decisions:** No new data may leave a conversation. The deck reads the same
+  allowlisted business type and pattern-matched budget/timing that `build_follow_up`
+  already released to WhatsApp, and `DeckRequest` bounds them again so a hand-assembled
+  request cannot widen the surface. Enforcing a cap is strictly safer than not enforcing
+  one, which is why these two settings were wired rather than removed - unlike the
+  `require_*` toggles in PR 29, which could only ever have disabled a mandatory gate.
+- **Deferred:** Two defects the same run exposed. A pain statement mentioning WhatsApp is
+  extracted as a request for the WhatsApp feature. A social-proof question matches no
+  intent, so it gets whatever the planner was going to say. Both need vocabulary work and
+  are recorded in `docs/BENCHMARKS.md` rather than guessed at here.
+- **Rollback:** Revert PR 54. It adds no migration, no persistent state and no external
+  side effect. `closing_count` is in-memory only and absent from the durable checkpoint,
+  so reverting cannot strand a stored conversation.

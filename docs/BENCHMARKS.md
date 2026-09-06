@@ -2680,3 +2680,85 @@ line has dropped.
 The `~2,587 ms` figure is corrected where it was load-bearing (the CLI help, `.env.example`,
 the settings comment) and left untouched in earlier entries, which recorded what was true
 when they were written.
+
+
+## The deck ignored the call that produced it (2026-09-07)
+
+Two of this repository's habits met here. The first is that a passing suite says each part
+is internally consistent, not that the parts are connected. The second is that running the
+product finds what tests cannot. `probe_selling_and_deck.py` holds one apparel call and
+then asks for the artefact the call exists to produce.
+
+### What the call knew, and what the deck said
+
+The conversation captured four facts:
+
+| fact | value |
+|---|---|
+| `business_type` | `apparel` |
+| `requested_features` | `catalog,online-payments` |
+| `budget_stated` | `budget is 150000` |
+| `timeline` | `3 months` |
+
+The deck it handed over:
+
+```
+title: Sample Business: Apparel commerce
+[Business opportunity]   Size and color variants / Seasonal collections / Mobile-first catalog
+[Suggested website scope] Structured product catalog / Reviewed online payment flow
+[Safe next step]          Confirm requirements... / Review a synthetic prototype / Approve scope...
+```
+
+The budget and the timing - the two facts a proposal is judged on - are absent, and the
+title is a placeholder that shipped. Only the feature list survived, because
+`preview_deck` took a bare feature tuple while the identical WhatsApp branch two lines
+above it called `build_follow_up(facts=facts)` and received everything.
+
+### The same deck in three languages
+
+`DeckRequest` rejects `LanguageCode.UNKNOWN` with *"Deck language must be explicit"*, so
+every caller must state a language. It was then never read:
+
+| requested | title | first bullet |
+|---|---|---|
+| `en` | Sample Business: Apparel commerce | Size and color variants |
+| `hi` | Sample Business: Apparel commerce | Size and color variants |
+| `te` | Sample Business: Apparel commerce | Size and color variants |
+
+Byte-identical. For a product whose premise is selling in the buyer's language, this was
+the deck defect that mattered most.
+
+### And the agent repeated itself
+
+The same run recorded the worst human-likeness defect in the product. Once every slot is
+filled `plan_reply` moves to `CLOSE`, and `render_reply` had exactly one closing sentence:
+
+```
+BUYER : Our budget is 150000 and we want it live in 3 months.
+AGENT : ...That covers what I need. Would a short demo or a written proposal help more?
+BUYER : Who else have you built something like this for?
+AGENT : That covers what I need. Would a short demo or a written proposal help more?
+BUYER : Okay, that sounds reasonable. What happens next?
+AGENT : That covers what I need. Would a short demo or a written proposal help more?
+```
+
+Three consecutive turns, two of them answering a direct question. After the change the
+close escalates the way a person does - ask, then offer something concrete, then stop
+pushing:
+
+```
+AGENT : ...That covers what I need. Would a short demo or a written proposal help more?
+AGENT : Either one works. I will put a short proposal together and send it across, and we
+        can talk once you have seen it.
+AGENT : Take your time. I will send the details across, and you can pick this up whenever
+        it suits you.
+```
+
+### Still open
+
+Two defects the same run exposed and this change does not fix. *"Everything is on WhatsApp
+and it is getting hard to manage"* is a statement of pain, and the extractor reads it as a
+request for the WhatsApp **feature**, because `whatsapp` is a feature keyword. And a
+social-proof question - *"who else have you built this for"* - matches no intent, so it
+receives whatever the planner was going to say anyway. Both are recorded rather than
+guessed at.

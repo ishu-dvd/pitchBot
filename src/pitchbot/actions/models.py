@@ -107,6 +107,12 @@ class DeckRequest(ActionModel):
     industry: DeckIndustry
     language: LanguageCode
     requested_features: tuple[str, ...] = Field(default=(), max_length=10)
+    # What the buyer actually said, after `build_follow_up` has minimised it - an
+    # allowlisted business type and pattern-matched budget and timing. Bounded here as
+    # well as there so a caller assembling a request by hand cannot widen what a deck may
+    # carry. Until PR 54 a deck received none of this and every buyer got the same slides.
+    budget_summary: str | None = Field(default=None, max_length=100)
+    timeline_summary: str | None = Field(default=None, max_length=100)
     idempotency_key: str = Field(min_length=1, max_length=200)
 
     @model_validator(mode="after")

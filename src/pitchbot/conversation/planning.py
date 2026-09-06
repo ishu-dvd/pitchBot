@@ -283,6 +283,19 @@ class LanguagePhrases:
     objection: Mapping[Intent, str]
     pitch: Mapping[str, str]
     closing: str
+    closing_again: str
+    """The second close. Asking "demo or proposal?" twice is how a script sounds.
+
+    A person who gets no answer stops asking and offers something concrete instead, which
+    is also the move that keeps a deal alive: it costs the buyer nothing to accept.
+    """
+    closing_final: str
+    """The third close and every one after it, which stops pushing.
+
+    Measured before this existed: the closing question was returned verbatim on three
+    consecutive turns, including as the answer to two direct buyer questions. Past two
+    attempts the pressure itself is the problem, so this one hands control back.
+    """
     confirm: str
     repeated: str
     switched: str
@@ -322,6 +335,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.TIMELINE: "When would you like this live?",
         },
         closing=("That covers what I need. Would a short demo or a written proposal help more?"),
+        closing_again=(
+            "Either one works. I will put a short proposal together and send it across, "
+            "and we can talk once you have seen it."
+        ),
+        closing_final=(
+            "Take your time. I will send the details across, "
+            "and you can pick this up whenever it suits you."
+        ),
         confirm=(
             "Good - I will put the proposal together and send it across, "
             "and we can walk through it whenever suits you."
@@ -383,6 +404,10 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.TIMELINE: "यह वेबसाइट कब तक चालू करनी है?",
         },
         closing="मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
+        closing_again=(
+            "दोनों में से कुछ भी ठीक है। मैं एक छोटा प्रस्ताव तैयार करके भेज देता हूँ, फिर आप देखकर बता दीजिएगा।"
+        ),
+        closing_final=("ठीक है, कोई दबाव नहीं। मैं ब्यौरा भेज देता हूँ — जब आप कहें, तब आगे बढ़ा देंगे।"),
         confirm=("बढ़िया — मैं प्रस्ताव तैयार करके भेज देता हूँ, और जब आपको सुविधा हो तब उस पर बात कर लेंगे।"),
         repeated="यह मैंने दर्ज कर लिया है।",
         switched="बिलकुल, आगे की बात हिंदी में करते हैं।",
@@ -438,6 +463,8 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.TIMELINE: "ఇది ఎప్పటికి సిద్ధంగా ఉండాలి?",
         },
         closing=("నాకు కావలసిన సమాచారం వచ్చింది. ఒక చిన్న డెమో మంచిదా లేక రాతపూర్వక ప్రతిపాదనా?"),
+        closing_again=("రెండూ సరిపోతాయి. నేను ఒక చిన్న ప్రతిపాదన సిద్ధం చేసి పంపుతాను, చూసిన తర్వాత మాట్లాడుకుందాం."),
+        closing_final=("తొందరేమీ లేదు. వివరాలు పంపుతాను — మీకు వీలైనప్పుడు కొనసాగిద్దాం."),
         confirm=("మంచిది — నేను ప్రతిపాదన సిద్ధం చేసి పంపిస్తాను, మీకు వీలైనప్పుడు దాని గురించి మాట్లాడుకుందాం."),
         repeated="అది నేను నమోదు చేసుకున్నాను.",
         switched="తప్పకుండా, ఇక తెలుగులోనే మాట్లాడుకుందాం.",
@@ -497,6 +524,13 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
         },
         closing=(
             "Itni jaankari kaafi hai. Ek chhota demo theek rahega ya likhit proposal bhej doon?"
+        ),
+        closing_again=(
+            "Dono theek hain. Main ek chhota proposal taiyaar karke bhej deta hoon, "
+            "dekh kar bata dijiyega."
+        ),
+        closing_final=(
+            "Koi dabaav nahi. Details bhej deta hoon - jab aap kahein, tab aage badha denge."
         ),
         confirm=(
             "Badhiya - main proposal taiyaar karke bhej deta hoon, "
@@ -583,6 +617,7 @@ def render_reply(
     *,
     repeated: bool = False,
     switched: bool = False,
+    closing_count: int = 0,
 ) -> str:
     """Compose the reply from fixed phrases only.
 
@@ -622,7 +657,16 @@ def render_reply(
         # this path did until the shipped sales script was actually run.
         parts.append(phrases.confirm)
     else:
-        parts.append(phrases.closing)
+        # How many times this conversation has already closed, so the same sentence is
+        # never returned twice. Repetition is the single most robotic thing the agent
+        # did: measured against the shipped script it produced three identical replies in
+        # a row, two of them answering direct questions.
+        if closing_count <= 0:
+            parts.append(phrases.closing)
+        elif closing_count == 1:
+            parts.append(phrases.closing_again)
+        else:
+            parts.append(phrases.closing_final)
     return " ".join(parts)
 
 

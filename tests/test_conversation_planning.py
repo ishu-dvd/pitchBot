@@ -22,6 +22,7 @@ from pitchbot.conversation.planning import (
     TurnUnderstanding,
     plan_reply,
     render_reply,
+    supported_languages,
     understanding_from_facts,
 )
 from pitchbot.domain import LanguageCode, business_types
@@ -383,3 +384,49 @@ def test_a_number_that_is_not_a_budget_is_not_read_as_one(text: str) -> None:
     from pitchbot.conversation.rules import _BUDGET_PATTERN, normalize_text
 
     assert _BUDGET_PATTERN.search(normalize_text(text)) is None
+
+
+def _closed_plan() -> ReplyPlan:
+    """A turn with nothing left to ask, which is what makes the planner close."""
+
+    return plan_reply(TurnUnderstanding(known_slots=ALL_SLOTS))
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+def test_the_close_never_repeats_itself(language: LanguageCode) -> None:
+    """Three identical sentences in a row is the most robotic thing the agent did.
+
+    Measured against the shipped script before this existed: once every slot was filled,
+    "That covers what I need. Would a short demo or a written proposal help more?" came
+    back on every subsequent turn, including as the answer to "Who else have you built
+    something like this for?" and to "What happens next?".
+    """
+
+    plan = _closed_plan()
+    assert plan.is_closing
+
+    spoken = [render_reply(plan, language, closing_count=count) for count in range(3)]
+
+    assert len(set(spoken)) == 3, spoken
+    # And it settles rather than cycling: a fourth turn must not reopen the pressure.
+    assert render_reply(plan, language, closing_count=9) == spoken[-1]
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+def test_the_last_close_stops_asking_the_buyer_to_choose(language: LanguageCode) -> None:
+    """Past two attempts the question itself is the problem, so it is dropped."""
+
+    phrases = _PHRASES[language]  # noqa: SLF001
+    final = render_reply(_closed_plan(), language, closing_count=2)
+
+    assert final == phrases.closing_final
+    assert "?" not in final
+
+
+def test_a_ready_buyer_is_confirmed_rather_than_closed_again() -> None:
+    """READY has its own sentence, and must not be consumed by the closing sequence."""
+
+    plan = plan_reply(TurnUnderstanding(intent=Intent.READY))
+    spoken = render_reply(plan, LanguageCode.ENGLISH, closing_count=2)
+
+    assert spoken == _PHRASES[LanguageCode.ENGLISH].confirm  # noqa: SLF001

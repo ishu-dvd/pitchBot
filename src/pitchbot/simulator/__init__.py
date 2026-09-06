@@ -1,4 +1,5 @@
 from pitchbot.simulator.service import (
+    CallDurationLimitError,
     InjectedSimulatorError,
     SessionAdmissionConflictError,
     SessionCapacityError,
@@ -7,6 +8,7 @@ from pitchbot.simulator.service import (
 )
 
 __all__ = [
+    "CallDurationLimitError",
     "InjectedSimulatorError",
     "SessionAdmissionConflictError",
     "SessionCapacityError",
