@@ -607,3 +607,25 @@ All notable changes to PitchBot are documented here.
   language when nothing is installed. A test asserts `OPENERS` and `VOICE_PREFIXES` have
   the same keys, so a language the CLI will open a conversation in can never again be one
   it cannot say.
+
+### Fixed
+
+- **The first backchannel landed at 1,420 ms for a threshold that reads 700.** It was
+  counted from `on_thinking`, which fires when the endpointer *closes* an utterance - and
+  an utterance only closes after `end_silence_ms` of trailing silence, so 700 ms of the
+  threshold was already spent before the clock started. `SpeechSegment` now carries the
+  trailing silence the endpointer already measured, and the pipeline hands it to the
+  filler. Measured rather than assumed: a `MAX_DURATION` close can arrive with the buyer
+  still mid-sentence, where the honest offset is zero.
+
+- **A second clock, because crediting that silence broke the other half of the same rule.**
+  The threshold also existed to keep fillers off a turn that is already fast, and against
+  buyer-silence alone every spoken turn qualifies immediately. Since the reply waits for a
+  filler rather than chopping it, filling there would extend the wait rather than cover it.
+  `MIN_WORK_MS = 200` - the human turn-gap - is a floor on our own work, capped at
+  `first_after_ms` so every zero-silence path is byte-identical to before.
+
+- `SECOND_AFTER_MS` 2,500 -> 3,200, keeping the position it effectively had. Unchanged, it
+  would have fired 87 ms before a typical reply and delayed it.
+
+  Net: first filler **1,420 ms -> 920 ms**, second unchanged, fast path protected.

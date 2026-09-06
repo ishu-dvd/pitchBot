@@ -2520,3 +2520,52 @@ it removes one the wrapped object had. Audited for others of the same shape: `Pr
 `RetunableTranscriber` and `EarlyDetectingTranscriber` are the only capabilities detected by
 `isinstance` on an adapter, and the transcriber has no wrapper - the pipeline holds it
 directly. The synthesiser was the only place the defect could exist, and it did.
+
+### The backchannel was counting from the wrong instant (2026-09-07)
+
+`FIRST_AFTER_MS` reads 700 and is documented as *"a beat of silence after someone stops
+speaking is normal turn-taking"*. Measured on the real pipeline in **audio time** - frames
+times frame duration, which is exactly reproducible and is what the buyer experiences
+(`probe_filler_timing.py`):
+
+| counting from the buyer's last speech frame | before | after |
+|---|---:|---:|
+| endpointer closes the utterance | 720 ms | 720 ms |
+| `on_thinking` fires (filler clock starts) | 720 ms | 720 ms |
+| **first filler spoken** | **1,420 ms** | **920 ms** |
+| second filler spoken | 3,220 ms | 3,200 ms |
+| reply audio ready (measured whole turn) | 2,587 ms | 2,587 ms |
+
+The clock started at `on_thinking`, which the pipeline fires when the endpointer *closes*
+the utterance - and an utterance only closes after `end_silence_ms` (700 ms) of trailing
+silence. So a threshold that read 700 delivered **1,420 ms**, twice its own value and 7.1x
+the ~200 ms gap Stivers et al. (PNAS 2009) measured between human turns.
+
+**Both halves of that docstring were true and they were not the same instant.**
+
+The endpointer already tracked the trailing silence and discarded it at the boundary, so
+`SpeechSegment` now carries it. Measured rather than assumed to be `end_silence_ms`: a
+`MAX_DURATION` close arrives with the buyer possibly still mid-sentence, where the honest
+offset is zero and crediting 700 ms of silence that never happened would make the filler
+interrupt someone still talking.
+
+#### Crediting the silence broke the other half of the same docstring
+
+*"It also keeps the filler off any path that is already fast."* Against buyer-silence alone
+every spoken turn clears the beat the instant we learn there is work - including one whose
+reply is milliseconds away - because 700 ms of the threshold is spent before the filler
+task exists.
+
+That matters because a filler is not free to abandon: `settle` waits for one to finish
+rather than chopping it mid-word, so a filler starting just before the reply does not cover
+the wait, it **extends** it by the filler's own length (0.37-1.07 s measured).
+
+So there are two clocks, and a filler must satisfy both: enough silence for the buyer to
+feel a gap, and enough work for us to be sure there is one. `MIN_WORK_MS = 200` is the same
+human turn-gap - the beat a person takes before deciding someone else's pause needs filling
+- and it is capped at `first_after_ms` so it is a floor and never the binding constraint.
+With no silence credited (a typed turn) the wait is exactly `first_after_ms`, unchanged.
+
+`SECOND_AFTER_MS` moved 2,500 -> 3,200 to keep the position it actually had. 2,500 measured
+from a close that was already 720 ms late put it at 3,220 ms; left alone once the reference
+frame was corrected it would have fired **87 ms before the reply was ready**.
