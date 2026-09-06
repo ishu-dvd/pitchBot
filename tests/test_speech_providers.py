@@ -17,6 +17,7 @@ extras happen to be installed in the test environment.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -30,6 +31,7 @@ from pitchbot.adapters.routing_tts import LanguageRoutedTextToSpeech
 from pitchbot.adapters.supertonic_tts import SupertonicTextToSpeechAdapter
 from pitchbot.adapters.webrtc_vad import WebRtcVoiceActivityDetector
 from pitchbot.config import Settings
+from pitchbot.config import settings as app_settings
 from pitchbot.domain import LanguageCode
 from pitchbot.simulator.models import CreateSessionRequest
 from pitchbot.simulator.service import SimulatorService
@@ -676,7 +678,7 @@ def test_the_router_hands_the_configured_thresholds_to_the_service(
     from pitchbot.simulator import router
 
     monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=450))
-    monkeypatch.setattr(router.settings, "enable_durable_history", False)
+    monkeypatch.setattr(app_settings, "enable_durable_history", False)
 
     service = router._build_service()
     session = service.create_session(CreateSessionRequest(lead_ref="router-turn-taking"))
@@ -700,9 +702,9 @@ def test_the_durable_history_branch_hands_them_over_too(
     from pitchbot.simulator import router
 
     monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=480))
-    monkeypatch.setattr(router.settings, "enable_durable_history", True)
-    monkeypatch.setattr(router.settings, "durable_history_digest_key", "ab" * 32)
-    monkeypatch.setattr(router.settings, "database_url", f"sqlite:///{tmp_path / 'turn.db'}")
+    monkeypatch.setattr(app_settings, "enable_durable_history", True)
+    monkeypatch.setattr(app_settings, "durable_history_digest_key", "ab" * 32)
+    monkeypatch.setattr(app_settings, "database_url", f"sqlite:///{tmp_path / 'turn.db'}")
 
     service = router._build_service()
     session = service.create_session(CreateSessionRequest(lead_ref="durable-turn-taking"))
