@@ -54,7 +54,7 @@ from pitchbot.simulator.service import (
 )
 from pitchbot.simulator.speech_output import LockedSocket, ReplyAudioSender, ThinkingFiller
 from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
-from pitchbot.speech.providers import build_speech_providers
+from pitchbot.speech.providers import build_speech_providers, build_turn_taking
 from pitchbot.speech.recovery import recovery_phrase
 from pitchbot.storage import (
     SqlAlchemyEventRepository,
@@ -176,6 +176,7 @@ def _build_service() -> SimulatorService:
             language_model=language_model,
             speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
             speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
+            turn_taking=turn_taking,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -195,6 +196,7 @@ def _build_service() -> SimulatorService:
         language_model=language_model,
         speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
         speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
+        turn_taking=turn_taking,
     )
 
 
@@ -202,6 +204,7 @@ def _build_service() -> SimulatorService:
 # error rather than at the first spoken utterance - and fails identically whether or not
 # durable history is enabled. Weights are NOT loaded here; that is the lifespan's job.
 speech_providers = build_speech_providers(settings)
+turn_taking = build_turn_taking(settings)
 language_model, language_model_id = build_language_model(settings)
 logger.info(
     "Speech providers: detector=%s transcriber=%s synthesizer=%s",

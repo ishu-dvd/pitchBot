@@ -69,6 +69,7 @@ from pitchbot.adapters.webrtc_vad import (
 )
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +344,33 @@ def _supertonic_routes(
     return dict.fromkeys(languages, adapter)
 
 
+def build_turn_taking(settings: Settings) -> TurnTakingConfig:
+    """Turn-taking thresholds from configuration, or a startup error naming the setting.
+
+    :class:`TurnTakingConfig` validates its own numbers, but it validates them under its
+    *field* names - an operator who set ``PITCHBOT_SPEECH_TURN_END_SILENCE_MS`` to zero
+    would be told ``end_silence_ms must be between 1 and ...`` and have to guess which line
+    of their ``.env`` that was. The error is re-raised naming the thing they actually
+    edited, which is the same courtesy every other builder here extends.
+    """
+
+    try:
+        return TurnTakingConfig(
+            min_speech_ms=settings.speech_turn_min_speech_ms,
+            end_silence_ms=settings.speech_turn_end_silence_ms,
+            max_utterance_ms=settings.speech_turn_max_utterance_ms,
+            barge_in_speech_ms=settings.speech_turn_barge_in_speech_ms,
+            agent_floor_ms=settings.speech_turn_agent_floor_ms,
+        )
+    except ValueError as error:
+        raise PermanentAdapterError(
+            f"turn-taking configuration is invalid: {error}. The settings are "
+            "speech_turn_min_speech_ms, speech_turn_end_silence_ms, "
+            "speech_turn_max_utterance_ms, speech_turn_barge_in_speech_ms and "
+            "speech_turn_agent_floor_ms."
+        ) from error
+
+
 def build_speech_providers(settings: Settings) -> SpeechProviders:
     """All three providers, built together so a misconfiguration fails once at startup."""
 
@@ -364,6 +392,7 @@ __all__ = [
     "NO_SYNTHESIZER_ID",
     "NO_TRANSCRIBER_ID",
     "Preloadable",
+    "build_turn_taking",
     "SpeechProviders",
     "SttProvider",
     "TtsProvider",

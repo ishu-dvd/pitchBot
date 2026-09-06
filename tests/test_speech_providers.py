@@ -31,6 +31,8 @@ from pitchbot.adapters.supertonic_tts import SupertonicTextToSpeechAdapter
 from pitchbot.adapters.webrtc_vad import WebRtcVoiceActivityDetector
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
+from pitchbot.simulator.models import CreateSessionRequest
+from pitchbot.simulator.service import SimulatorService
 from pitchbot.speech.providers import (
     MOCK_VAD_ID,
     NO_SYNTHESIZER_ID,
@@ -42,10 +44,12 @@ from pitchbot.speech.providers import (
     build_speech_providers,
     build_speech_to_text,
     build_text_to_speech,
+    build_turn_taking,
     build_voice_activity_detector,
     parse_voice_map,
     preload_speech_providers,
 )
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 _PROVIDERS = "pitchbot.speech.providers"
 
@@ -590,3 +594,69 @@ async def test_the_startup_hook_still_preloads_once_a_language_is_routed() -> No
     await preload_speech_providers(providers)
 
     assert (piper.preloads, supertonic.preloads) == (1, 1)
+
+
+# --------------------------------------------------------------------------------------
+# Turn taking: the dominant latency term was documented as configuration and was not
+# --------------------------------------------------------------------------------------
+
+
+def test_turn_taking_thresholds_come_from_settings() -> None:
+    """`TurnTakingConfig` has always called itself configuration. Nothing ever built it.
+
+    `end_silence_ms` is 700 ms of a measured ~2,587 ms spoken turn - 27% of it - and until
+    this was wired no deployment could change it, while `speech_stt_beam_size` next door
+    could be tuned freely.
+    """
+
+    config = build_turn_taking(
+        _settings(
+            speech_turn_min_speech_ms=150,
+            speech_turn_end_silence_ms=450,
+            speech_turn_max_utterance_ms=15_000,
+            speech_turn_barge_in_speech_ms=250,
+            speech_turn_agent_floor_ms=20_000,
+        )
+    )
+
+    assert config.end_silence_ms == 450
+    assert config.min_speech_ms == 150
+    assert config.max_utterance_ms == 15_000
+    assert config.barge_in_speech_ms == 250
+    assert config.agent_floor_ms == 20_000
+
+
+def test_the_defaults_are_unchanged_so_wiring_it_changes_nothing_by_itself() -> None:
+    """Reachable is not the same as different. An untouched deployment must not move."""
+
+    assert build_turn_taking(_settings()) == TurnTakingConfig()
+
+
+def test_an_impossible_threshold_names_the_setting_the_operator_edited() -> None:
+    """The dataclass validates under its field names, which are not the .env names.
+
+    Being told `end_silence_ms must be between 1 and ...` sends someone hunting through
+    source for a line they wrote in their own configuration file.
+    """
+
+    with pytest.raises(PermanentAdapterError) as error:
+        build_turn_taking(_settings(speech_turn_end_silence_ms=0))
+
+    assert "speech_turn_end_silence_ms" in str(error.value)
+    assert "end_silence_ms must be between" in str(error.value)
+
+
+def test_a_custom_end_silence_reaches_the_pipeline_the_socket_uses() -> None:
+    """The setting is worthless if it stops at the service constructor.
+
+    Asserted through `create_speech_pipeline`, which is what the audio socket calls per
+    session - and which also feeds the `end_silence_ms` the socket reports back to the
+    browser and the perceived-latency figure the turn is logged with.
+    """
+
+    service = SimulatorService(turn_taking=TurnTakingConfig(end_silence_ms=450))
+    session = service.create_session(CreateSessionRequest(lead_ref="turn-taking"))
+
+    pipeline = service.create_speech_pipeline(session.session_id)
+
+    assert pipeline.turn_taking.config.end_silence_ms == 450

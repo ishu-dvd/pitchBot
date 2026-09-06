@@ -159,6 +159,25 @@ class Settings(BaseSettings):
     # there is no audio path to fill, and the filler stays inert.
     speech_backchannel_enabled: bool = True
 
+    # --- Turn taking ------------------------------------------------------------------
+    # When the agent may speak. `TurnTakingConfig` has described itself as "configuration
+    # rather than a constant so it can be tuned against measurements once a real detector
+    # is benchmarked" since it was written - but nothing ever built it from settings, so
+    # every deployment ran the defaults and a constant is exactly what it was.
+    #
+    # `end_silence_ms` is the one that matters: 700 ms of the measured ~2,587 ms spoken
+    # turn, **27% of it**, spent waiting to be sure the buyer has finished. It is not set
+    # from data and cannot be: fitting it needs recordings of real speakers pausing
+    # mid-thought, and a synthesised corpus has no natural pauses to fit to. Lower it and
+    # the agent starts interrupting people who were thinking; raise it and every reply
+    # feels sluggish. A deployment with real traffic can find its own number - which is
+    # the whole reason this is reachable now.
+    speech_turn_min_speech_ms: int = 200
+    speech_turn_end_silence_ms: int = 700
+    speech_turn_max_utterance_ms: int = 20_000
+    speech_turn_barge_in_speech_ms: int = 300
+    speech_turn_agent_floor_ms: int = 30_000
+
     # --- Local language model ---------------------------------------------------------
     # Off by default, and for a stronger reason than the speech providers: measured on this
     # hardware a correct answer costs ~6.7 s per turn, on top of ~2.8 s of speech latency.
