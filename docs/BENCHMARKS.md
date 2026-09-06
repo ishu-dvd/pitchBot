@@ -2082,3 +2082,12 @@ the filler:
 - **The metric.** A filler is spoken before the reply has been planned. Counting it as
   `TurnStage.SYNTHESIZE` would have reported a synthesis time for a turn that did not have a
   reply yet, quietly making the one number a voice product is judged on meaningless.
+
+Verified by mutating the wiring rather than by reading it: ten mutations, all ten caught.
+Four of them were not caught on the first pass, and each was a test that could not see the
+damage it was written to prevent - a stub synthesiser that finished inside one event-loop
+tick, so "the reply did not chop the filler off" passed even with the wait removed; a socket
+test that *hung* instead of failing when the filler stopped being sent at all; a
+double-`start` whose second call cancelled the first before its synthesiser was ever
+iterated, so counting what was said missed it; and a missing stop signal that changes nothing
+about what is spoken and adds the full settle timeout to every short turn.
