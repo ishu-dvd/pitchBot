@@ -35,6 +35,15 @@ class ConversationState:
     just one level down.
     """
 
+    closing_count: int = 0
+    """How many times this conversation has already delivered a closing line.
+
+    Transient, like :attr:`asked_slot_counts`, and deliberately not part of the durable
+    checkpoint: it shapes the next sentence, it is not a fact about the buyer. A resumed
+    call starting its close afresh is the right behaviour anyway - the buyer has not heard
+    those sentences on this leg.
+    """
+
     understood_slot_keys: set[str] = field(default_factory=set)
     """Slots a richer understanding reported as filled, which the extractors missed.
 
