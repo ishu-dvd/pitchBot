@@ -2471,16 +2471,23 @@ clean. 4/4 mutations caught. Live server before and after.
   4. **The close stops repeating (`conversation/planning.py`, `conversation/state.py`,
      `conversation/engine.py`).** A three-step sequence in all four languages, driven by a
      transient `closing_count`.
+  5. **A pain is heard as a pain (`conversation/rules.py`).** Feature extraction is
+     clause-scoped and discards a clause that describes today without asking for anything,
+     so a buyer complaining about their current WhatsApp workflow is no longer recorded as
+     ordering a WhatsApp integration. Labelled corpus 6/11 -> 11/11.
+  6. **Direct questions are answered (`domain/catalog.py`, `conversation/planning.py`).**
+     New `SOCIAL_PROOF` and `NEXT_STEPS` stances with copy in all four languages, answered
+     before the conversation continues. Corpus 2/7 -> 7/7.
 - **Safety decisions:** No new data may leave a conversation. The deck reads the same
   allowlisted business type and pattern-matched budget/timing that `build_follow_up`
   already released to WhatsApp, and `DeckRequest` bounds them again so a hand-assembled
   request cannot widen the surface. Enforcing a cap is strictly safer than not enforcing
   one, which is why these two settings were wired rather than removed - unlike the
-  `require_*` toggles in PR 29, which could only ever have disabled a mandatory gate.
-- **Deferred:** Two defects the same run exposed. A pain statement mentioning WhatsApp is
-  extracted as a request for the WhatsApp feature. A social-proof question matches no
-  intent, so it gets whatever the planner was going to say. Both need vocabulary work and
-  are recorded in `docs/BENCHMARKS.md` rather than guessed at here.
+  `require_*` toggles in PR 29, which could only ever have disabled a mandatory gate. The
+  credibility answer names no customer: this product is synthetic, so any client roster it
+  stated would be fabricated. `turn-understanding-v1` is left untouched by the two new
+  stances - it is a versioned model contract, and they are rules-detected only.
+- **Deferred:** Nothing from the recorded call remains open.
 - **Rollback:** Revert PR 54. It adds no migration, no persistent state and no external
   side effect. `closing_count` is in-memory only and absent from the durable checkpoint,
   so reverting cannot strand a stored conversation.

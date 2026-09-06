@@ -691,10 +691,24 @@ All notable changes to PitchBot are documented here.
   was applied only when durable history was enabled, so the default deployment ran on
   `ConversationEngine`'s default of 100 rather than the configured 80. Set
   `PITCHBOT_MAX_CALL_MINUTES=0` to disable the duration cap.
+- **A mention of a feature is no longer read as an order for it.** *"Right now everything
+  is on WhatsApp and it is getting hard to manage"* is a statement of pain, and it was
+  recorded as a request for a WhatsApp integration; on a labelled corpus 6 of 11 turns were
+  read correctly. The rule is clause-scoped, so *"right now everything is on WhatsApp, we
+  want a proper catalog"* keeps `catalog` and drops `whatsapp`, and it only fires when a
+  clause describes today **and** asks for nothing - *"right now we need a catalog"* is
+  still an order. Corpus is now 11 of 11.
+- **The agent answers a direct question instead of talking past it.** Two new stances,
+  `social_proof` ("who else have you built something like this for?", "any references?")
+  and `next_steps` ("what happens next?", "how do we get started?"), each with an answer in
+  all four languages. Both were unrecognised, so they received whatever the planner was
+  going to say - which late in a call meant a buyer asking how to start was told to take
+  their time. Question recognition went from 2 of 7 to 7 of 7. The credibility answer names
+  nobody: PitchBot is synthetic, and a fabricated client list would be a lie told to a
+  buyer.
 
 ### Deferred (PR 54)
 
-- A buyer saying *"everything is on WhatsApp and it is getting hard to manage"* is a
-  statement of pain, and the extractor records it as a request for the WhatsApp feature.
-- A social-proof question - *"who else have you built something like this for?"* - matches
-  no intent, so it receives whatever the planner was already going to say.
+- Nothing from the recorded call remains open. The two defects this PR originally deferred
+  - a WhatsApp pain read as a feature request, and an unanswered credibility question -
+  are fixed above and measured on a labelled corpus.

@@ -2754,11 +2754,84 @@ AGENT : Take your time. I will send the details across, and you can pick this up
         it suits you.
 ```
 
-### Still open
+### Still open at the time
 
-Two defects the same run exposed and this change does not fix. *"Everything is on WhatsApp
+Two defects the same run exposed and that change did not fix. *"Everything is on WhatsApp
 and it is getting hard to manage"* is a statement of pain, and the extractor reads it as a
 request for the WhatsApp **feature**, because `whatsapp` is a feature keyword. And a
 social-proof question - *"who else have you built this for"* - matches no intent, so it
 receives whatever the planner was going to say anyway. Both are recorded rather than
 guessed at.
+
+
+## A mention is not an order, and a question deserves an answer (2026-09-07)
+
+The two defects the section above left open, measured on a labelled corpus before either
+was touched. `probe_hearing.py` holds eleven turns labelled with the features a
+salesperson would record, and seven lines labelled with whether a salesperson would answer
+them.
+
+### Hearing a request: 6 / 11
+
+| said | recorded | should have been |
+|---|---|---|
+| "We need a catalog and online payment on the site." | catalog, online-payments | same |
+| "Right now everything is on WhatsApp and it is getting hard to manage." | **whatsapp** | nothing |
+| "We currently take orders on WhatsApp." | **whatsapp** | nothing |
+| "At the moment our catalog is just photos in a folder." | **catalog** | nothing |
+| "Abhi sab kuch WhatsApp par hi hota hai." | **whatsapp** | nothing |
+| "Right now everything is on WhatsApp, we want a proper catalog on the site." | **catalog, whatsapp** | catalog |
+
+The last row decides the design. Any rule that judges the whole turn must get one of those
+two features wrong, so suppression is **clause-scoped** - and the split runs on the raw
+text, because `normalize_text` turns punctuation into spaces and the clause boundary is
+gone by the time the normalised form exists.
+
+The second decision is that present-state words alone are too blunt to suppress on.
+*"Right now we need a catalog"* describes the present and places an order in the same
+breath, so a clause is discarded only when it names today **and** asks for nothing. A fix
+that traded this recall away would cost more than the defect it removed.
+
+Corpus after: **11 / 11**, with that sentence still recording `catalog`.
+
+### Answering a question: 2 / 7
+
+| asked | matched |
+|---|---|
+| "Who else have you built something like this for?" | nothing |
+| "Do you have any references I can talk to?" | nothing |
+| "Have you worked with clothing brands before?" | nothing |
+| "What happens next?" | nothing |
+| "How do we get started?" | nothing |
+| "We are also getting a quote from another vendor." | comparing |
+| "We sell clothes online." | nothing (correct) |
+
+`COMPARING` does not cover the first three. It answers *"we are getting other quotes"*,
+which is about price, while *"who else have you built this for"* is about trust - and the
+two want different sentences. Two new stances, `SOCIAL_PROOF` and `NEXT_STEPS`, each with
+an answer in all four languages.
+
+Corpus after: **7 / 7**. `"Let's start - how do we get started?"` still resolves to
+`READY`, because `INTENT_PRIORITY` keeps a commitment above an enquiry.
+
+The credibility answer names nobody. PitchBot is synthetic, so any customer it cited would
+be invented; it defers to something written instead, which is also what a real seller says
+on a call. `turn-understanding-v1` is left alone - it is a versioned model contract, and
+these two stances are rules-detected only.
+
+### The same call, after
+
+```
+BUYER : Right now everything is on WhatsApp and it is getting hard to manage.
+AGENT : What should the website let your customers do?          <- no invented feature
+BUYER : Who else have you built something like this for?
+AGENT : Fair question. Rather than name other customers on a call, I will include relevant
+        examples in writing. Either one works. I will put a short proposal together and
+        send it across, and we can talk once you have seen it.
+BUYER : Okay, that sounds reasonable. What happens next?
+AGENT : The process is short: we confirm what you need, you review a sample, and nothing
+        gets built until you approve the scope. Take your time. I will send the details
+        across, and you can pick this up whenever it suits you.
+```
+
+`requested_features` is now `catalog,online-payments`; the spurious `whatsapp` is gone.
