@@ -2478,3 +2478,45 @@ while the buyer is still waiting the same time to hear anything.
 1.05 is both the library default and the measured minimum, which is why it is pinned in
 `DEFAULT_SPEED` with the table above and **not** exposed as configuration: a knob whose
 entire measured range is worse than its default is not configuration.
+
+### Loading a voice stalls the event loop; synthesising through it does not (2026-09-06)
+
+The end-to-end check in PR 51 reported `mixed: first 3,415 ms`. The adapter synthesises one
+sentence at a time and yields each as it lands, so that number should have been one
+sentence - about 1 s. The extra two seconds were the model being loaded lazily, inside the
+first buyer's turn.
+
+Measured by `probe_preload_gap.py` with the weights already on disk, against a task that
+ticks every 5 ms and records how late each tick actually was:
+
+| event-loop lateness | median | worst |
+|---|---:|---:|
+| idle | 10.9 ms | 11.7 ms |
+| **during load** (1,358 ms of work) | 60.9 ms | **488.7 ms** |
+| during synthesis (972 ms of work) | 10.8 ms | 11.5 ms |
+
+Synthesis is **indistinguishable from idle**. Loading is not: it holds the GIL in bursts
+despite running under `asyncio.to_thread`, which moves it off the loop's stack but not out
+of its way. The loop carries the audio socket, so a 489 ms stall is 489 ms in which the
+buyer's frames are not read and barge-in cannot fire.
+
+| first Hinglish turn | time to first audio |
+|---|---:|
+| lazy (load + first sentence) | 2,329 ms |
+| preloaded (first sentence only) | **972 ms** |
+
+This is the same shape Piper showed on 2026-09-03 (2,561 ms to load a voice, ~110 ms to
+synthesise through a resident one), which is why `preload_speech_providers` exists at all.
+
+**The routing wrapper had silently switched it off.** `preload_speech_providers` decides by
+`isinstance(provider, Preloadable)` on whatever `build_text_to_speech` returned, and once a
+single language is routed that object is `LanguageRoutedTextToSpeech`. It forwarded
+`synthesize` and nothing else, so the check was `False` and **Piper stopped being
+preloaded** - putting its ~2.5 s voice load back into the first English or Telugu turn, in
+a deployment whose only change was enabling Hindi.
+
+A wrapper that forwards one method of a protocol does not merely fail to add a capability;
+it removes one the wrapped object had. Audited for others of the same shape: `Preloadable`,
+`RetunableTranscriber` and `EarlyDetectingTranscriber` are the only capabilities detected by
+`isinstance` on an adapter, and the transcriber has no wrapper - the pipeline holds it
+directly. The synthesiser was the only place the defect could exist, and it did.

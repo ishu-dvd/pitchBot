@@ -575,3 +575,24 @@ All notable changes to PitchBot are documented here.
   audio is produced, not how fast, so the buyer waits the same time to hear anything.
   `DEFAULT_SPEED` now carries the measured curve, and 1.05 is the minimum rather than an
   inherited default.
+
+### Fixed
+
+- **Enabling the Hindi voice silently stopped preloading Piper.** `preload_speech_providers`
+  detects the capability with `isinstance(provider, Preloadable)`, and once any language is
+  routed the synthesiser it inspects is `LanguageRoutedTextToSpeech`, which forwarded
+  `synthesize` and nothing else. The check was `False`, so Piper's ~2.5 s voice load moved
+  back into the first buyer turn - for English and Telugu, languages unrelated to the route
+  that was enabled. The router now forwards `preload` to its default engine first and then
+  to each routed engine, once per engine: `_supertonic_routes` deliberately shares one
+  adapter across every language it serves, so `hi` and `mixed` are the same object.
+
+- **Supertonic had no `preload` at all**, so the first Hindi or Hinglish turn paid 1,358 ms
+  of model loading. Measured against a 5 ms heartbeat, that load pushes event-loop lateness
+  from 10.9 ms median / 11.7 ms worst to 60.9 ms / **488.7 ms** - it holds the GIL in bursts
+  despite `asyncio.to_thread` - while synthesis through a resident model is indistinguishable
+  from idle. The loop carries the audio socket, so that stall is time in which barge-in
+  cannot fire. Time to first audio on the first Hinglish turn: **2,329 ms to 972 ms**.
+
+- `Preloadable` moved to `pitchbot.adapters.contracts` so a wrapper can name it;
+  `pitchbot.speech.providers` re-exports it unchanged.
