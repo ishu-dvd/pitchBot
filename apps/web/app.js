@@ -57,6 +57,8 @@ const OUTCOME_LABELS = {
   "low-confidence": "Transcript confidence was too low to use",
   "oversize": "Utterance exceeded its size cap and was discarded",
   "transcriber-unavailable": "Transcription was unavailable for this utterance",
+  "transcription-timed-out": "Transcription took too long and the turn was released",
+  "language-unsupported": "That language cannot be transcribed reliably",
 };
 
 function onReplyAudio(payload) {
@@ -122,14 +124,20 @@ function onSpeechMessage(payload) {
   if (onReplyAudio(payload)) return;
   if (payload.type !== "utterance") return;
   if (payload.reply) {
-    speech.textContent = `Heard: ${payload.transcript} (${payload.turn_latency_ms} ms)`;
+    // A recovery reply has no transcript - the whole reason it exists is that there was
+    // never going to be one - so showing "Heard: undefined" would be worse than the
+    // silence it replaces. Report what actually happened instead.
+    speech.textContent = payload.transcript
+      ? `Heard: ${payload.transcript} (${payload.turn_latency_ms} ms)`
+      : OUTCOME_LABELS[payload.outcome] || payload.outcome;
     pendingReplyText = payload.reply;
     // When the server is synthesising this reply, speaking it here as well would play
     // two voices over each other. Its audio arrives on this same socket.
     if (!payload.reply_audio) {
       speak(payload.reply, () => audio.sendControl("playback-finished"));
     }
-    if (sessionId) {
+    if (sessionId && payload.transcript) {
+      // A recovery adds no turn to the conversation, so there is nothing new to fetch.
       api(`/api/simulator/sessions/${sessionId}`)
         .then((body) => renderEvents(body.events))
         .catch(() => {});

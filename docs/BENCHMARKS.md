@@ -2239,3 +2239,49 @@ the abandoned decode keeps running until it finishes on its own - which is the a
 generous default rather than an aggressive one, since every timeout leaves a worker competing
 with whatever runs next. That property is asserted directly in
 `tests/test_speech_transcribe_timeout.py` rather than left as a comment.
+
+## Releasing the turn is only half a fix (2026-09-06)
+
+The deadline above stops a flailing decoder holding the conversation. It does not, on its
+own, tell the buyer anything.
+
+Traced through the shipped socket path: an utterance that produces no transcript takes the
+early return in `_handle_utterance`, which sends a JSON `utterance` message and **nothing
+else** - no reply, no audio. So the sequence a buyer actually experienced on a timeout was:
+speak, hear a filler at 700 ms, hear a second filler at 2.5 s, then **silence**, forever.
+
+Silence is the one response a voice product cannot use, because it is indistinguishable
+from a fault in every layer beneath it - the microphone, the socket, the browser, the call.
+A buyer cannot tell a dropped turn from a dropped call.
+
+`speech/recovery.py` answers it out loud, in the session language, and the set of outcomes
+that get an answer is deliberately two:
+
+| outcome | answered? | why |
+|---|---|---|
+| `transcription-timed-out` | **yes** | the buyer definitely spoke - an utterance only endpoints after `min_speech_ms` - and the decoder definitely failed |
+| `transcriber-unavailable` | **yes** | same shape: speech captured, component did not read it |
+| `no-speech-recognized` | no | may be a cough, a door, a chair. An agent that says "sorry?" to a cough is worse than one that ignores it, and this outcome cannot tell them apart |
+| `low-confidence` | no | a judgement about a transcript that *exists*, not a failure to produce one |
+| `oversize` | no | the buyer ran past the cap; asking them to repeat a too-long speech is the wrong remedy |
+| `language-unsupported` | no | the agent has just decided it cannot serve this language; answering anyway contradicts the decision it made a millisecond earlier |
+
+**The phrasing owns the failure.** Every line says the agent missed it, never that the buyer
+was unclear - the buyer may have spoken perfectly and the decoder timed out anyway. Blaming
+a listener for a fault in the machine is untrue, and in a sales call it is expensive.
+
+Hinglish gets a romanised line rather than a redirect to Devanagari, for the same reason the
+reply tables carry a `MIXED` entry: switching a Hinglish speaker into literary Hindi reads as
+correcting them, and an apology is the worst moment to do that.
+
+### A label map had already drifted, silently
+
+`OUTCOME_LABELS` in `apps/web/app.js` is `UtteranceOutcome` written out by hand in
+JavaScript, and it renders straight at the buyer with `|| payload.outcome` as the fallback.
+`language-unsupported` was added to the enum in an earlier change and **never labelled**, so
+that outcome had been showing the raw identifier. Adding `transcription-timed-out` would
+have done it a second time.
+
+No import can catch that - one side is Python, the other a JavaScript object literal - so it
+is now a test that parses the real `app.js` and asserts the two sets match exactly, in both
+directions. A label for an outcome that no longer exists fails it too.

@@ -485,3 +485,20 @@ All notable changes to PitchBot are documented here.
 - **A transcription benchmark without number normalisation measures formatting, not
   hearing.** The previous one-sentence reading charged both models 25% CER for writing
   "50,000" where the reference said "fifty thousand" - both had heard it perfectly.
+
+- **A dropped turn is now answered out loud instead of with silence.** Releasing the turn
+  was only half the fix: an utterance with no transcript took an early return that sent a
+  JSON outcome and nothing else, so a buyer who spoke and waited out the deadline heard two
+  fillers and then permanent silence - indistinguishable from a dropped call.
+
+  `speech/recovery.py` says "Sorry, I missed that. Could you say it again?" in the session
+  language, and **only** for `transcription-timed-out` and `transcriber-unavailable`, where
+  the buyer definitely spoke and the system definitely failed. Noise, low confidence,
+  oversize and unsupported-language stay silent on purpose - an agent that says "sorry?" to
+  a cough is worse than one that ignores it. The phrasing owns the failure and never tells
+  the buyer they were unclear.
+
+- **The browser's outcome-label map had drifted and nobody could have noticed.**
+  `language-unsupported` was added to `UtteranceOutcome` in an earlier change and never
+  labelled, so it rendered the raw identifier at the buyer. It is now pinned by a test that
+  parses the real `app.js` and compares both directions against the enum.
