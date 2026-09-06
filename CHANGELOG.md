@@ -658,3 +658,15 @@ All notable changes to PitchBot are documented here.
   and `Settings` must now name exactly the same keys, asserted in both directions -
   documented-but-removed matters too, being a line in someone's `.env` quietly doing
   nothing.
+
+- **`SECOND_AFTER_MS` 3,200 -> 4,500, because the number it was chosen against was stale.**
+  Measured end to end with nothing mocked - real speech at real time, real endpointing,
+  resident faster-whisper and Piper, clock stopped at the first byte of reply audio - the
+  reply arrives at a median of **2,875 ms** and at worst **3,383 ms**, not the ~2,587 ms
+  quoted. At 3,200 the second filler began 183 ms before the slowest reply and delayed one
+  turn in ten by its own length: the same failure it had been raised from 2,500 to avoid.
+  4,500 clears the slowest observed reply by a third again, stays 1.5 s inside the 6,000 ms
+  transcription deadline, and leaves at most ~3.2 s of mid-turn silence.
+
+  The same run confirms the timing fix itself: first filler **925 ms** measured against
+  **920 ms** predicted from audio time.

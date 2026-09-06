@@ -2642,3 +2642,41 @@ Recorded because a clean audit is a result, and repeating it is waste:
   gate the heavy piper and whisper integration tests, named inside `docs/PROGRESS.md`, which
   is a historical per-PR log rather than guidance. Not stale, and not something to "fix" -
   editing a historical entry would make the record wrong.
+
+### The whole turn, end to end, with nothing mocked (2026-09-07)
+
+Everything above argues against `~2,587 ms`, and the wall-clock run put the *transcript*
+alone at 2,709 ms - later than the whole turn was supposed to take. A justification resting
+on a stale figure is worth as little as one resting on none, so the turn was measured again:
+real synthesised speech fed at real time, real WebRTC endpointing, resident faster-whisper
+`small`, the real conversation engine and a resident Piper voice, with the clock stopped at
+the **first byte of reply audio** - the moment the buyer stops hearing silence
+(`probe_full_turn_wallclock.py`, 10 English turns).
+
+| from the buyer's last word | median | fastest | slowest |
+|---|---:|---:|---:|
+| first filler | 925 ms | 819 ms | 978 ms |
+| transcript ready | 2,668 ms | 2,401 ms | 3,181 ms |
+| reply planned | +1 ms | | |
+| **first byte of reply audio** | **2,875 ms** | **2,636 ms** | **3,383 ms** |
+
+Two conclusions, one comfortable and one not.
+
+**The timing fix is confirmed.** 925 ms measured against 920 ms predicted from audio time.
+
+**`SECOND_AFTER_MS = 3,200` was wrong.** It sat 183 ms *before* the slowest reply, so on
+one turn in ten it began speaking just as the reply became ready - and because the reply
+waits for a filler rather than chopping it, that does not cover the wait, it extends it by
+the filler's own length. This is precisely the failure the value was raised from 2,500 to
+avoid; it was wrong for the same reason, only less often, and only measuring the real thing
+could show it.
+
+**4,500** clears the slowest observed reply by 1,117 ms - a third again, which is the margin
+a ten-sample estimate deserves. It stays 1.5 s inside the 6,000 ms transcription deadline, so
+a genuinely slow turn is still covered before the recovery line speaks, and the longest
+mid-turn silence it can leave is ~3.2 s - under the ~4.5 s at which a person concludes the
+line has dropped.
+
+The `~2,587 ms` figure is corrected where it was load-bearing (the CLI help, `.env.example`,
+the settings comment) and left untouched in earlier entries, which recorded what was true
+when they were written.
