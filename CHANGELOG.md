@@ -646,3 +646,15 @@ All notable changes to PitchBot are documented here.
 
   This is the only honest way to move that number: fitting it needs recordings of real
   speakers pausing mid-thought, and a synthesised corpus has no natural pauses to fit to.
+
+- **The tuning argument was circular until the CLI could tune.** Exposing `end_silence_ms`
+  in `Settings` said to tune it by ear against real speakers, while `pitchbot-talk` - the
+  tool you would use to do that - built its pipeline with no config and ran a hardcoded
+  700 ms. `--end-silence-ms` now exists and the startup line reports the active value.
+
+- **`.env.example` drift is a test, not a habit.** The new settings were missing from the
+  file that documents every other speech knob down to `PITCHBOT_SPEECH_STT_BEAM_SIZE`, and
+  a setting nobody can discover is barely more use than one that does not exist. The file
+  and `Settings` must now name exactly the same keys, asserted in both directions -
+  documented-but-removed matters too, being a line in someone's `.env` quietly doing
+  nothing.

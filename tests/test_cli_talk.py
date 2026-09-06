@@ -19,6 +19,7 @@ from pitchbot.cli.talk import (
     OPENERS,
     SUPERTONIC_PREFERRED,
     VOICE_PREFIXES,
+    build_listener,
     build_parser,
     build_speaker,
     build_supertonic_speaker,
@@ -259,3 +260,44 @@ def test_end_silence_is_tunable_from_the_command_line() -> None:
 
     assert build_parser().parse_args([]).end_silence_ms == TurnTakingConfig().end_silence_ms
     assert build_parser().parse_args(["--end-silence-ms", "450"]).end_silence_ms == 450
+
+
+def test_the_cli_hands_the_threshold_to_the_pipeline_it_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parsing a flag is not using it.
+
+    The flag test above passes whether or not `build_listener` ever mentions
+    `end_silence_ms` - which is precisely the shape of the bug this whole change is about:
+    a value that exists, is documented, and reaches nothing. Every optional component is
+    replaced here rather than skipped, so this holds with no extras installed.
+    """
+
+    from pitchbot.adapters import faster_whisper_stt, webrtc_vad
+    from pitchbot.speech import microphone
+    from pitchbot.speech import pipeline as pipeline_module
+
+    captured: dict[str, object] = {}
+
+    class CapturingPipeline:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(microphone, "is_available", lambda: True)
+    monkeypatch.setattr(microphone, "Microphone", lambda **_kwargs: object())
+    monkeypatch.setattr(webrtc_vad, "WEBRTC_VAD_AVAILABLE", True)
+    monkeypatch.setattr(webrtc_vad, "WebRtcVoiceActivityDetector", lambda **_kwargs: object())
+    monkeypatch.setattr(faster_whisper_stt, "FASTER_WHISPER_AVAILABLE", True)
+    monkeypatch.setattr(
+        faster_whisper_stt, "FasterWhisperSpeechToTextAdapter", lambda **_kwargs: object()
+    )
+    monkeypatch.setattr(pipeline_module, "SpeechTurnPipeline", CapturingPipeline)
+
+    args = build_parser().parse_args(["--end-silence-ms", "450"])
+    listener, note = build_listener(LanguageCode.ENGLISH, args)
+
+    assert listener is not None, note
+    config = captured["config"]
+    assert isinstance(config, TurnTakingConfig)
+    assert config.end_silence_ms == 450
+    assert "450" in note, "the operator cannot tune what the startup line does not report"
