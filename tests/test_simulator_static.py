@@ -1,8 +1,10 @@
+import re
 from pathlib import Path
 from typing import Protocol, cast
 
 from pitchbot.main import app
 from pitchbot.simulator.router import is_allowed_websocket_origin, router
+from pitchbot.speech.pipeline import UtteranceOutcome
 
 WEB = Path("apps/web")
 
@@ -96,3 +98,27 @@ def test_a_reply_queues_behind_a_finished_filler_rather_than_cutting_it_off() ->
     assert "after: !payload.filler" in javascript
     assert "MAX_CARRY_OVER_SECONDS = 2" in player
     assert "queued <= MAX_CARRY_OVER_SECONDS" in player
+
+
+def test_every_utterance_outcome_the_browser_can_receive_has_a_label() -> None:
+    """The label map is Python enum values written out by hand in JavaScript, so it drifts.
+
+    It had already drifted before anyone noticed: `language-unsupported` was added to
+    `UtteranceOutcome` in an earlier change and never labelled, so the browser rendered the
+    raw identifier at the buyer. Adding `transcription-timed-out` would have done it again.
+
+    There is no import that could have caught this - one side is Python, the other is a
+    JavaScript object literal - so the check has to be a test, and it has to read the real
+    file rather than a copy of the list.
+    """
+
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    block = javascript.split("const OUTCOME_LABELS = {", 1)[1].split("};", 1)[0]
+    labelled = set(re.findall(r'"([a-z-]+)":', block))
+
+    # `transcribed` never reaches the label path - it is the branch that renders a reply.
+    expected = {outcome.value for outcome in UtteranceOutcome} - {UtteranceOutcome.TRANSCRIBED}
+    assert expected <= labelled, f"unlabelled outcomes: {sorted(expected - labelled)}"
+    assert labelled <= expected, (
+        f"labels for outcomes that do not exist: {sorted(labelled - expected)}"
+    )

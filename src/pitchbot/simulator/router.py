@@ -55,6 +55,7 @@ from pitchbot.simulator.service import (
 from pitchbot.simulator.speech_output import LockedSocket, ReplyAudioSender, ThinkingFiller
 from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
 from pitchbot.speech.providers import build_speech_providers
+from pitchbot.speech.recovery import recovery_phrase
 from pitchbot.storage import (
     SqlAlchemyEventRepository,
     create_database_engine,
@@ -174,6 +175,7 @@ def _build_service() -> SimulatorService:
             speech_synthesizer=speech_providers.synthesizer,
             language_model=language_model,
             speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
+            speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -192,6 +194,7 @@ def _build_service() -> SimulatorService:
         speech_synthesizer=speech_providers.synthesizer,
         language_model=language_model,
         speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
+        speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
     )
 
 
@@ -557,7 +560,24 @@ async def _reply_to_utterance(
         # unfinished contributed nothing and would otherwise look like time well spent.
         record_stage(TurnStage.DETECT_LANGUAGE, result.detect_language_ms, language=language_label)
     if not result.is_turn or result.text is None:
+        # A dropped turn used to be reported as JSON and nothing else, so a buyer who spoke
+        # and got silence could not tell the agent apart from a dropped call. Only genuine
+        # system failures are answered - see `speech/recovery.py` for why a cough is not.
+        language = simulator_service.get_session(session_id).language
+        phrase = recovery_phrase(result.outcome, language)
+        if phrase is None or not sender.enabled:
+            await socket.send_json(message)
+            return True
+        message["reply"] = phrase
+        message["reply_audio"] = sender.enabled
+        message["recovery"] = True
+        # The floor is taken exactly as it is for a real reply: the agent is about to
+        # speak, so buyer speech over it is an interruption and must stay one.
+        pipeline.agent_started_speaking()
         await socket.send_json(message)
+        if filler is not None:
+            await filler.settle()
+        await sender.start(phrase, language)
         return True
 
     started = perf_counter()

@@ -831,6 +831,12 @@ def test_a_filler_never_speaks_into_the_next_turn(
         for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
             socket.send_bytes(payload)
         first = drain_until(socket, "utterance", limit=80)
+        # Hand the floor back before the second turn, the way a browser does once playback
+        # ends. Harmless when the agent never spoke - `agent_stopped_speaking` is a no-op
+        # outside AGENT_SPEAKING - and it stops this test blocking forever if a change ever
+        # makes the first utterance produce speech, because a held floor would discard the
+        # second utterance instead of closing it.
+        socket.send_text(PLAYBACK_FINISHED)
         for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
             socket.send_bytes(payload)
         second = drain_until(socket, "utterance", limit=80)
@@ -840,3 +846,106 @@ def test_a_filler_never_speaks_into_the_next_turn(
 
     assert fillers(first) == 1, "the first utterance produced no transcript but did wait"
     assert fillers(second) == 1, "a filler leaked past its own turn and muted the next one"
+
+
+def use_transcribe_timeout(monkeypatch: pytest.MonkeyPatch, milliseconds: float) -> None:
+    monkeypatch.setattr(
+        router_module.simulator_service, "_speech_transcribe_timeout_ms", milliseconds
+    )
+
+
+def test_a_dropped_turn_is_answered_out_loud_instead_of_with_silence(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silence is the one response a voice product cannot use.
+
+    It is indistinguishable from a fault in every layer beneath it - the microphone, the
+    socket, the browser - so a buyer who spoke and heard nothing has no way to tell the
+    agent apart from a dropped call.
+    """
+
+    use_transcriber(monkeypatch, SlowTranscriber(0.6, [transcript("Hello.")]))
+    use_transcribe_timeout(monkeypatch, 50)
+    synthesizer = StubSynthesizer(64)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-recovery-spoken")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        traffic = drain_until(socket, "utterance", limit=80)
+        utterance = next(item for item in traffic if item["type"] == "utterance")
+
+        # Asserted before draining for audio. `drain_until` blocks on `receive`, so a
+        # regression that stops the recovery being spoken would hang here instead of
+        # failing - and a test that hangs tells CI nothing about what broke.
+        assert utterance["outcome"] == "transcription-timed-out"
+        assert utterance["recovery"] is True
+        assert utterance["reply_audio"] is True
+        assert "transcript" not in utterance, "there was never going to be one"
+        assert synthesizer.calls == [utterance["reply"]]
+
+        traffic += drain_until(socket, REPLY_AUDIO_END, limit=80)
+        # The agent is speaking, so buyer speech over it has to stay an interruption. The
+        # ack reports the turn-taking state, which is the only view of the floor from here.
+        socket.send_bytes(SILENCE)
+        ack = next(item for item in drain_until(socket, "ack", limit=80) if item["type"] == "ack")
+
+    assert ack["state"] == "agent-speaking", "a recovery must hold the floor like any reply"
+    assert [i for i in traffic if i["type"] == REPLY_AUDIO_BEGIN][0]["filler"] is False
+
+
+def test_noise_is_still_answered_with_silence(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent that says "sorry?" to a cough is worse than one that ignores it.
+
+    `no-speech-recognized` cannot tell a cough from a sentence, so it is deliberately not
+    in the recoverable set - this is the test that stops that decision being reversed by
+    accident later.
+    """
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[]))
+    synthesizer = StubSynthesizer(64)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-recovery-silent")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        utterance = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+
+    assert utterance["outcome"] == "no-speech-recognized"
+    assert "reply" not in utterance
+    assert "recovery" not in utterance
+    assert synthesizer.calls == []
+
+
+def test_without_a_voice_a_dropped_turn_is_reported_and_not_spoken(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployments with no synthesiser must not claim a reply the buyer will never hear."""
+
+    use_transcriber(monkeypatch, SlowTranscriber(0.6, [transcript("Hello.")]))
+    use_transcribe_timeout(monkeypatch, 50)
+    use_synthesizer(monkeypatch, None)
+    session_id = new_session(client, "audio-recovery-no-voice")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        utterance = utterance_after(socket, [SPEECH, SILENCE, SILENCE, SILENCE])
+
+    assert utterance["outcome"] == "transcription-timed-out"
+    assert "reply" not in utterance

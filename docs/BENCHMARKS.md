@@ -2091,3 +2091,197 @@ test that *hung* instead of failing when the filler stopped being sent at all; a
 double-`start` whose second call cancelled the first before its synthesiser was ever
 iterated, so counting what was said missed it; and a missing stop signal that changes nothing
 about what is spoken and adds the full settle timeout to every short turn.
+
+## Transcription is 66% of the turn, and four ways to shrink it do not work (2026-09-06)
+
+The latency budget above makes transcription the largest term in the spoken turn: ~1,717 ms
+of ~2,587 ms. `probe_transcription_cost_shape.py` had already left one door open, recording
+that a per-language model choice "remains possible for English only, and is not taken here on
+the strength of one sentence". This is that measurement, plus three other candidates. All
+four fail, and the failures are worth more than another number: they say the 1,717 ms is
+**structural to Whisper `small` on CPU**, not a tuning oversight.
+
+Corpus: 8 B2B sales turns per language, synthesised with Piper at deterministic settings and
+transcribed back on `small`/int8, 16 logical cores. Synthesised speech is cleaner than a
+microphone, so absolute CER is optimistic - the comparison between models is the point, and
+every model sees identical audio. `probe_per_language_model.py`.
+
+### First, the scorer was wrong, and it mattered
+
+The earlier one-sentence reading spelled digits out character by character, so a transcriber
+writing "50,000" where the reference said "fifty thousand" was charged **25% CER for hearing
+it perfectly**. Both `base` and `small` did exactly that on the first corpus sentence. The
+scorer now collapses any run of number tokens - digits or words - to a single `<num>`.
+
+This is the same trap a previous session hit in Arabic, where a flawless transcription scored
+52% purely for writing "14.000". It is worth stating as a rule: **a transcription benchmark
+without number normalisation is measuring formatting, not hearing.**
+
+### 1. A smaller model for English - REFUTED
+
+| model | median ms | median CER | worst CER | Hindi script |
+|---|---:|---:|---:|---|
+| `tiny` | 314 ms | 25.7% | 47.2% | latin (wrong) |
+| `base` | 619 ms | 6.5% | 32.3% | arabic (wrong) |
+| `small` | 1,855 ms | **0.0%** | 13.0% | devanagari |
+
+`base` is **3.0x faster** and its median looks tolerable, which is exactly why the median is
+the wrong statistic. Per sentence, `base` mangles **3 of 8** turns that `small` transcribes
+perfectly:
+
+| said | `base` heard |
+|---|---|
+| "We need it live before the festival season in October" | "We needed life before the first of all season and October" |
+| "Who else have you built something like this for?" | "You also rebuilt something like this for." |
+| "The decision will be made by me and my brother, we are partners." | "The touch of the beam made by me and my brother..." |
+
+A sales agent that mishears three turns in eight is not a faster agent, it is a broken one.
+
+**Near miss worth recording.** `avg_logprob` separates the failures cleanly on this corpus -
+the three bad transcripts scored -0.45, -0.50 and -1.14, the five good ones -0.24 to -0.36 -
+so a confidence-gated cascade (`base` first, re-run on `small` when it is unsure) would cost
+about 1,315 ms on average against 1,855 ms today. It is not taken: the threshold would be
+fitted on the same eight sentences that motivate it, it needs a second resident model, and
+its fallback path (2,474 ms) is *slower* than doing nothing. Named, not shipped.
+
+### 2. Shrinking Whisper's 30 s window with `chunk_length` - REFUTED
+
+Cost is flat in utterance length because Whisper pads every clip to a 30 s window, so
+avoiding the padding looked like free money. It is not available: `chunk_length` changes
+segmentation, not the encoder window.
+
+| `chunk_length` | median ms | median CER | worst CER |
+|---:|---:|---:|---:|
+| 30 (default) | 2,079 ms | 0.0% | 13.0% |
+| 20 | 2,059 ms | 0.0% | 13.0% |
+| 15 | 1,972 ms | 0.0% | 13.0% |
+| 10 | 2,059 ms | 0.0% | 13.0% |
+| 5 | 1,976 ms | 0.0% | **76.1%** |
+
+Every value is within noise of 30, and at 5 the accuracy collapses while the latency does
+not move.
+
+### 3. Transcribing during the endpoint wait - REFUTED
+
+The endpointer spends 700 ms confirming the buyer stopped, and the CPU is idle for all of it.
+Starting the transcription when silence *begins*, concurrently with that wait, would recover
+up to 700 ms with - so the argument went - no accuracy cost at all, because the audio differs
+only by trailing silence and Whisper pads to 30 s anyway.
+
+The premise is false. The same speech transcribed with 0 / 300 / 400 / 700 / 1500 ms of
+trailing silence appended:
+
+| language | sentences identical at every padding |
+|---|---|
+| English | 4 / 5 |
+| Hindi | **1 / 5** |
+
+And the English disagreement is not cosmetic: at 700 ms the model returns *"...on what's
+happening **and it's** getting hard to manage"*, at every other padding it drops those words.
+A speculation launched at 400 ms would therefore answer a **different sentence** from the one
+the endpoint would have produced, sometimes a worse one. Whatever it saves, it is not free,
+and "free" was the entire case for it.
+
+### 4. CPU threading - REFUTED (already optimal)
+
+| `cpu_threads` | median ms | speedup |
+|---:|---:|---:|
+| 0 (default) | 1,729 ms | 1.00x |
+| 2 | 2,754 ms | 0.63x |
+| 4 | 1,711 ms | 1.01x |
+| 8 | 1,611 ms | 1.07x |
+| 16 | 1,697 ms | 1.02x |
+
+The default already picks well. 8 threads is 7% faster on this machine - inside run-to-run
+noise, and a machine-specific number not worth pinning.
+
+### What the four refutations leave
+
+Transcription latency on this hardware is not reachable by decoder knobs, model size,
+window size, concurrency or threading. Reducing it means changing the engine class, which is
+a licence-and-language question rather than a tuning one. Meanwhile the mitigation that
+*is* available is perceptual, and is already shipped: the backchannel.
+
+## A supported language can hold the decoder for 28 seconds (2026-09-06)
+
+Found while running the corpus above, and the reason this PR exists at all.
+
+`small`/int8, Hindi, **a supported language in the shipped configuration**:
+
+| clip | audio | median | observed range |
+|---|---:|---:|---|
+| English, 8 sentences | 3.1-6.3 s | 1,855 ms | 1,860-2,079 ms |
+| Hindi, "हम एक रिटेल दुकान..." | 5.8 s | 2,491 ms | - |
+| Hindi, "क्या आप हमारे लिए..." | **3.2 s** | **11,455 ms** | **11,983-28,656 ms** |
+
+The slow clip is the **shortest** one. It is not a runaway output - one segment, 40
+characters, compression ratio 1.24 - the decoder simply searched, reproducibly, across five
+separate runs at different paddings.
+
+Nothing bounded it. `max_audio_seconds` (120 s) bounds how much audio may be *submitted*, and
+that bound could never have caught this: cost is nearly flat in length, 16.1 s of speech costs
+2,245 ms, and the offending clip was 3.2 s. The input was never large, only slow.
+
+The cost is worse than a slow reply. The socket's receive loop waits inside
+`SpeechTurnPipeline.push`, so for the whole 28 seconds the agent is **deaf** - it cannot
+classify a frame, cannot notice a barge-in, and cannot be interrupted. Against the budget
+above, 28,656 ms is **143x** the ~200 ms gap a person leaves between turns and 72x G.114's
+ceiling.
+
+`DEFAULT_TRANSCRIBE_TIMEOUT_MS` is 6,000 ms, chosen because the two regimes are an order of
+magnitude apart rather than adjacent: every healthy transcription measured here costs
+1.9-2.5 s regardless of audio length, and the live endpointer caps an utterance at 20 s, so
+~2.5 s is the worst healthy case the socket can produce. 6 s clears it by better than 2x and
+still cuts the pathology by 2-5x. There is nothing between 2.5 s and 11 s to tune against.
+
+**The deadline recovers the turn, not the CPU.** `asyncio.to_thread` cannot be interrupted, so
+the abandoned decode keeps running until it finishes on its own - which is the argument for a
+generous default rather than an aggressive one, since every timeout leaves a worker competing
+with whatever runs next. That property is asserted directly in
+`tests/test_speech_transcribe_timeout.py` rather than left as a comment.
+
+## Releasing the turn is only half a fix (2026-09-06)
+
+The deadline above stops a flailing decoder holding the conversation. It does not, on its
+own, tell the buyer anything.
+
+Traced through the shipped socket path: an utterance that produces no transcript takes the
+early return in `_handle_utterance`, which sends a JSON `utterance` message and **nothing
+else** - no reply, no audio. So the sequence a buyer actually experienced on a timeout was:
+speak, hear a filler at 700 ms, hear a second filler at 2.5 s, then **silence**, forever.
+
+Silence is the one response a voice product cannot use, because it is indistinguishable
+from a fault in every layer beneath it - the microphone, the socket, the browser, the call.
+A buyer cannot tell a dropped turn from a dropped call.
+
+`speech/recovery.py` answers it out loud, in the session language, and the set of outcomes
+that get an answer is deliberately two:
+
+| outcome | answered? | why |
+|---|---|---|
+| `transcription-timed-out` | **yes** | the buyer definitely spoke - an utterance only endpoints after `min_speech_ms` - and the decoder definitely failed |
+| `transcriber-unavailable` | **yes** | same shape: speech captured, component did not read it |
+| `no-speech-recognized` | no | may be a cough, a door, a chair. An agent that says "sorry?" to a cough is worse than one that ignores it, and this outcome cannot tell them apart |
+| `low-confidence` | no | a judgement about a transcript that *exists*, not a failure to produce one |
+| `oversize` | no | the buyer ran past the cap; asking them to repeat a too-long speech is the wrong remedy |
+| `language-unsupported` | no | the agent has just decided it cannot serve this language; answering anyway contradicts the decision it made a millisecond earlier |
+
+**The phrasing owns the failure.** Every line says the agent missed it, never that the buyer
+was unclear - the buyer may have spoken perfectly and the decoder timed out anyway. Blaming
+a listener for a fault in the machine is untrue, and in a sales call it is expensive.
+
+Hinglish gets a romanised line rather than a redirect to Devanagari, for the same reason the
+reply tables carry a `MIXED` entry: switching a Hinglish speaker into literary Hindi reads as
+correcting them, and an apology is the worst moment to do that.
+
+### A label map had already drifted, silently
+
+`OUTCOME_LABELS` in `apps/web/app.js` is `UtteranceOutcome` written out by hand in
+JavaScript, and it renders straight at the buyer with `|| payload.outcome` as the fallback.
+`language-unsupported` was added to the enum in an earlier change and **never labelled**, so
+that outcome had been showing the raw identifier. Adding `transcription-timed-out` would
+have done it a second time.
+
+No import can catch that - one side is Python, the other a JavaScript object literal - so it
+is now a test that parses the real `app.js` and asserts the two sets match exactly, in both
+directions. A label for an outcome that no longer exists fails it too.
