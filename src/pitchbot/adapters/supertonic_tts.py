@@ -82,7 +82,27 @@ latency and costs 8.7 points of CER, 16 costs 1.8x the latency for nothing at al
 """
 
 DEFAULT_SPEED: Final[float] = 1.05
-"""The library default, kept so that changing it is a deliberate act with its own evidence."""
+"""Speaking rate. Measured optimum, not an inherited default, and deliberately not config.
+
+It looks like a latency dial and is not one. Measured 2026-09-06 on Devanagari Hindi, the
+synthesis time barely moves while intelligibility falls off a cliff:
+
+=====  =========  =======  ======
+speed  synth ms   audio s  CER
+=====  =========  =======  ======
+1.00   852 ms     2.79 s   13.1%
+1.05   873 ms     2.68 s   **12.1%**
+1.15   848 ms     2.44 s   16.8%
+1.30   692 ms     2.16 s   33.8%
+=====  =========  =======  ======
+
+Going 1.00 to 1.15 saves **4 ms** of synthesis and costs **4.7 points** of CER, because the
+rate changes how much audio is produced rather than how fast it is produced. 1.05 happens to
+be both the library default and the measured minimum.
+
+Not exposed as a setting for that reason: a knob whose whole measured range is worse than
+its default is not configuration, it is a way for a deployment to damage itself quietly.
+"""
 
 DEFAULT_FRAME_BYTES: Final[int] = 32_768
 DEFAULT_MAX_TEXT_CHARS: Final[int] = 2_000

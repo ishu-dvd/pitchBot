@@ -2416,3 +2416,65 @@ loads a voice once and keeps it resident; the probe now does too.
 
 That is twice in two days that a measurement, not a model, was the thing that was wrong.
 Both times the tell was a number that made no sense next to a known-good baseline.
+
+### Transliterating Hinglish to Devanagari makes it worse (2026-09-06)
+
+The obvious next move after routing Hinglish to the Hindi frontend: the words are Hindi, so
+write them in Devanagari before synthesising and the phonemiser should stop guessing.
+
+The **gap is real**. Same six sentences, same engine, same transcriber - only the input
+script changes:
+
+| input | synth ms | audio | median CER |
+|---|---:|---:|---:|
+| romanised *(shipped)* | 1,059 ms | 3.34 s | 21.9% |
+| ITRANS -> Devanagari | 984 ms | 3.24 s | **35.6%** |
+| hand-written Devanagari *(ceiling)* | 897 ms | 2.68 s | **11.0%** |
+
+So a correct transliteration would be worth **11 points** - it would roughly halve the error
+and bring Hinglish to the same quality as native Hindi.
+
+**`indic-transliteration` (ITRANS) is not that transliterator.** It is 13.7 points *worse*
+than shipping the romanised text unchanged, and the reason is structural rather than a
+tuning problem:
+
+| romanised | ITRANS gives | should be |
+|---|---|---|
+| `aapka budget kitna soch rahe hain` | आप्क बुद्गेत् कित्न सोच् रहे हैन् | आपका बजट कितना सोच रहे हैं |
+| `theek hai aapka business samajh gaya` | थीक् है आप्क बुसिनेस्स् समझ् गय | ठीक है आपका बिज़नेस समझ गया |
+
+Two failures, both inherent:
+
+1. **The implicit schwa.** ITRANS is a *strict* scheme: a bare consonant means halant. Informal
+   romanisation relies on the reader supplying the vowel, so `kitna` becomes कित्न rather than
+   कितना and almost every word ends in a dead consonant.
+2. **English loanwords.** Hinglish deliberately keeps `budget`, `website`, `payment` in
+   English - that is the register, and the reply tables say so explicitly. Transliterating
+   them phonetically as Sanskrit produces बुद्गेत्, which is not a word in any language.
+
+Informal romanised Hindi to Devanagari is a **transliteration model** problem, not a mapping
+table. AI4Bharat's IndicXlit exists for it, but it is a torch model and this project's TTS
+environment is deliberately torch-free.
+
+Recorded rather than attempted: the 11-point prize is now measured, and so is the fact that
+the cheap route to it does not work.
+
+### `speed` is not a latency dial (2026-09-06)
+
+Supertonic exposes `speed`, and at ~1,130 ms per sentence it is the slowest thing in the
+speech path, so it looked like the obvious lever. It is not:
+
+| speed | synth ms | audio s | median CER |
+|---:|---:|---:|---:|
+| 1.00 | 852 ms | 2.79 s | 13.1% |
+| **1.05** | 873 ms | 2.68 s | **12.1%** |
+| 1.15 | 848 ms | 2.44 s | 16.8% |
+| 1.30 | 692 ms | 2.16 s | 33.8% |
+
+Going 1.00 to 1.15 saves **4 ms** of synthesis and costs **4.7 points** of CER. The rate
+changes how much audio is produced, not how fast it is produced, so it shortens playback
+while the buyer is still waiting the same time to hear anything.
+
+1.05 is both the library default and the measured minimum, which is why it is pinned in
+`DEFAULT_SPEED` with the table above and **not** exposed as configuration: a knob whose
+entire measured range is worse than its default is not configuration.

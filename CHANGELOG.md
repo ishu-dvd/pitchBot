@@ -558,3 +558,20 @@ All notable changes to PitchBot are documented here.
   voice on every call - `en_US-joe-medium` read 2,391 ms instead of 134 ms. CER was
   unaffected, but latency was the column the decision would have been argued over. Second
   time in two days that the harness, not the model, was the thing that was wrong.
+
+### Measured and rejected (PR 52)
+
+- **Transliterating Hinglish to Devanagari before synthesis - via ITRANS - makes it worse.**
+  The prize is real: hand-written Devanagari scores 11.0% CER against 21.9% for the
+  romanised text actually shipped, so a correct transliterator would roughly halve the
+  error. `indic-transliteration` is not it - 35.6%, *worse than doing nothing* - because
+  informal romanisation relies on the implicit schwa that a strict scheme reads as halant
+  (`kitna` -> कित्न, not कितना), and because Hinglish deliberately keeps English loanwords
+  in English (`budget` -> बुद्गेत्). That is a transliteration *model* problem, and the
+  model that solves it needs torch.
+
+- **`speed` is not a latency dial, so it stays un-configurable.** 1.00 to 1.15 saves 4 ms of
+  synthesis and costs 4.7 points of CER; 1.30 collapses to 33.8%. The rate changes how much
+  audio is produced, not how fast, so the buyer waits the same time to hear anything.
+  `DEFAULT_SPEED` now carries the measured curve, and 1.05 is the minimum rather than an
+  inherited default.
