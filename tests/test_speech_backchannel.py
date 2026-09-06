@@ -415,15 +415,20 @@ def test_a_reply_that_is_nearly_ready_is_not_padded_with_a_filler() -> None:
 def test_the_second_filler_still_lands_after_a_normal_reply() -> None:
     """Crediting silence moves both thresholds earlier, and one of them must not move.
 
-    The whole spoken turn is ~2,587 ms. Left at the 2,500 it read before, the second filler
-    would have started 87 ms *before* the reply was ready - and a filler that begins just
-    before the reply delays it. 3,200 keeps the position it effectively had.
+    Measured end to end with nothing mocked (`probe_full_turn_wallclock.py`, 10 English
+    turns), the first byte of reply audio arrives at a median of 2,875 ms and at worst
+    3,383 ms. A second filler that begins before the reply is ready does not cover the
+    wait - the reply waits for it rather than chopping it - so it must clear that.
+
+    Asserted against the slowest observed reply, not the median: the failure this guards
+    is a tail event, and a threshold that only beats the median fails one turn in ten,
+    which is exactly what 3,200 did before it was measured.
     """
 
     policy = Backchannel()
     spoken_at = 720.0 + policy.work_target_ms(policy.second_after_ms, 720.0)
 
-    assert spoken_at > 2_587
+    assert spoken_at > 3_383
 
 
 @pytest.mark.asyncio

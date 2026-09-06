@@ -63,21 +63,36 @@ own documented value, and 7.1x the ~200 ms gap Stivers et al. (PNAS 2009) measur
 human turns. The elapsed silence is now handed to the filler so 700 means 700.
 """
 
-SECOND_AFTER_MS: Final[int] = 3_200
+SECOND_AFTER_MS: Final[int] = 4_500
 """When to say a second, slightly longer thing because the wait is clearly long.
 
-Also counted from the buyer's last word. 3,200 rather than the 2,500 it read before, so
-that it keeps the position it actually had: 2,500 measured from a close that was already
-720 ms late put this at 3,220 ms, and the whole spoken turn is ~2,587 ms. Left at 2,500
-once the reference frame was corrected, it would have fired **87 ms before the reply was
-ready** - and because the reply waits for a filler to finish rather than chopping it, a
-second filler that starts just before the reply does not cover the wait, it *extends* it.
+Also counted from the buyer's last word, and set from a measurement rather than from the
+arithmetic that first chose it. Measured end to end on 2026-09-07 with nothing mocked -
+real speech at real time, real endpointing, resident faster-whisper and Piper, clock stopped
+at the **first byte of reply audio** (`probe_full_turn_wallclock.py`, 10 English turns):
 
-So this is deliberately beyond the typical reply and only reached when a turn is genuinely
-slow - a transcription outlier, which is measured at up to 11 s. It is not a fixed cadence:
-the second phrase comes from the ``patient`` list, because repeating an acknowledgement the
-buyer has already heard sounds like a stuck recording, while "one moment" is what a person
-actually says when they know they are taking a while.
+=========================  ==========
+first byte of reply audio  ms
+=========================  ==========
+median                     2,875
+fastest                    2,636
+**slowest**                **3,383**
+=========================  ==========
+
+The previous value, 3,200, was chosen against a `~2,587 ms` turn figure that this run does
+not reproduce - and at 3,200 the second filler started **183 ms before the slowest reply**,
+delaying **one turn in ten** by its own length. That is the exact failure it was raised from
+2,500 to avoid, so it was wrong for the same reason, only less often.
+
+4,500 clears the slowest observed reply by 1,117 ms - a third again - which is the margin a
+ten-sample estimate deserves. It is still 1.5 s inside the 6,000 ms transcription deadline,
+so a genuinely slow turn is covered before the recovery line speaks, and the longest silence
+it can leave mid-turn is ~3.2 s, under the ~4.5 s at which a person concludes the line has
+dropped.
+
+Not a fixed cadence: the second phrase comes from the ``patient`` list, because repeating an
+acknowledgement the buyer has already heard sounds like a stuck recording, while "one moment"
+is what a person actually says when they know they are taking a while.
 """
 
 MIN_WORK_MS: Final[int] = 200

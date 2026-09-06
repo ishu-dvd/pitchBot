@@ -798,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=TurnTakingConfig().end_silence_ms,
         help="how long the buyer must be quiet before the agent decides they have "
-        "finished. 700 ms of a measured ~2,587 ms spoken turn - 27%% of it, and the "
+        "finished. 700 ms of a measured ~2,875 ms spoken turn - a quarter of it, and the "
         "largest cost after transcription. It cannot be fitted from a synthesised corpus, "
         "which has no natural pauses, so it is tuned by ear: lower it until the agent "
         "starts cutting you off mid-thought, then back off",

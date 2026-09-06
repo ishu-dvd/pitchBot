@@ -165,9 +165,9 @@ class Settings(BaseSettings):
     # is benchmarked" since it was written - but nothing ever built it from settings, so
     # every deployment ran the defaults and a constant is exactly what it was.
     #
-    # `end_silence_ms` is the one that matters: 700 ms of the measured ~2,587 ms spoken
-    # turn, **27% of it**, spent waiting to be sure the buyer has finished. It is not set
-    # from data and cannot be: fitting it needs recordings of real speakers pausing
+    # `end_silence_ms` is the one that matters: 700 ms of a measured ~2,875 ms spoken
+    # turn, **a quarter of it**, spent waiting to be sure the buyer has finished. It is not
+    # set from data and cannot be: fitting it needs recordings of real speakers pausing
     # mid-thought, and a synthesised corpus has no natural pauses to fit to. Lower it and
     # the agent starts interrupting people who were thinking; raise it and every reply
     # feels sluggish. A deployment with real traffic can find its own number - which is
