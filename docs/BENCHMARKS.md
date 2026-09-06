@@ -2361,3 +2361,162 @@ Worth stating as a rule, because it would have produced a false rejection of the
 Hindi option: **when a candidate scores far worse than its own published numbers on a
 language you can check, suspect the harness before the model.** English was the control, and
 it is what exposed the bug.
+
+## Hinglish had no voice at all (2026-09-06)
+
+`LanguageCode.MIXED` is a first-class language in this product. It has its own reply table,
+its own backchannel phrases and its own recovery line, all deliberately romanised with the
+English business nouns kept, because answering a Hinglish speaker in literary Devanagari
+reads as correcting them.
+
+None of it could be said out loud. `MIXED` appeared **nowhere** in the TTS layer - no voice
+mapped, none documented - and `PiperVoiceRegistry.resolve` refuses an unmapped language. In
+the socket path that refusal is caught and reported as a stream with zero frames, so the
+browser quietly spoke the reply in its own voice: the exact situation the server-side voice
+provider exists to replace, reached silently.
+
+An operator *could* map `mixed=<voice>`. Nothing said which, and the answer is not obvious -
+the text is Latin script but the words are Hindi, so an English phonemiser reads the letters
+and a Hindi phonemiser expects Devanagari.
+
+`probe_hinglish_voice.py`, on the product's own Hinglish reply lines. Each line is
+synthesised, transcribed back forcing `hi`, and scored against the **Devanagari** a listener
+should hear - the question is whether the Hindi words survive, not the Latin spelling.
+
+| candidate | median ms | median CER | worst CER | commercial? |
+|---|---:|---:|---:|---|
+| `piper en_US-joe-medium` | 134 ms | 49.9% | 64.1% | yes |
+| `piper en_US-ljspeech-high` | 609 ms | 54.5% | 70.4% | yes |
+| `piper hi_IN-pratham-medium` | 196 ms | 43.4% | 59.5% | **no** |
+| supertonic `lang=en` | 1,080 ms | 38.6% | 43.2% | yes |
+| **supertonic `lang=hi`** | 1,305 ms | **21.2%** | 37.0% | yes |
+
+Twice as intelligible as the best Piper option, and 6.7x slower. The Piper Hindi voice in
+that table is CC-BY-NC-SA, so the best *legal* alternative scores 49.9%.
+
+What that difference sounds like, for *"Aapka budget kitna soch rahe hain?"* (should be
+आपका बजट कितना सोच रहे हैं?):
+
+| candidate | transcribed back as |
+|---|---|
+| `piper en_US-joe-medium` | अखग भज़ट कितनिसाख राहें |
+| `piper hi_IN-pratham-medium` | आपका बज्द कितने से क्वेहें |
+| supertonic `lang=en` | आपका बजँत कितना सोक रेहें |
+| **supertonic `lang=hi`** | **अपका बज़त कितना सुख्रे हैं** |
+
+The winner is recognisably the sentence. The best legal Piper option is not.
+
+### The first timings were four times too slow, and it was the harness again
+
+The probe loaded the ONNX voice on every call, so ~2 s of file I/O sat inside what was
+supposed to be a synthesis measurement: `en_US-joe-medium` read 2,391 ms instead of 134 ms.
+The CER column was unaffected - loading does not change the audio - but the latency column
+was meaningless, and it was the column the decision would have been argued over. The product
+loads a voice once and keeps it resident; the probe now does too.
+
+That is twice in two days that a measurement, not a model, was the thing that was wrong.
+Both times the tell was a number that made no sense next to a known-good baseline.
+
+### Transliterating Hinglish to Devanagari makes it worse (2026-09-06)
+
+The obvious next move after routing Hinglish to the Hindi frontend: the words are Hindi, so
+write them in Devanagari before synthesising and the phonemiser should stop guessing.
+
+The **gap is real**. Same six sentences, same engine, same transcriber - only the input
+script changes:
+
+| input | synth ms | audio | median CER |
+|---|---:|---:|---:|
+| romanised *(shipped)* | 1,059 ms | 3.34 s | 21.9% |
+| ITRANS -> Devanagari | 984 ms | 3.24 s | **35.6%** |
+| hand-written Devanagari *(ceiling)* | 897 ms | 2.68 s | **11.0%** |
+
+So a correct transliteration would be worth **11 points** - it would roughly halve the error
+and bring Hinglish to the same quality as native Hindi.
+
+**`indic-transliteration` (ITRANS) is not that transliterator.** It is 13.7 points *worse*
+than shipping the romanised text unchanged, and the reason is structural rather than a
+tuning problem:
+
+| romanised | ITRANS gives | should be |
+|---|---|---|
+| `aapka budget kitna soch rahe hain` | आप्क बुद्गेत् कित्न सोच् रहे हैन् | आपका बजट कितना सोच रहे हैं |
+| `theek hai aapka business samajh gaya` | थीक् है आप्क बुसिनेस्स् समझ् गय | ठीक है आपका बिज़नेस समझ गया |
+
+Two failures, both inherent:
+
+1. **The implicit schwa.** ITRANS is a *strict* scheme: a bare consonant means halant. Informal
+   romanisation relies on the reader supplying the vowel, so `kitna` becomes कित्न rather than
+   कितना and almost every word ends in a dead consonant.
+2. **English loanwords.** Hinglish deliberately keeps `budget`, `website`, `payment` in
+   English - that is the register, and the reply tables say so explicitly. Transliterating
+   them phonetically as Sanskrit produces बुद्गेत्, which is not a word in any language.
+
+Informal romanised Hindi to Devanagari is a **transliteration model** problem, not a mapping
+table. AI4Bharat's IndicXlit exists for it, but it is a torch model and this project's TTS
+environment is deliberately torch-free.
+
+Recorded rather than attempted: the 11-point prize is now measured, and so is the fact that
+the cheap route to it does not work.
+
+### `speed` is not a latency dial (2026-09-06)
+
+Supertonic exposes `speed`, and at ~1,130 ms per sentence it is the slowest thing in the
+speech path, so it looked like the obvious lever. It is not:
+
+| speed | synth ms | audio s | median CER |
+|---:|---:|---:|---:|
+| 1.00 | 852 ms | 2.79 s | 13.1% |
+| **1.05** | 873 ms | 2.68 s | **12.1%** |
+| 1.15 | 848 ms | 2.44 s | 16.8% |
+| 1.30 | 692 ms | 2.16 s | 33.8% |
+
+Going 1.00 to 1.15 saves **4 ms** of synthesis and costs **4.7 points** of CER. The rate
+changes how much audio is produced, not how fast it is produced, so it shortens playback
+while the buyer is still waiting the same time to hear anything.
+
+1.05 is both the library default and the measured minimum, which is why it is pinned in
+`DEFAULT_SPEED` with the table above and **not** exposed as configuration: a knob whose
+entire measured range is worse than its default is not configuration.
+
+### Loading a voice stalls the event loop; synthesising through it does not (2026-09-06)
+
+The end-to-end check in PR 51 reported `mixed: first 3,415 ms`. The adapter synthesises one
+sentence at a time and yields each as it lands, so that number should have been one
+sentence - about 1 s. The extra two seconds were the model being loaded lazily, inside the
+first buyer's turn.
+
+Measured by `probe_preload_gap.py` with the weights already on disk, against a task that
+ticks every 5 ms and records how late each tick actually was:
+
+| event-loop lateness | median | worst |
+|---|---:|---:|
+| idle | 10.9 ms | 11.7 ms |
+| **during load** (1,358 ms of work) | 60.9 ms | **488.7 ms** |
+| during synthesis (972 ms of work) | 10.8 ms | 11.5 ms |
+
+Synthesis is **indistinguishable from idle**. Loading is not: it holds the GIL in bursts
+despite running under `asyncio.to_thread`, which moves it off the loop's stack but not out
+of its way. The loop carries the audio socket, so a 489 ms stall is 489 ms in which the
+buyer's frames are not read and barge-in cannot fire.
+
+| first Hinglish turn | time to first audio |
+|---|---:|
+| lazy (load + first sentence) | 2,329 ms |
+| preloaded (first sentence only) | **972 ms** |
+
+This is the same shape Piper showed on 2026-09-03 (2,561 ms to load a voice, ~110 ms to
+synthesise through a resident one), which is why `preload_speech_providers` exists at all.
+
+**The routing wrapper had silently switched it off.** `preload_speech_providers` decides by
+`isinstance(provider, Preloadable)` on whatever `build_text_to_speech` returned, and once a
+single language is routed that object is `LanguageRoutedTextToSpeech`. It forwarded
+`synthesize` and nothing else, so the check was `False` and **Piper stopped being
+preloaded** - putting its ~2.5 s voice load back into the first English or Telugu turn, in
+a deployment whose only change was enabling Hindi.
+
+A wrapper that forwards one method of a protocol does not merely fail to add a capability;
+it removes one the wrapped object had. Audited for others of the same shape: `Preloadable`,
+`RetunableTranscriber` and `EarlyDetectingTranscriber` are the only capabilities detected by
+`isinstance` on an adapter, and the transcriber has no wrapper - the pipeline holds it
+directly. The synthesiser was the only place the defect could exist, and it did.

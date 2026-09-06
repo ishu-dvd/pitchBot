@@ -120,6 +120,24 @@ class TextToSpeechAdapter(Protocol):
     ) -> AsyncIterator[SynthesizedAudioChunk]: ...
 
 
+@runtime_checkable
+class Preloadable(Protocol):
+    """A provider that can load its weights ahead of first use.
+
+    Lives here rather than beside the startup hook that calls it, because a *wrapper* has
+    to be able to forward it. :class:`~pitchbot.adapters.routing_tts.LanguageRoutedTextToSpeech`
+    cannot import from :mod:`pitchbot.speech.providers` - providers builds adapters, so the
+    dependency only runs one way - and a protocol it cannot name is one it cannot implement.
+
+    That is not hypothetical: the routing wrapper forwarded ``synthesize`` and nothing else,
+    so configuring a single routed language replaced a preloadable synthesiser with one that
+    was not, and Piper's voice load moved back into the first buyer turn (measured 2,561 ms,
+    holding the GIL) for languages that had nothing to do with the route.
+    """
+
+    async def preload(self) -> None: ...
+
+
 class ModelAdapter(Protocol):
     async def complete_structured(
         self,

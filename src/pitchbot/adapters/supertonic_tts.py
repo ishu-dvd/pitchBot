@@ -38,6 +38,11 @@ multi-sentence reply starts speaking before the last sentence exists.
 for some languages, never a replacement - which is what
 :class:`~pitchbot.adapters.routing_tts.LanguageRoutedTextToSpeech` exists for.
 
+**It is also the only thing that can say Hinglish.** ``LanguageCode.MIXED`` is a first-class
+language in this product - its own reply table, backchannel and recovery line - and had no
+voice at all: `MIXED` appeared nowhere in the TTS layer, so a spoken Hinglish reply fell
+through to a zero-frame stream and the browser's own voice. See ``SUPPORTED_LANGUAGES``.
+
 Licensing, read from the files rather than the badge:
 
 - sample code: MIT.
@@ -77,26 +82,68 @@ latency and costs 8.7 points of CER, 16 costs 1.8x the latency for nothing at al
 """
 
 DEFAULT_SPEED: Final[float] = 1.05
-"""The library default, kept so that changing it is a deliberate act with its own evidence."""
+"""Speaking rate. Measured optimum, not an inherited default, and deliberately not config.
+
+It looks like a latency dial and is not one. Measured 2026-09-06 on Devanagari Hindi, the
+synthesis time barely moves while intelligibility falls off a cliff:
+
+=====  =========  =======  ======
+speed  synth ms   audio s  CER
+=====  =========  =======  ======
+1.00   852 ms     2.79 s   13.1%
+1.05   873 ms     2.68 s   **12.1%**
+1.15   848 ms     2.44 s   16.8%
+1.30   692 ms     2.16 s   33.8%
+=====  =========  =======  ======
+
+Going 1.00 to 1.15 saves **4 ms** of synthesis and costs **4.7 points** of CER, because the
+rate changes how much audio is produced rather than how fast it is produced. 1.05 happens to
+be both the library default and the measured minimum.
+
+Not exposed as a setting for that reason: a knob whose whole measured range is worse than
+its default is not configuration, it is a way for a deployment to damage itself quietly.
+"""
 
 DEFAULT_FRAME_BYTES: Final[int] = 32_768
 DEFAULT_MAX_TEXT_CHARS: Final[int] = 2_000
 DEFAULT_MAX_CHUNKS: Final[int] = 512
 
 SUPPORTED_LANGUAGES: Final[frozenset[LanguageCode]] = frozenset(
-    {LanguageCode.ENGLISH, LanguageCode.HINDI}
+    {LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.MIXED}
 )
 """What this adapter will serve, which is narrower than what the model supports.
 
-The model lists 31 languages. Only the two PitchBot has measured are offered, because an
+The model lists 31 languages. Only the ones PitchBot has measured are offered, because an
 unmeasured language is a claim rather than a capability. Telugu is absent from the model
-entirely, and `MIXED` is absent from this set on purpose: romanised Hinglish through a
-Hindi frontend is a different question that has not been measured.
+entirely.
+
+``MIXED`` - romanised Hinglish - is served through the **Hindi** frontend, which is a
+measured decision and not an obvious one: the text is Latin script but the words are Hindi,
+so an English phonemiser reads the letters and a Hindi phonemiser expects Devanagari.
+Measured 2026-09-06 on the product's own Hinglish reply lines, transcribed back forcing
+`hi` and scored against the Devanagari a listener should hear:
+
+===========================  ==========  ==========
+candidate                    median ms   median CER
+===========================  ==========  ==========
+piper ``en_US-joe-medium``   134 ms      49.9%
+piper ``en_US-ljspeech-high``  609 ms    54.5%
+piper ``hi_IN-pratham-medium`` 196 ms    43.4%
+supertonic ``lang=en``       1,080 ms    38.6%
+**supertonic ``lang=hi``**   1,305 ms    **21.2%**
+===========================  ==========  ==========
+
+Twice as intelligible as the best Piper option and 6.7x slower, and the Piper Hindi voice
+in that table is CC-BY-NC-SA anyway - so the best *legal* alternative is 49.9%, which is
+not a voice, it is a noise. Hinglish had no voice at all before this.
 """
 
 _LANGUAGE_CODES: Final[dict[LanguageCode, str]] = {
     LanguageCode.ENGLISH: "en",
     LanguageCode.HINDI: "hi",
+    # Hinglish is read by the Hindi frontend. See SUPPORTED_LANGUAGES for the measurement:
+    # the words are Hindi even though the letters are Latin, and it shows.
+    LanguageCode.MIXED: "hi",
 }
 
 # Sentence boundaries for English and Devanagari. Splitting here rather than letting the
@@ -223,6 +270,32 @@ class SupertonicTextToSpeechAdapter(TextToSpeechAdapter):
                         f"supertonic has no voice style {self._voice_style!r}: {error}"
                     ) from error
             return engine, self._style
+
+    async def preload(self) -> None:
+        """Load the model now, because loading stalls the loop and synthesising does not.
+
+        Measured 2026-09-06 with the weights already on disk, against a 5 ms heartbeat task
+        that records how late each tick actually was:
+
+        ==============  ===============  ============
+        loop lateness   median           worst
+        ==============  ===============  ============
+        idle            10.9 ms          11.7 ms
+        during load     60.9 ms          **488.7 ms**
+        during synth    10.8 ms          11.5 ms
+        ==============  ===============  ============
+
+        Loading is 1,358 ms of work that holds the GIL in bursts despite running on a
+        worker thread, so ``asyncio.to_thread`` moves it off the loop's *stack* but not out
+        of its way. Synthesis - 972 ms of it - is indistinguishable from idle.
+
+        The loop carries the audio socket, so a 489 ms stall is 489 ms in which the buyer's
+        frames are not read and barge-in cannot fire. Paid at startup it is a slow boot;
+        paid on the first Hinglish turn it is a freeze in front of a customer, and it takes
+        that turn's time-to-first-audio from 972 ms to 2,329 ms.
+        """
+
+        await self._load()
 
     async def synthesize(
         self,

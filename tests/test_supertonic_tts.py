@@ -30,6 +30,7 @@ from pitchbot.adapters.supertonic_tts import (
     split_sentences,
 )
 from pitchbot.domain import LanguageCode
+from pitchbot.speech.providers import Preloadable
 
 
 class RecordingAdapter:
@@ -266,3 +267,184 @@ def test_sentences_split_on_english_and_devanagari_terminators(
     text: str, expected: list[str]
 ) -> None:
     assert split_sentences(text, 100) == expected
+
+
+# --------------------------------------------------------------------------------------
+# Hinglish, which had no voice at all
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hinglish_is_read_by_the_hindi_frontend() -> None:
+    """The letters are Latin but the words are Hindi, and it is the words that matter.
+
+    Measured against the product's own Hinglish reply lines: the Hindi frontend scores
+    21.2% CER, the English one 38.6%, and the best *legal* Piper option 49.9%. Routing this
+    to `en` would be the obvious choice and the wrong one.
+    """
+
+    engine = FakeSupertonic()
+    adapter = SupertonicTextToSpeechAdapter(engine=engine)
+
+    _ = [
+        chunk
+        async for chunk in adapter.synthesize(
+            "Aapka budget kitna soch rahe hain?", LanguageCode.MIXED
+        )
+    ]
+
+    assert [lang for _text, lang, _steps in engine.spoken] == ["hi"]
+
+
+def test_hinglish_is_offered_and_telugu_is_not() -> None:
+    assert LanguageCode.MIXED in SUPPORTED_LANGUAGES
+    assert LanguageCode.TELUGU not in SUPPORTED_LANGUAGES
+
+
+@pytest.mark.asyncio
+async def test_hinglish_sentences_split_on_latin_terminators() -> None:
+    """A Hinglish reply is Latin-punctuated, so it must still start speaking early."""
+
+    engine = FakeSupertonic()
+    adapter = SupertonicTextToSpeechAdapter(engine=engine)
+
+    _ = [
+        chunk
+        async for chunk in adapter.synthesize(
+            "Theek hai, samajh gaya. Aapka budget kitna hai?", LanguageCode.MIXED
+        )
+    ]
+
+    assert [text for text, _lang, _steps in engine.spoken] == [
+        "Theek hai, samajh gaya.",
+        "Aapka budget kitna hai?",
+    ]
+
+
+# --------------------------------------------------------------------------------------
+# Preload: a wrapper that forwards `synthesize` and nothing else removes a capability
+# --------------------------------------------------------------------------------------
+
+
+class PreloadingAdapter(RecordingAdapter):
+    """A `RecordingAdapter` that can also preload, and counts how often it was asked."""
+
+    def __init__(self, name: str, *, fail: bool = False) -> None:
+        super().__init__(name)
+        self.preloads = 0
+        self._fail = fail
+
+    async def preload(self) -> None:
+        self.preloads += 1
+        if self._fail:
+            raise PermanentAdapterError(f"{self.name} has no model file")
+
+
+def test_both_engines_advertise_preload_so_the_startup_hook_can_find_them() -> None:
+    """`preload_speech_providers` decides by isinstance, so this IS the behaviour.
+
+    It is checked structurally rather than through the hook because the hook only ever
+    sees what `build_text_to_speech` returned, and that is the router as soon as one
+    language is routed. Before this, both answers below were False.
+    """
+
+    supertonic = SupertonicTextToSpeechAdapter(engine=FakeSupertonic())
+    routed = LanguageRoutedTextToSpeech(
+        PreloadingAdapter("piper"), {LanguageCode.HINDI: supertonic}
+    )
+
+    assert isinstance(supertonic, Preloadable)
+    assert isinstance(routed, Preloadable)
+
+
+@pytest.mark.asyncio
+async def test_preload_reaches_the_default_engine_and_not_only_the_routes() -> None:
+    """The regression: configuring Hindi silently stopped preloading Piper.
+
+    Piper is the *default*, so it serves English and Telugu - languages that have nothing
+    to do with the route that was enabled. Its voice load stalls the loop ~2 s, and losing
+    the preload moved that stall into the first English turn.
+    """
+
+    piper = PreloadingAdapter("piper")
+    supertonic = PreloadingAdapter("supertonic")
+    routed = LanguageRoutedTextToSpeech(piper, {LanguageCode.HINDI: supertonic})
+
+    await routed.preload()
+
+    assert piper.preloads == 1
+    assert supertonic.preloads == 1
+
+
+@pytest.mark.asyncio
+async def test_an_engine_serving_two_languages_is_preloaded_once() -> None:
+    """`_supertonic_routes` hands the same adapter to every language it serves.
+
+    `hi` and `mixed` are one object, not two, so a forwarder that iterates routes without
+    deduplicating would load the same weights twice at every startup.
+    """
+
+    supertonic = PreloadingAdapter("supertonic")
+    routed = LanguageRoutedTextToSpeech(
+        PreloadingAdapter("piper"),
+        {LanguageCode.HINDI: supertonic, LanguageCode.MIXED: supertonic},
+    )
+
+    await routed.preload()
+
+    assert supertonic.preloads == 1
+
+
+@pytest.mark.asyncio
+async def test_preload_skips_an_engine_that_has_none() -> None:
+    """Preloading is an optimisation an engine may not offer; it is not a requirement."""
+
+    plain = RecordingAdapter("plain")
+    routed = LanguageRoutedTextToSpeech(plain, {LanguageCode.HINDI: RecordingAdapter("other")})
+
+    await routed.preload()  # must not raise
+
+    assert plain.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_preload_stops_startup_rather_than_one_conversation() -> None:
+    """A missing model or denied licence must be a boot failure. That is the whole point."""
+
+    routed = LanguageRoutedTextToSpeech(
+        PreloadingAdapter("piper"),
+        {LanguageCode.HINDI: PreloadingAdapter("supertonic", fail=True)},
+    )
+
+    with pytest.raises(PermanentAdapterError, match="supertonic has no model file"):
+        await routed.preload()
+
+
+@pytest.mark.asyncio
+async def test_supertonic_preload_makes_the_engine_resident_before_any_turn() -> None:
+    """Loading stalls the loop (489 ms worst case measured); synthesis does not.
+
+    So the first Hinglish turn should pay only for its sentence. Asserted by observing
+    that the first `synthesize` after a `preload` speaks immediately, with the style
+    already resolved - `get_voice_style` is part of the load, not of the turn.
+    """
+
+    engine = FakeSupertonic()
+    adapter = SupertonicTextToSpeechAdapter(engine=engine, voice_style="F1")
+
+    await adapter.preload()
+
+    assert engine.spoken == []  # loading must not synthesise anything
+    chunks = [chunk async for chunk in adapter.synthesize("Namaste.", LanguageCode.MIXED)]
+    assert [text for text, _lang, _steps in engine.spoken] == ["Namaste."]
+    assert chunks
+
+
+@pytest.mark.asyncio
+async def test_supertonic_preload_reports_a_bad_voice_style_at_startup() -> None:
+    """A style that does not exist must fail at boot, not on the first Hindi buyer."""
+
+    adapter = SupertonicTextToSpeechAdapter(engine=FakeSupertonic(), voice_style="missing")
+
+    with pytest.raises(PermanentAdapterError, match="has no voice style"):
+        await adapter.preload()

@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 
-from pitchbot.adapters.contracts import SynthesizedAudioChunk, TextToSpeechAdapter
+from pitchbot.adapters.contracts import (
+    Preloadable,
+    SynthesizedAudioChunk,
+    TextToSpeechAdapter,
+)
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.domain import LanguageCode
 
@@ -47,6 +51,38 @@ class LanguageRoutedTextToSpeech(TextToSpeechAdapter):
 
     def adapter_for(self, language: LanguageCode) -> TextToSpeechAdapter:
         return self._routes.get(language, self._default)
+
+    async def preload(self) -> None:
+        """Forward preload to every engine behind this router.
+
+        A wrapper that forwards ``synthesize`` and nothing else does not merely fail to add
+        a capability - it **removes** one. ``preload_speech_providers`` decides by
+        ``isinstance(provider, Preloadable)`` on whatever ``build_text_to_speech`` returned,
+        and that is this object as soon as one language is routed. Without this method the
+        check was ``False``, so configuring Hindi silently stopped preloading **Piper**, and
+        its 2,561 ms voice load moved back into the first English or Telugu turn.
+
+        Both engines need it and neither is cheap: loading Piper stalls the loop ~2 s and
+        loading Supertonic was measured at 1,358 ms with a worst-case 489 ms of loop
+        lateness. Synthesis through either, once resident, does not stall it at all.
+
+        Engines are visited default-first then by language name, and each is visited once -
+        ``_supertonic_routes`` deliberately hands the *same* adapter to every language it
+        serves, so ``hi`` and ``mixed`` are one object, not two.
+
+        Failures propagate. A missing model or a denied licence must stop the server, which
+        is the entire reason providers are built eagerly.
+        """
+
+        engines = [self._default]
+        engines.extend(self._routes[language] for language in sorted(self._routes, key=str))
+        seen: set[int] = set()
+        for engine in engines:
+            if id(engine) in seen:
+                continue
+            seen.add(id(engine))
+            if isinstance(engine, Preloadable):
+                await engine.preload()
 
     async def synthesize(
         self,

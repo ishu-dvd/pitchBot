@@ -532,3 +532,78 @@ All notable changes to PitchBot are documented here.
   `faster-whisper` assumes 16,000; the raw array plays 2.76x too slow. Resampling moved
   Hindi from 72.1% to 13.2%. English was the control that exposed it, and without it the
   only viable Hindi option would have been rejected on a bug.
+
+### Added (PR 52)
+
+- **Hinglish can be spoken, for the first time.** `LanguageCode.MIXED` is a first-class
+  language here - its own reply table, backchannel and recovery line - and had no voice at
+  all. It appeared nowhere in the TTS layer, so a spoken Hinglish reply fell through to a
+  zero-frame stream and the browser's own voice: the exact situation the server-side voice
+  provider exists to replace, reached silently.
+
+  Routed to Supertonic's **Hindi** frontend, which is measured rather than obvious - the
+  letters are Latin but the words are Hindi. On the product's own Hinglish reply lines it
+  scores **21.2% CER** against 38.6% for the English frontend and 49.9% for the best
+  *legal* Piper option, which is not a voice so much as a noise.
+
+  Enable with `PITCHBOT_SPEECH_TTS_SUPERTONIC_LANGUAGES=hi,mixed`.
+
+- **Fixed a stale claim in the docs.** `TRY_IT_LOCALLY.md` said `--language mixed` was
+  "answered in Hindi". It has been answered in Hinglish since the `MIXED` reply table was
+  added; the line had simply never been updated.
+
+### Method (PR 52)
+
+- **The first Hinglish timings were four times too slow**, because the probe loaded the ONNX
+  voice on every call - `en_US-joe-medium` read 2,391 ms instead of 134 ms. CER was
+  unaffected, but latency was the column the decision would have been argued over. Second
+  time in two days that the harness, not the model, was the thing that was wrong.
+
+### Measured and rejected (PR 52)
+
+- **Transliterating Hinglish to Devanagari before synthesis - via ITRANS - makes it worse.**
+  The prize is real: hand-written Devanagari scores 11.0% CER against 21.9% for the
+  romanised text actually shipped, so a correct transliterator would roughly halve the
+  error. `indic-transliteration` is not it - 35.6%, *worse than doing nothing* - because
+  informal romanisation relies on the implicit schwa that a strict scheme reads as halant
+  (`kitna` -> कित्न, not कितना), and because Hinglish deliberately keeps English loanwords
+  in English (`budget` -> बुद्गेत्). That is a transliteration *model* problem, and the
+  model that solves it needs torch.
+
+- **`speed` is not a latency dial, so it stays un-configurable.** 1.00 to 1.15 saves 4 ms of
+  synthesis and costs 4.7 points of CER; 1.30 collapses to 33.8%. The rate changes how much
+  audio is produced, not how fast, so the buyer waits the same time to hear anything.
+  `DEFAULT_SPEED` now carries the measured curve, and 1.05 is the minimum rather than an
+  inherited default.
+
+### Fixed
+
+- **Enabling the Hindi voice silently stopped preloading Piper.** `preload_speech_providers`
+  detects the capability with `isinstance(provider, Preloadable)`, and once any language is
+  routed the synthesiser it inspects is `LanguageRoutedTextToSpeech`, which forwarded
+  `synthesize` and nothing else. The check was `False`, so Piper's ~2.5 s voice load moved
+  back into the first buyer turn - for English and Telugu, languages unrelated to the route
+  that was enabled. The router now forwards `preload` to its default engine first and then
+  to each routed engine, once per engine: `_supertonic_routes` deliberately shares one
+  adapter across every language it serves, so `hi` and `mixed` are the same object.
+
+- **Supertonic had no `preload` at all**, so the first Hindi or Hinglish turn paid 1,358 ms
+  of model loading. Measured against a 5 ms heartbeat, that load pushes event-loop lateness
+  from 10.9 ms median / 11.7 ms worst to 60.9 ms / **488.7 ms** - it holds the GIL in bursts
+  despite `asyncio.to_thread` - while synthesis through a resident model is indistinguishable
+  from idle. The loop carries the audio socket, so that stall is time in which barge-in
+  cannot fire. Time to first audio on the first Hinglish turn: **2,329 ms to 972 ms**.
+
+- `Preloadable` moved to `pitchbot.adapters.contracts` so a wrapper can name it;
+  `pitchbot.speech.providers` re-exports it unchanged.
+
+- **`pitchbot-talk --language mixed` could not speak.** `VOICE_PREFIXES` held `en_`, `hi_`
+  and `te_` and nothing for `mixed`, so the CLI returned "no voice mapping for language
+  'mixed'" - while `OPENERS` already had a Hinglish greeting and the reply tables already
+  answered in Hinglish. The one place a person actually hears this product was the one
+  place it stayed silent. The CLI now prefers Supertonic for Hindi and Hinglish (the two
+  languages it was measured winning), leaves English and Telugu to Piper, falls back to a
+  Hindi voice for Hinglish while saying that is what it is, and names the right extra per
+  language when nothing is installed. A test asserts `OPENERS` and `VOICE_PREFIXES` have
+  the same keys, so a language the CLI will open a conversation in can never again be one
+  it cannot say.
