@@ -430,3 +430,162 @@ def test_a_ready_buyer_is_confirmed_rather_than_closed_again() -> None:
     spoken = render_reply(plan, LanguageCode.ENGLISH, closing_count=2)
 
     assert spoken == _PHRASES[LanguageCode.ENGLISH].confirm  # noqa: SLF001
+
+
+# --------------------------------------------------------------------------------------
+# Questions a person answers before moving on (PR 54)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Who else have you built something like this for?",
+        "Do you have any references I can talk to?",
+        "Have you worked with clothing brands before?",
+    ],
+)
+def test_a_credibility_question_is_recognised(question: str) -> None:
+    """Measured before this existed: all three matched no stance at all.
+
+    `COMPARING` does not cover them - that answers "we are getting other quotes", which is
+    about price. Asking who else this has been done for is about trust.
+    """
+
+    from pitchbot.conversation.rules import detect_intent
+
+    assert detect_intent(question) is Intent.SOCIAL_PROOF
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["What happens next?", "How do we get started?", "What is the process?"],
+)
+def test_a_process_question_is_recognised(question: str) -> None:
+    from pitchbot.conversation.rules import detect_intent
+
+    assert detect_intent(question) is Intent.NEXT_STEPS
+
+
+def test_a_commitment_still_outranks_a_process_question() -> None:
+    """ "Let's start, how do we get started?" is a decision, not an enquiry."""
+
+    from pitchbot.conversation.rules import detect_intent
+
+    assert detect_intent("Let's start - how do we get started?") is Intent.READY
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+@pytest.mark.parametrize("intent", [Intent.SOCIAL_PROOF, Intent.NEXT_STEPS])
+def test_the_question_is_answered_before_the_conversation_continues(
+    language: LanguageCode, intent: Intent
+) -> None:
+    """Answering and then falling silent trades one failure for another.
+
+    The recorded call answered "Who else have you built something like this for?" with the
+    closing line alone. The answer must lead, and the close must still follow.
+    """
+
+    plan = plan_reply(TurnUnderstanding(known_slots=ALL_SLOTS, intent=intent))
+    spoken = render_reply(plan, language)
+    answer = _PHRASES[language].objection[intent]  # noqa: SLF001
+
+    assert spoken.startswith(answer)
+    assert spoken != answer, "the conversation must keep moving"
+
+
+def test_the_credibility_answer_names_nobody() -> None:
+    """PitchBot is synthetic. Inventing a customer list would be a lie told to a buyer."""
+
+    for language in supported_languages():
+        answer = _PHRASES[language].objection[Intent.SOCIAL_PROOF]  # noqa: SLF001
+        assert answer
+        # It defers to something written rather than asserting a client roster on the call.
+        assert answer != _PHRASES[language].objection[Intent.COMPARING]  # noqa: SLF001
+
+
+# --------------------------------------------------------------------------------------
+# A mention is not an order (PR 54)
+# --------------------------------------------------------------------------------------
+
+
+def _extracted_features(text: str) -> frozenset[str]:
+    from uuid import uuid4
+
+    from pitchbot.conversation.rules import extract_business_signals
+    from pitchbot.conversation.state import ConversationState
+
+    state = ConversationState(
+        lead_id=uuid4(),
+        max_turns=80,
+        max_facts=20,
+        max_evidence=50,
+        max_classifications=20,
+        max_goal_changes=3,
+        digest_key_id="ab" * 32,
+    )
+    result = extract_business_signals(
+        state=state, text=text, language=LanguageCode.ENGLISH, source_span_id=uuid4()
+    )
+    for fact in result.facts:
+        if fact.key == "requested_features":
+            return frozenset(str(fact.value).split(","))
+    return frozenset()
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("We need a catalog and online payment on the site.", {"catalog", "online-payments"}),
+        ("Can customers order through WhatsApp?", {"whatsapp"}),
+        ("We want WhatsApp enquiries on the website.", {"whatsapp"}),
+        ("The site should show stock, so add inventory.", {"inventory"}),
+        ("It has to be bilingual, Hindi and English.", {"multilingual"}),
+        ("हमें कैटलॉग चाहिए।", {"catalog"}),
+    ],
+)
+def test_a_request_is_still_heard(said: str, expected: set[str]) -> None:
+    """The suppression must not cost recall - that would be the worse trade."""
+
+    assert _extracted_features(said) == expected
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "Right now everything is on WhatsApp and it is getting hard to manage.",
+        "We currently take orders on WhatsApp.",
+        "At the moment our catalog is just photos in a folder.",
+        "Abhi sab kuch WhatsApp par hi hota hai.",
+    ],
+)
+def test_describing_today_is_not_ordering_it(said: str) -> None:
+    """A pain is not a purchase order.
+
+    `whatsapp` and `catalog` are feature keywords, so the shipped extractor recorded a
+    buyer's complaint about their current setup as a request for it - and the agent replied
+    "Noted on what the site needs to do."
+    """
+
+    assert _extracted_features(said) == frozenset()
+
+
+def test_a_pain_and_a_request_in_one_breath_keeps_only_the_request() -> None:
+    """This is why the rule is clause-scoped and not turn-scoped.
+
+    Any rule that judges the whole turn has to get one of these two features wrong.
+    """
+
+    said = "Right now everything is on WhatsApp, we want a proper catalog on the site."
+
+    assert _extracted_features(said) == {"catalog"}
+
+
+def test_asking_for_something_now_is_still_asking() -> None:
+    """Present-state words alone are too blunt to suppress on.
+
+    "Right now" describes the present *and* this buyer is placing an order in the same
+    breath, so the request cue has to win or the fix costs more than it saves.
+    """
+
+    assert _extracted_features("Right now we need a catalog.") == {"catalog"}

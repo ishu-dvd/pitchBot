@@ -181,8 +181,16 @@ ANSWERABLE_OBJECTIONS: Final[tuple[Intent, ...]] = (
     Intent.OBJECTING,
     Intent.COMPARING,
     Intent.STALLING,
+    Intent.SOCIAL_PROOF,
+    Intent.NEXT_STEPS,
 )
 """Stances that deserve a sentence of their own before the conversation moves on.
+
+Not only pushback, despite the name: a direct question is the other thing a person answers
+before continuing. ``SOCIAL_PROOF`` and ``NEXT_STEPS`` were added after a recorded call
+answered *"Who else have you built something like this for?"* and *"What happens next?"*
+with the closing line, because neither matched a stance and the planner had nothing else
+to say.
 
 ``READY`` is missing on purpose: agreement is not a concern to be handled, it is a
 signal to stop qualifying and close. ``EXPLORING`` is missing because it is the ordinary
@@ -362,6 +370,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
                 "No pressure at all. "
                 "I can leave you the details and pick this up whenever it suits you."
             ),
+            Intent.SOCIAL_PROOF: (
+                "Fair question. Rather than name other customers on a call, "
+                "I will include relevant examples in writing."
+            ),
+            Intent.NEXT_STEPS: (
+                "The process is short: we confirm what you need, you review a sample, "
+                "and nothing gets built until you approve the scope."
+            ),
         },
         pitch={
             "apparel": (
@@ -422,6 +438,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Intent.STALLING: (
                 "कोई जल्दी नहीं है। मैं जानकारी भेज देता हूँ, जब आपको सही लगे तब आगे बात करते हैं।"
             ),
+            Intent.SOCIAL_PROOF: (
+                "सही सवाल है। फ़ोन पर दूसरे ग्राहकों के नाम लेना ठीक नहीं होता — "
+                "काम के उदाहरण मैं लिखित में साझा कर दूँगा।"
+            ),
+            Intent.NEXT_STEPS: (
+                "तरीका छोटा है — पहले ज़रूरतें तय होती हैं, फिर आप एक नमूना देखते हैं, "
+                "और दायरा मंज़ूर होने तक कुछ नहीं बनाया जाता।"
+            ),
         },
         pitch={
             "apparel": (
@@ -474,6 +498,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             ),
             Intent.COMPARING: ("పోల్చి చూడటం మంచిదే. ప్రతి కోట్‌లో ఏమి కలిసి ఉందో చూసిన తర్వాతే ధరను బేరీజు వేయండి."),
             Intent.STALLING: ("తొందరేమీ లేదు. వివరాలు పంపిస్తాను, మీకు వీలైనప్పుడు ముందుకు వెళ్దాం."),
+            Intent.SOCIAL_PROOF: (
+                "సరైన ప్రశ్న. ఫోన్‌లో ఇతర కస్టమర్ల పేర్లు చెప్పను — "
+                "ప్రతిపాదనతో పాటు సంబంధిత ఉదాహరణలు రాతపూర్వకంగా పంపిస్తాను."
+            ),
+            Intent.NEXT_STEPS: (
+                "ప్రక్రియ చిన్నదే — ముందు అవసరాలు ఖరారు చేస్తాం, తర్వాత మీరు ఒక నమూనా చూస్తారు, "
+                "పరిధిని ఆమోదించే వరకు ఏమీ నిర్మించము."
+            ),
         },
         pitch={
             "apparel": (
@@ -550,6 +582,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Intent.STALLING: (
                 "Koi jaldi nahi hai. "
                 "Main details bhej deta hoon, jab aapko theek lage tab aage badhte hain."
+            ),
+            Intent.SOCIAL_PROOF: (
+                "Sahi sawaal hai. Phone par doosre customers ke naam lena theek nahi hota - "
+                "kaam ke examples main likhit mein share kar dunga."
+            ),
+            Intent.NEXT_STEPS: (
+                "Tarika chhota hai - pehle requirements tay hote hain, phir aap ek sample "
+                "dekhte hain, aur scope approve hone tak kuch banaya nahi jaata."
             ),
         },
         pitch={

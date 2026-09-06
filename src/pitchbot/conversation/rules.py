@@ -1070,7 +1070,9 @@ def extract_business_signals(
         candidates["business_type"] = business_type
 
     features = tuple(
-        name for name, phrases in FEATURES.items() if _contains_any(normalized, phrases)
+        name
+        for name, phrases in FEATURES.items()
+        if any(_contains_any(clause, phrases) for clause in _requesting_clauses(text))
     )
     if features:
         candidates["requested_features"] = ",".join(features)
@@ -1116,6 +1118,88 @@ def extract_business_signals(
 
 def rule_version() -> str:
     return _RULE_VERSION
+
+
+_CLAUSE_BOUNDARY: Final[re.Pattern[str]] = re.compile(r"[,.;:!?\u0964\n]+|\bbut\b|\blekin\b")
+"""Where one thing a buyer said ends and the next begins.
+
+Split on the raw text rather than the normalised form, because
+:func:`normalize_text` turns punctuation into spaces - by the time a clause boundary
+would be useful it has already been erased.
+"""
+
+_PRESENT_STATE_CUES: Final[tuple[str, ...]] = (
+    "right now",
+    "currently",
+    "at the moment",
+    "at present",
+    "these days",
+    "so far",
+    "till now",
+    "until now",
+    "we use",
+    "we take orders",
+    "everything is on",
+    "already on",
+    "abhi sab",
+    "abhi tak",
+    "filhaal",
+    "अभी सब",
+    "अभी तक",
+    "फिलहाल",
+    "फ़िलहाल",
+    "ఇప్పటివరకు",
+    "ప్రస్తుతం",
+)
+"""Words that mark a clause as a description of how things are today.
+
+A buyer saying *"right now everything is on WhatsApp and it is getting hard to manage"* is
+naming a **pain**, not ordering a WhatsApp integration - but ``whatsapp`` is a feature
+keyword, so the shipped extractor recorded it as a request and the agent answered "noted on
+what the site needs to do". Measured on a labelled corpus, five of eleven turns were read
+this way.
+"""
+
+_REQUEST_CUES: Final[tuple[str, ...]] = (
+    "need",
+    "want",
+    "should",
+    "add",
+    "looking for",
+    "can you",
+    "can customers",
+    "has to",
+    "must",
+    "please",
+    "chahiye",
+    "चाहिए",
+    "కావాలి",
+)
+"""Words that mean the buyer is asking for something, whatever else the clause says.
+
+Present-state cues alone are too blunt to suppress on: *"right now we need a catalog"*
+describes the present **and** places an order. A clause is only discarded when it describes
+today and asks for nothing, which is the case the corpus actually contains.
+"""
+
+
+def _requesting_clauses(text: str) -> tuple[str, ...]:
+    """The normalised clauses of a turn that are asking for something.
+
+    Clause-scoped rather than turn-scoped on purpose: *"Right now everything is on
+    WhatsApp, we want a proper catalog on the site"* has to lose ``whatsapp`` and keep
+    ``catalog``, and any rule that judges the whole turn must get one of them wrong.
+    """
+
+    clauses = []
+    for raw in _CLAUSE_BOUNDARY.split(text):
+        clause = normalize_text(raw)
+        if not clause:
+            continue
+        if _contains_any(clause, _PRESENT_STATE_CUES) and not _contains_any(clause, _REQUEST_CUES):
+            continue
+        clauses.append(clause)
+    return tuple(clauses)
 
 
 def _extract_evidence(
