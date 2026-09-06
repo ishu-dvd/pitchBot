@@ -157,6 +157,32 @@ async def test_nothing_is_said_when_the_reply_arrives_first() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_fast_turn_is_not_delayed_by_the_filler_it_never_used() -> None:
+    """`settle` must wake the waiting filler, not wait out its own timeout.
+
+    The difference is invisible in what gets *said* - either way the phrase never lands -
+    and costs the settle timeout on every turn the reply beats the threshold, which is
+    every short turn. Found by mutating the stop signal away.
+    """
+
+    synthesizer = StubSynthesizer()
+    _, _, filler, _ = build(
+        synthesizer=synthesizer,
+        first_after_ms=5_000,
+        second_after_ms=9_000,
+        settle_timeout_s=1.0,
+    )
+
+    filler.start()
+    started = asyncio.get_running_loop().time()
+    await filler.settle()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.3, "the reply waited out the settle timeout instead of being let go"
+    assert synthesizer.spoken == []
+
+
+@pytest.mark.asyncio
 async def test_a_long_wait_earns_a_second_and_only_a_second_phrase() -> None:
     """Two is company. The measured headroom allows four; a filler a second is anxious.
 
