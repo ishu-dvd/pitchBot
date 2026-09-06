@@ -27,6 +27,7 @@ importing this module is always safe; only *constructing* a provider can fail.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -53,6 +54,13 @@ from pitchbot.adapters.piper_tts import (
     voice_spec,
 )
 from pitchbot.adapters.piper_tts import INSTALL_HINT as PIPER_INSTALL_HINT
+from pitchbot.adapters.routing_tts import LanguageRoutedTextToSpeech
+from pitchbot.adapters.supertonic_tts import (
+    SUPERTONIC_AVAILABLE,
+    SUPERTONIC_INSTALL_HINT,
+    SupertonicTextToSpeechAdapter,
+)
+from pitchbot.adapters.supertonic_tts import SUPPORTED_LANGUAGES as SUPERTONIC_LANGUAGES
 from pitchbot.adapters.webrtc_vad import INSTALL_HINT as WEBRTC_INSTALL_HINT
 from pitchbot.adapters.webrtc_vad import (
     WEBRTC_VAD_AVAILABLE,
@@ -60,6 +68,8 @@ from pitchbot.adapters.webrtc_vad import (
 )
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
+
+logger = logging.getLogger(__name__)
 
 
 class VadProvider(StrEnum):
@@ -239,6 +249,10 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
     provider = TtsProvider(settings.speech_tts_provider)
     if provider is TtsProvider.NONE:
         return None, NO_SYNTHESIZER_ID
+    # Parsed and gated before anything else is checked. A language name that does not exist
+    # is a typo the operator must fix whichever optional extra happens to be missing, and
+    # reporting the *other* missing dependency first would send them to fix the wrong file.
+    routed_languages = _supertonic_languages(settings)
     if not PIPER_AVAILABLE:
         raise PermanentAdapterError(
             f"speech_tts_provider={provider.value!r} is configured but the optional "
@@ -267,7 +281,72 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
         synthesis=DETERMINISTIC_SYNTHESIS if settings.speech_tts_deterministic else None,
     )
     mapped = ",".join(sorted(spec.voice_id for spec in specs))
-    return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+    if not routed_languages:
+        return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+    routes = _supertonic_routes(settings, routed_languages)
+    routed = ",".join(sorted(language.value for language in routes))
+    return (
+        LanguageRoutedTextToSpeech(adapter, routes),
+        f"{TtsProvider.PIPER.value}:{mapped}+supertonic:{routed}",
+    )
+
+
+def _supertonic_languages(settings: Settings) -> list[LanguageCode]:
+    """Which languages are routed away from Piper, validated but not yet built.
+
+    Separate from building the adapter so that a configuration mistake is reported before
+    any other optional dependency is looked for.
+    """
+
+    languages: list[LanguageCode] = []
+    for raw in settings.speech_tts_supertonic_languages.split(","):
+        code = raw.strip()
+        if not code:
+            continue
+        try:
+            language = LanguageCode(code)
+        except ValueError as error:
+            raise PermanentAdapterError(
+                f"speech_tts_supertonic_languages contains unknown language {code!r}"
+            ) from error
+        if language not in SUPERTONIC_LANGUAGES:
+            # Narrower than the model's own 31 languages on purpose: an unmeasured
+            # language is a claim, not a capability, and Telugu is absent from the model.
+            raise PermanentAdapterError(
+                f"supertonic is not offered for {code!r}; measured languages are "
+                f"{sorted(item.value for item in SUPERTONIC_LANGUAGES)}"
+            )
+        languages.append(language)
+    if languages and not SUPERTONIC_AVAILABLE:
+        raise PermanentAdapterError(
+            "speech_tts_supertonic_languages is set but the optional dependency is not "
+            f"installed. Install it with: {SUPERTONIC_INSTALL_HINT}. Refusing to fall back "
+            "to Piper, because the languages routed here are the ones Piper cannot serve "
+            "under a commercial licence - falling back would silently ship a voice this "
+            "project denies."
+        )
+    return languages
+
+
+def _supertonic_routes(
+    settings: Settings,
+    languages: list[LanguageCode],
+) -> dict[LanguageCode, TextToSpeechAdapter]:
+    """One Supertonic adapter, shared by every language routed to it."""
+
+    logger.warning(
+        "Supertonic is enabled for %s. Its weights are OpenRAIL-M: Attachment A clause (e) "
+        "requires that generated content be expressly and intelligibly disclaimed as "
+        "machine generated. That obligation is on this deployment.",
+        ",".join(language.value for language in languages),
+    )
+    adapter = SupertonicTextToSpeechAdapter(
+        voice_style=settings.speech_tts_supertonic_voice,
+        model_dir=settings.speech_tts_supertonic_model_dir or None,
+        total_steps=settings.speech_tts_supertonic_steps,
+        allow_download=settings.speech_tts_supertonic_allow_download,
+    )
+    return dict.fromkeys(languages, adapter)
 
 
 def build_speech_providers(settings: Settings) -> SpeechProviders:

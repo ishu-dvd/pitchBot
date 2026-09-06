@@ -502,3 +502,33 @@ All notable changes to PitchBot are documented here.
   `language-unsupported` was added to `UtteranceOutcome` in an earlier change and never
   labelled, so it rendered the raw identifier at the buyer. It is now pinned by a test that
   parses the real `app.js` and compares both directions against the enum.
+
+### Added (PR 51)
+
+- **Hindi can be spoken commercially for the first time.** Every published Piper Hindi voice
+  reviewed is CC-BY-NC-SA or has an unresolvable licence, so a commercial deployment could
+  not say a Hindi word aloud. That was structural: one synthesiser served every language.
+
+  `LanguageRoutedTextToSpeech` sends a named language to a different engine, and
+  `SupertonicTextToSpeechAdapter` is the engine - MIT code, OpenRAIL-M weights, ONNX with no
+  torch. Measured at 8 steps it scores **13.2% CER** on Hindi against **18.3%** for the
+  Piper voice this project may not ship: better, and legal.
+
+  Off by default and opt-in per language, because OpenRAIL-M Attachment A clause (e)
+  requires generated content to be expressly disclaimed as machine generated - an obligation
+  that lands on the deployment. Enabling it without the extra installed **refuses to start**
+  rather than falling back to Piper, since falling back would silently ship the voice this
+  project denies.
+
+  It is a route, not a replacement: the model has no Telugu, and it costs ~1,130 ms per
+  sentence against Piper's 126-448 ms. The adapter splits on sentence boundaries so a
+  multi-sentence reply starts speaking before its last sentence exists.
+
+### Method (PR 51)
+
+- **When a candidate scores far worse than its own published numbers on a language you can
+  check, suspect the harness.** The first measurement scored Supertonic at 64% CER on
+  *English*, against ~0% for Piper through the same transcriber. It emits 44,100 Hz and
+  `faster-whisper` assumes 16,000; the raw array plays 2.76x too slow. Resampling moved
+  Hindi from 72.1% to 13.2%. English was the control that exposed it, and without it the
+  only viable Hindi option would have been rejected on a bug.
