@@ -629,3 +629,20 @@ All notable changes to PitchBot are documented here.
   would have fired 87 ms before a typical reply and delayed it.
 
   Net: first filler **1,420 ms -> 920 ms**, second unchanged, fast path protected.
+
+### Added
+
+- **Turn-taking thresholds are configurable**, which they had always claimed to be.
+  `TurnTakingConfig` called itself *"configuration rather than a constant"* while nothing
+  built it from `Settings`: the service accepted a `turn_taking` parameter and neither
+  branch of `_build_service` passed one. `end_silence_ms` is 700 ms of a measured
+  ~2,587 ms spoken turn - **27% of it**, the largest term after transcription - and until
+  now no deployment could change it, while `speech_stt_beam_size` next door could.
+
+  `PITCHBOT_SPEECH_TURN_MIN_SPEECH_MS`, `..._END_SILENCE_MS`, `..._MAX_UTTERANCE_MS`,
+  `..._BARGE_IN_SPEECH_MS`, `..._AGENT_FLOOR_MS`. Defaults unchanged and asserted to be, so
+  wiring it moves nothing by itself. An impossible value is a startup error naming the
+  setting the operator edited rather than the dataclass field it maps to.
+
+  This is the only honest way to move that number: fitting it needs recordings of real
+  speakers pausing mid-thought, and a synthesised corpus has no natural pauses to fit to.

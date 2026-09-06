@@ -660,3 +660,52 @@ def test_a_custom_end_silence_reaches_the_pipeline_the_socket_uses() -> None:
     pipeline = service.create_speech_pipeline(session.session_id)
 
     assert pipeline.turn_taking.config.end_silence_ms == 450
+
+
+def test_the_router_hands_the_configured_thresholds_to_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reaching the builder is not reaching the product.
+
+    `_build_service` has two branches - durable history on and off - and the thresholds
+    have to be passed in both. A test that only exercises `build_turn_taking` cannot see
+    a branch that forgets to use it, which is exactly how this was unreachable to begin
+    with: the service has always accepted `turn_taking` and nobody ever passed it.
+    """
+
+    from pitchbot.simulator import router
+
+    monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=450))
+    monkeypatch.setattr(router.settings, "enable_durable_history", False)
+
+    service = router._build_service()
+    session = service.create_session(CreateSessionRequest(lead_ref="router-turn-taking"))
+
+    assert (
+        service.create_speech_pipeline(session.session_id).turn_taking.config.end_silence_ms == 450
+    )
+
+
+def test_the_durable_history_branch_hands_them_over_too(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two branches build the service, and a threshold has to survive both.
+
+    Worth a second test rather than trusting symmetry: the two call sites already list the
+    same five speech arguments twice, and duplication is how one of them comes to be missing
+    an argument the other has.
+    """
+
+    from pitchbot.simulator import router
+
+    monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=480))
+    monkeypatch.setattr(router.settings, "enable_durable_history", True)
+    monkeypatch.setattr(router.settings, "durable_history_digest_key", "ab" * 32)
+    monkeypatch.setattr(router.settings, "database_url", f"sqlite:///{tmp_path / 'turn.db'}")
+
+    service = router._build_service()
+    session = service.create_session(CreateSessionRequest(lead_ref="durable-turn-taking"))
+    pipeline = service.create_speech_pipeline(session.session_id)
+
+    assert pipeline.turn_taking.config.end_silence_ms == 480

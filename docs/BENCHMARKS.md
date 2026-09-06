@@ -2569,3 +2569,33 @@ With no silence credited (a typed turn) the wait is exactly `first_after_ms`, un
 `SECOND_AFTER_MS` moved 2,500 -> 3,200 to keep the position it actually had. 2,500 measured
 from a close that was already 720 ms late put it at 3,220 ms; left alone once the reference
 frame was corrected it would have fired **87 ms before the reply was ready**.
+
+### The dominant latency term was documented as configuration and was not (2026-09-07)
+
+`TurnTakingConfig` has described itself, since it was written, as *"configuration rather
+than a constant so it can be tuned against measurements once a real detector is
+benchmarked"*. Nothing ever built it from `Settings`. `SimulatorService` takes a
+`turn_taking` parameter and neither branch of `_build_service` passed it, so every
+deployment ran the dataclass defaults - which is what a constant is.
+
+The scale of what was unreachable, against the measured ~2,587 ms spoken turn:
+
+| term | cost | share | configurable before |
+|---|---:|---:|---|
+| `end_silence_ms` | 700 ms | **27%** | **no** |
+| transcription | ~1,717 ms | 66% | model, device, beam size, timeout - yes |
+| plan + synthesise | ~150 ms | 6% | voice, engine, steps - yes |
+
+`Settings` carried 26 speech knobs - down to `speech_stt_beam_size` - and not one for turn
+taking, while the largest term after transcription sat behind a dataclass default.
+
+This is also the only honest way to move that number. It cannot be fitted here: fitting it
+needs recordings of real speakers pausing mid-thought, and every corpus this project has is
+synthesised, with no natural pauses to fit to. That is why it has stayed on the backlog as
+*blocked* rather than being guessed at. A deployment with real traffic can find its own,
+and the trade-off is stated where they will read it - lower and the agent interrupts people
+who were still thinking, higher and every reply feels sluggish.
+
+All five thresholds are exposed rather than only the dominant one, since the same argument
+applies to each and `TurnTakingConfig` already validates them. Defaults are unchanged and
+asserted to be, so wiring it moves nothing by itself.
