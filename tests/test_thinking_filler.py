@@ -257,20 +257,31 @@ async def test_settle_lets_the_filler_finish_instead_of_cutting_it_off() -> None
 
 @pytest.mark.asyncio
 async def test_settle_is_bounded_so_a_stuck_filler_cannot_hold_the_reply() -> None:
-    """`settle` is awaited by the receive loop - the only thing classifying buyer audio."""
+    """`settle` is awaited by the receive loop - the only thing classifying buyer audio.
+
+    The gate is released on a timer rather than after the assertion, so that removing the
+    bound makes this test *fail* rather than hang. A hang tells CI nothing about what
+    broke, and the difference was found by mutating the timeout away.
+    """
 
     gate = asyncio.Event()
     synthesizer = StubSynthesizer(gate=gate)
     _, _, filler, _ = build(synthesizer=synthesizer, first_after_ms=1, settle_timeout_s=0.05)
 
+    async def release_late() -> None:
+        await asyncio.sleep(0.6)
+        gate.set()
+
+    releaser = asyncio.create_task(release_late())
     filler.start()
     await asyncio.sleep(0.02)
     started = asyncio.get_running_loop().time()
     await filler.settle()
     elapsed = asyncio.get_running_loop().time() - started
 
-    assert elapsed < 1.0
+    assert elapsed < 0.4, "an unbounded settle would have waited for the stuck synthesiser"
     gate.set()
+    await releaser
 
 
 @pytest.mark.asyncio
@@ -288,15 +299,26 @@ async def test_settle_is_a_no_op_when_nothing_is_filling() -> None:
 
 @pytest.mark.asyncio
 async def test_one_turn_never_starts_a_second_filler_over_the_first() -> None:
-    synthesizer = StubSynthesizer()
-    _, _, filler, _ = build(synthesizer=synthesizer, first_after_ms=5, second_after_ms=1_000)
+    """Two fillers at once are worse than none: one aborts the other mid-word.
+
+    Asserted on the streams rather than on the phrases. A second ``start`` cancels the
+    first before its synthesiser is ever iterated, so counting what was *said* would miss
+    it entirely - the visible damage is an abandoned stream the client is told to discard.
+    """
+
+    synthesizer = StubSynthesizer(chunks=3, delay_s=0.05)
+    socket, _, filler, _ = build(synthesizer=synthesizer, first_after_ms=1, second_after_ms=10_000)
 
     filler.start()
+    await asyncio.sleep(0.02)
     filler.start()
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.02)
     await filler.settle()
 
-    assert [text for text, _ in synthesizer.spoken] == ["Hmm."]
+    begins = socket.of_type(REPLY_AUDIO_BEGIN)
+    ends = socket.of_type(REPLY_AUDIO_END)
+    assert len(begins) == 1
+    assert [item["aborted"] for item in ends] == [False]
 
 
 @pytest.mark.asyncio
