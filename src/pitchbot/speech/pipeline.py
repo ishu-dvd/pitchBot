@@ -203,7 +203,7 @@ class SpeechTurnPipeline:
         min_confidence: float = MIN_TRANSCRIPT_CONFIDENCE,
         early_detection_seconds: float = 0.0,
         transcribe_timeout_ms: float = DEFAULT_TRANSCRIBE_TIMEOUT_MS,
-        on_thinking: Callable[[], None] | None = None,
+        on_thinking: Callable[[float], None] | None = None,
     ) -> None:
         if not 1 <= max_utterance_bytes <= MAX_UTTERANCE_BYTES:
             raise ValueError(f"max_utterance_bytes must be between 1 and {MAX_UTTERANCE_BYTES}")
@@ -495,10 +495,18 @@ class SpeechTurnPipeline:
         if self._on_thinking is not None:
             # Before the await, so the listener starts counting from the moment the buyer
             # actually stopped rather than from whenever this coroutine is next scheduled.
+            #
+            # The segment's trailing silence goes with it because "whenever this coroutine
+            # is scheduled" was never the right zero either: an utterance that closes on
+            # silence has already been quiet for `end_silence_ms` (700 ms by default), so a
+            # backchannel timed from here fires that much later than its own threshold
+            # claims. Passing the real measured value rather than the configured one keeps
+            # a MAX_DURATION close - where the buyer may still be mid-sentence - honest.
+            #
             # Failures are contained: a backchannel is a courtesy, and losing the turn
             # because the courtesy raised would be a strictly worse conversation.
             try:
-                self._on_thinking()
+                self._on_thinking(float(segment.trailing_silence_ms))
             except Exception:  # noqa: BLE001 - a filler must never cost a turn
                 logger.warning("Backchannel notification failed", exc_info=True)
         started = perf_counter()

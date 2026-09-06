@@ -408,3 +408,47 @@ async def test_a_filler_is_not_reported_as_the_replys_synthesis_time() -> None:
 
     assert synthesizer.spoken != []
     assert seen == []
+
+
+# --------------------------------------------------------------------------------------
+# Crediting endpoint silence must not turn every spoken turn into a padded one
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_endpoint_silence_is_credited_so_the_filler_comes_sooner() -> None:
+    """Measured, the first filler landed at 1,420 ms for a threshold that read 700."""
+
+    synthesizer = StubSynthesizer()
+    socket, _, filler, _ = build(
+        synthesizer=synthesizer, first_after_ms=500, second_after_ms=10_000
+    )
+
+    # 480 ms of it already spent endpointing, so only the deadband is still owed.
+    filler.start(480.0)
+    await asyncio.sleep(0.25)
+    await filler.settle()
+
+    assert [text for text, _ in synthesizer.spoken] == ["Hmm."]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_arriving_inside_the_deadband_cancels_the_filler() -> None:
+    """The fast path must stay fast, which is what the work deadband is for.
+
+    With endpoint silence credited, every spoken turn clears the beat the instant the
+    filler task exists. Without a floor on our own work there would be no window in which
+    a reply could cancel it - and because `settle` waits for a filler rather than chopping
+    it, filling there would extend the wait by the filler's own length instead of covering
+    it.
+    """
+
+    synthesizer = StubSynthesizer()
+    socket, _, filler, _ = build(
+        synthesizer=synthesizer, first_after_ms=500, second_after_ms=10_000
+    )
+
+    filler.start(480.0)
+    await filler.settle()  # the reply is ready immediately
+
+    assert synthesizer.spoken == []

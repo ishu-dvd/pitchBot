@@ -753,3 +753,51 @@ async def test_a_stray_playback_report_does_not_truncate_an_open_utterance() -> 
         await engine.push(chunk(index))
 
     assert transcriber.sequences == [0, 1, 2, 3, 4, 5]
+
+
+# --------------------------------------------------------------------------------------
+# The segment reports how long ago the buyer actually stopped
+# --------------------------------------------------------------------------------------
+
+
+def test_a_silence_close_reports_the_silence_that_closed_it() -> None:
+    """Anything timed from the close is that much later than it thinks it is.
+
+    `silence_ms` counts every pause inside the utterance, including ones the buyer spoke
+    through, so it cannot answer "how long ago did they stop?". `trailing_silence_ms` can.
+    """
+
+    machine = TurnTaking(TurnTakingConfig(min_speech_ms=60, end_silence_ms=120))
+    for index in range(4):
+        machine.observe(frame(index, is_speech=True))
+    segment = None
+    for index in range(4, 20):
+        decision = machine.observe(frame(index, is_speech=False))
+        if decision.segment is not None:
+            segment = decision.segment
+            break
+
+    assert segment is not None
+    assert segment.reason is EndpointReason.SILENCE
+    assert segment.trailing_silence_ms >= 120
+
+
+def test_a_max_duration_close_reports_no_trailing_silence() -> None:
+    """Zero is a real answer: the buyer may still have been mid-sentence.
+
+    This is why the offset is measured rather than assumed to be `end_silence_ms` - an
+    utterance cut off for length has not been waited through at all, and crediting 700 ms
+    of silence that never happened would make a filler interrupt someone still talking.
+    """
+
+    machine = TurnTaking(TurnTakingConfig(min_speech_ms=30, max_utterance_ms=150))
+    segment = None
+    for index in range(20):
+        decision = machine.observe(frame(index, is_speech=True))
+        if decision.segment is not None:
+            segment = decision.segment
+            break
+
+    assert segment is not None
+    assert segment.reason is EndpointReason.MAX_DURATION
+    assert segment.trailing_silence_ms == 0

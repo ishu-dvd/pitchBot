@@ -62,6 +62,17 @@ class SpeechSegment:
     reason: EndpointReason
     started_at: datetime
     ended_at: datetime
+    trailing_silence_ms: int = 0
+    """Silence at the very end, which is how long ago the buyer actually stopped.
+
+    Distinct from ``silence_ms``, which counts every pause inside the utterance too. This
+    is the one a *listener* feels: by the time an utterance closes on
+    :attr:`EndpointReason.SILENCE` the buyer has already been quiet this long, and anything
+    timed from the close - a backchannel, in particular - is that much later than it thinks.
+
+    Zero is a real answer, not a missing one: an utterance closed on
+    :attr:`EndpointReason.MAX_DURATION` may end with the buyer still mid-sentence.
+    """
 
     @property
     def duration_ms(self) -> int:

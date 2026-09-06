@@ -390,19 +390,23 @@ class Listener:
 
         self._pipeline = pipeline
 
-    def start_thinking(self) -> None:
+    def start_thinking(self, already_silent_ms: float = 0.0) -> None:
         """Begin filling the silence, called the moment transcription starts.
 
         Measured, that silence is ~4.5 s and is almost entirely transcription, so this is
         the only moment early enough to cover it.
+
+        ``already_silent_ms`` is how long the buyer had been quiet before the endpointer
+        noticed - 700 ms of it by default - which is time the thresholds in
+        :mod:`pitchbot.speech.backchannel` are supposed to include and used to miss.
         """
 
         if self._say is None or self._backchannel is None:
             return
         self._backchannel.begin_turn()
-        self._thinking = asyncio.get_running_loop().create_task(self._fill())
+        self._thinking = asyncio.get_running_loop().create_task(self._fill(already_silent_ms))
 
-    async def _fill(self) -> None:
+    async def _fill(self, already_silent_ms: float = 0.0) -> None:
         """Say at most a couple of short things while the transcriber works.
 
         Only the **microphone** is paused, never the turn-taking machine. This runs while
@@ -412,19 +416,23 @@ class Listener:
         copied out of the buffer before transcription began.
         """
 
+        # Zero is when we learned there was work; the thresholds are measured from the
+        # buyer's last word. `work_target_ms` reconciles the two.
         started = monotonic()
         if self._backchannel is None or self._say is None:  # pragma: no cover - guarded
             return
         for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            work_target = self._backchannel.work_target_ms(target, already_silent_ms)
             elapsed_ms = (monotonic() - started) * 1000
-            if elapsed_ms < target:
-                await asyncio.sleep((target - elapsed_ms) / 1000)
+            if elapsed_ms < work_target:
+                await asyncio.sleep((work_target - elapsed_ms) / 1000)
             # `max` rather than a fresh reading alone: having slept *to* the threshold, a
             # re-measurement can still land a fraction of a millisecond below it, and the
             # policy would then decline and the loop would end. The second filler would
             # silently never fire, on a timer that looked correct. Waiting for the target
             # is what happened, so that is what is reported.
-            waited_ms = max(float(target), (monotonic() - started) * 1000)
+            work_ms = max(work_target, (monotonic() - started) * 1000)
+            waited_ms = already_silent_ms + work_ms
             phrase = self._backchannel.due(waited_ms, self._language)
             if phrase is None:
                 continue

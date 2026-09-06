@@ -48,20 +48,56 @@ from typing import Final
 from pitchbot.domain import LanguageCode
 
 FIRST_AFTER_MS: Final[int] = 700
-"""How long to wait before filling the silence at all.
+"""How long to wait, **since the buyer stopped speaking**, before filling the silence.
 
 Below this a person would not say anything either - a beat of silence after someone stops
 speaking is normal turn-taking, not a gap. It also keeps the filler off any path that is
 already fast: a typed turn plans in ~1 ms and must never be padded to 700.
+
+That "since the buyer stopped" is load-bearing and used not to be true. This threshold is
+counted from :meth:`ThinkingFiller.start`, which the pipeline calls when the *endpointer
+closes the utterance* - and an utterance only closes after ``end_silence_ms`` of trailing
+silence. Measured in audio time on the real pipeline (``probe_filler_timing.py``), the
+endpointer closed at 720 ms and the first filler landed at **1,420 ms**: exactly twice its
+own documented value, and 7.1x the ~200 ms gap Stivers et al. (PNAS 2009) measured between
+human turns. The elapsed silence is now handed to the filler so 700 means 700.
 """
 
-SECOND_AFTER_MS: Final[int] = 2_500
+SECOND_AFTER_MS: Final[int] = 3_200
 """When to say a second, slightly longer thing because the wait is clearly long.
 
-Measured, the English and Hindi gap is ~4.5 s, so this lands with over a second still to
-go. It is not a fixed cadence: the second phrase comes from the ``patient`` list, because
-repeating an acknowledgement the buyer has already heard sounds like a stuck recording,
-while "one moment" is what a person actually says when they know they are taking a while.
+Also counted from the buyer's last word. 3,200 rather than the 2,500 it read before, so
+that it keeps the position it actually had: 2,500 measured from a close that was already
+720 ms late put this at 3,220 ms, and the whole spoken turn is ~2,587 ms. Left at 2,500
+once the reference frame was corrected, it would have fired **87 ms before the reply was
+ready** - and because the reply waits for a filler to finish rather than chopping it, a
+second filler that starts just before the reply does not cover the wait, it *extends* it.
+
+So this is deliberately beyond the typical reply and only reached when a turn is genuinely
+slow - a transcription outlier, which is measured at up to 11 s. It is not a fixed cadence:
+the second phrase comes from the ``patient`` list, because repeating an acknowledgement the
+buyer has already heard sounds like a stuck recording, while "one moment" is what a person
+actually says when they know they are taking a while.
+"""
+
+MIN_WORK_MS: Final[int] = 200
+"""The shortest time we will work before saying anything, however long the buyer has waited.
+
+:data:`FIRST_AFTER_MS` is measured from the buyer's last word, which is the right frame for
+"has this become a gap?" but the wrong one for "is this turn already fast?". By the time a
+spoken utterance closes, 700 ms of that threshold is *already spent* on endpointing, so
+against buyer-silence alone every spoken turn qualifies immediately - including one whose
+reply is a few milliseconds away.
+
+That matters because a filler is not free to abandon: the reply waits for one to finish
+rather than chopping it mid-word, so a filler that starts just before the reply is ready
+does not cover the wait, it **extends** it by its own length (0.37-1.07 s measured).
+
+So there are two clocks and a filler must satisfy both - enough silence for the buyer to
+feel a gap, and enough work for us to be sure there is one. 200 ms is the gap Stivers et al.
+(PNAS 2009) measured between human turns: the same beat a person takes before deciding
+someone else's pause needs filling. A reply that arrives inside it cancels the filler
+outright, which is how the fast path stays fast.
 """
 
 MAX_PER_TURN: Final[int] = 2
@@ -133,6 +169,7 @@ class Backchannel:
 
     first_after_ms: int = FIRST_AFTER_MS
     second_after_ms: int = SECOND_AFTER_MS
+    min_work_ms: int | None = None
     max_per_turn: int = MAX_PER_TURN
     _cursor: int = field(default=0, init=False)
     _said_this_turn: int = field(default=0, init=False)
@@ -140,8 +177,36 @@ class Backchannel:
     def __post_init__(self) -> None:
         if self.first_after_ms < 0 or self.second_after_ms <= self.first_after_ms:
             raise ValueError("backchannel thresholds must increase")
+        if self.min_work_ms is not None and self.min_work_ms < 0:
+            raise ValueError("min_work_ms must not be negative")
         if self.max_per_turn < 1:
             raise ValueError("backchannel must allow at least one phrase per turn")
+
+    @property
+    def work_floor_ms(self) -> int:
+        """The resolved deadband: how long to work before saying anything, at minimum.
+
+        Capped at the beat itself so it is a floor and never the binding constraint: with
+        no silence credited - a typed turn - the wait is exactly ``first_after_ms``,
+        unchanged. It only bites once endpointing has already spent part of that threshold,
+        which is the case it exists for.
+        """
+
+        if self.min_work_ms is not None:
+            return self.min_work_ms
+        return min(MIN_WORK_MS, self.first_after_ms)
+
+    def work_target_ms(self, target_ms: int, already_silent_ms: float) -> float:
+        """How long to keep working before ``target_ms`` may be honoured.
+
+        Translates a threshold measured from the buyer's last word into one measured from
+        the moment we learned there was work, which is the only clock a filler can actually
+        sleep on. Both constraints in one number: whatever silence has already elapsed is
+        credited against the threshold, and :attr:`work_floor_ms` keeps a turn whose reply
+        is imminent from being padded with a filler.
+        """
+
+        return max(float(target_ms) - already_silent_ms, float(self.work_floor_ms))
 
     def begin_turn(self) -> None:
         """Reset the per-turn count. The rotation cursor deliberately survives."""
@@ -170,6 +235,7 @@ class Backchannel:
 __all__ = [
     "FIRST_AFTER_MS",
     "MAX_PER_TURN",
+    "MIN_WORK_MS",
     "SECOND_AFTER_MS",
     "Backchannel",
     "BackchannelPhrases",
