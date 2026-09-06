@@ -9,6 +9,7 @@ from pitchbot.speech.models import (
     TurnTakingState,
 )
 from pitchbot.speech.pipeline import (
+    DEFAULT_TRANSCRIBE_TIMEOUT_MS,
     MAX_TRANSCRIPT_CHARS,
     MAX_UTTERANCE_BYTES,
     MIN_TRANSCRIPT_CONFIDENCE,
@@ -35,6 +36,7 @@ __all__ = [
     "MAX_TRANSCRIPT_CHARS",
     "MAX_UTTERANCE_BYTES",
     "MAX_UTTERANCE_MS",
+    "DEFAULT_TRANSCRIBE_TIMEOUT_MS",
     "MIN_TRANSCRIPT_CONFIDENCE",
     "BargeIn",
     "EndpointReason",

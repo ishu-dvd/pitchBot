@@ -29,6 +29,24 @@ MAX_UTTERANCE_BYTES = 2 * 1024 * 1024
 MAX_TRANSCRIPT_CHARS = 2_000
 MIN_TRANSCRIPT_CONFIDENCE = 0.3
 
+DEFAULT_TRANSCRIBE_TIMEOUT_MS = 6_000.0
+"""Wall-clock ceiling on transcribing one utterance. ``0`` disables it.
+
+Chosen from measurement rather than taste. Healthy transcriptions on the shipped
+`small`/int8 model cluster tightly and do **not** scale with audio length - 3.2 s of
+English costs ~1.9 s, 16.1 s costs ~2.2 s, Hindi ~2.5 s - because Whisper pads every clip
+to a 30 s window. The live endpointer caps an utterance at 20 s, so ~2.5 s is the worst
+healthy case the socket can produce and 6 s clears it by better than 2x.
+
+The pathology it exists for is an order of magnitude away, not a few hundred milliseconds:
+a 3.2 s Hindi clip measured at 11,455 ms median and 28,656 ms at worst. Anything between
+2.5 s and 11 s is unclaimed territory, which is what makes a single fixed number honest
+here - there is nothing to tune it against.
+
+Callers submitting more than 20 s of audio (the adapter permits 120 s) should raise it:
+four 30 s windows cost roughly four times one.
+"""
+
 _PCM_SAMPLE_RATE_HZ = 16_000
 _PCM_SAMPLE_WIDTH_BYTES = 2
 # The frame lengths WebRTC's detector accepts. A byte count that maps onto one of these at
@@ -51,6 +69,26 @@ class UtteranceOutcome(StrEnum):
     LOW_CONFIDENCE = "low-confidence"
     OVERSIZE = "oversize"
     TRANSCRIBER_UNAVAILABLE = "transcriber-unavailable"
+    TRANSCRIPTION_TIMED_OUT = "transcription-timed-out"
+    """The transcriber was still working long after any healthy utterance would be done.
+
+    Not a hypothetical. Measured 2026-09-06 on `small`/int8, a **3.2 s** Hindi utterance -
+    a supported language, in the shipped configuration - took a median of **11,455 ms**,
+    and the same clip has been observed at **28,656 ms**. It was not a runaway output
+    (one segment, 40 characters, compression ratio 1.24); the decoder simply searched.
+
+    Nothing bounded that. `max_audio_seconds` bounds how much audio may be *submitted*,
+    and cost is nearly flat in audio length - 16.1 s of speech costs 2,245 ms - so audio
+    length was never the thing that needed bounding. The consequence is worse than a slow
+    reply: the socket's receive loop is blocked inside `push` for the whole time, so the
+    buyer cannot interrupt either. Twenty-eight seconds is 140x the ~200 ms gap a human
+    leaves between turns, and the agent is deaf for all of it.
+
+    What the deadline recovers is the **turn**, not the CPU: `asyncio.to_thread` cannot be
+    interrupted, so the worker keeps decoding until it finishes on its own. That is the
+    honest reason for a generous default rather than an aggressive one - every timeout
+    leaves a thread competing with whatever runs next.
+    """
     LANGUAGE_UNSUPPORTED = "language-unsupported"
     """The buyer is speaking a language this transcriber demonstrably cannot transcribe.
 
@@ -164,6 +202,7 @@ class SpeechTurnPipeline:
         max_utterance_bytes: int = MAX_UTTERANCE_BYTES,
         min_confidence: float = MIN_TRANSCRIPT_CONFIDENCE,
         early_detection_seconds: float = 0.0,
+        transcribe_timeout_ms: float = DEFAULT_TRANSCRIBE_TIMEOUT_MS,
         on_thinking: Callable[[], None] | None = None,
     ) -> None:
         if not 1 <= max_utterance_bytes <= MAX_UTTERANCE_BYTES:
@@ -172,6 +211,8 @@ class SpeechTurnPipeline:
             raise ValueError("min_confidence must be between 0 and 1")
         if early_detection_seconds < 0:
             raise ValueError("early_detection_seconds must not be negative")
+        if transcribe_timeout_ms < 0:
+            raise ValueError("transcribe_timeout_ms must not be negative")
         self._detector = detector
         self._transcriber = transcriber
         self._language = language
@@ -180,6 +221,7 @@ class SpeechTurnPipeline:
         self._frame_duration_ms = frame_duration_ms
         self._max_utterance_bytes = max_utterance_bytes
         self._min_confidence = min_confidence
+        self._transcribe_timeout_ms = transcribe_timeout_ms
         self._on_thinking = on_thinking
         """Called when an utterance closes and transcription is about to start.
 
@@ -461,7 +503,20 @@ class SpeechTurnPipeline:
                 logger.warning("Backchannel notification failed", exc_info=True)
         started = perf_counter()
         try:
-            best = await self._best_transcript(chunks, hint)
+            best = await self._transcribe_within_deadline(chunks, hint)
+        except TimeoutError:
+            elapsed = (perf_counter() - started) * 1000
+            logger.warning(
+                "Transcription exceeded its deadline and the turn was released",
+                extra={"transcribe_timeout_ms": self._transcribe_timeout_ms},
+            )
+            return self._result(
+                segment,
+                UtteranceOutcome.TRANSCRIPTION_TIMED_OUT,
+                elapsed,
+                dropped,
+                detect_ms,
+            )
         except UnsupportedLanguageError as decline:
             # Ordered before the generic handler on purpose. Nothing failed here: the
             # transcriber identified the language, recognised it as one it cannot serve, and
@@ -510,6 +565,26 @@ class SpeechTurnPipeline:
             transcribe_ms=elapsed,
             dropped_frames=dropped,
             detect_language_ms=detect_ms,
+        )
+
+    async def _transcribe_within_deadline(
+        self,
+        chunks: list[AudioChunk],
+        hint: object | None,
+    ) -> TranscriptChunk | None:
+        """Transcribe, but give the turn back if the decoder will not finish.
+
+        The deadline is a wall-clock bound on one utterance, not a budget scaled to its
+        length, because measured cost barely moves with length: 3.2 s of audio and 16.1 s
+        of audio both cost about two seconds when the decoder behaves. What varies by an
+        order of magnitude is whether it behaves.
+        """
+
+        if self._transcribe_timeout_ms <= 0:
+            return await self._best_transcript(chunks, hint)
+        return await asyncio.wait_for(
+            self._best_transcript(chunks, hint),
+            self._transcribe_timeout_ms / 1000,
         )
 
     async def _best_transcript(

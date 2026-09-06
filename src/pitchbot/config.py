@@ -103,7 +103,14 @@ class Settings(BaseSettings):
     # uncertain guess still transcribes. Set to empty to restore the previous behaviour.
     # Telugu TEXT turns are unaffected; this is about speech only.
     speech_stt_unsupported_languages: str = "te"
-
+    # Wall-clock ceiling on transcribing one utterance, in milliseconds. 0 disables it.
+    #
+    # Measured 2026-09-06: a 3.2 s HINDI clip - a supported language, shipped settings -
+    # took a median of 11,455 ms and was seen at 28,656 ms, while healthy transcriptions
+    # cost ~1.9-2.5 s regardless of audio length. Nothing bounded that, and because the
+    # socket's receive loop waits inside the pipeline, the buyer could not interrupt for
+    # the whole time either. See DEFAULT_TRANSCRIBE_TIMEOUT_MS for why 6 s.
+    speech_stt_timeout_ms: float = 6_000.0
     # Text-to-speech is off by default, and for a different reason than the other two.
     # The browser client already speaks replies with the Web Speech API, so this is not a
     # missing capability but a *replacement* for one whose voices vary by browser, are

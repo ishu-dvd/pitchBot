@@ -90,6 +90,7 @@ from pitchbot.simulator.models import (
 )
 from pitchbot.simulator.scenarios import SCENARIOS
 from pitchbot.speech import SpeechTurnPipeline, TurnTakingConfig
+from pitchbot.speech.pipeline import DEFAULT_TRANSCRIBE_TIMEOUT_MS
 from pitchbot.storage import AggregateClosedError, ConcurrencyConflictError
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,7 @@ class SimulatorService:
         deliberation_model_id: str = "unknown",
         turn_taking: TurnTakingConfig | None = None,
         speech_early_detection_seconds: float = 0.0,
+        speech_transcribe_timeout_ms: float = DEFAULT_TRANSCRIBE_TIMEOUT_MS,
     ) -> None:
         if (
             min(
@@ -223,6 +225,9 @@ class SimulatorService:
         if speech_early_detection_seconds < 0:
             raise ValueError("Simulator speech_early_detection_seconds must not be negative")
         self._speech_early_detection_seconds = speech_early_detection_seconds
+        if speech_transcribe_timeout_ms < 0:
+            raise ValueError("Simulator speech_transcribe_timeout_ms must not be negative")
+        self._speech_transcribe_timeout_ms = speech_transcribe_timeout_ms
         self._clock = clock or SystemClock()
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
@@ -733,6 +738,10 @@ class SimulatorService:
             config=self._turn_taking,
             clock=self._clock,
             early_detection_seconds=self._speech_early_detection_seconds,
+            # A supported language can still hold the decoder for tens of seconds, and the
+            # receive loop waits inside `push` - so an unbounded transcription costs the
+            # buyer the ability to interrupt, not merely a slow reply.
+            transcribe_timeout_ms=self._speech_transcribe_timeout_ms,
             # Told the instant an utterance closes, which is the only moment early enough
             # to cover the wait: measured, transcription is two thirds of it, so anything
             # waiting for the transcript speaks into the last of the silence.

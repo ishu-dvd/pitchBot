@@ -174,6 +174,7 @@ def _build_service() -> SimulatorService:
             speech_synthesizer=speech_providers.synthesizer,
             language_model=language_model,
             speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
+            speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -192,6 +193,7 @@ def _build_service() -> SimulatorService:
         speech_synthesizer=speech_providers.synthesizer,
         language_model=language_model,
         speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
+        speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
     )
 
 

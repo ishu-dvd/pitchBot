@@ -445,3 +445,43 @@ All notable changes to PitchBot are documented here.
   `TurnStage.SYNTHESIZE` would report a synthesis time for a turn whose reply had not been
   planned yet. The reply now drains the filler (bounded at 1.5 s) and the browser
   schedules behind it (capped at 2 s), so the "hmm" completes and the answer follows it.
+
+### Fixed (PR 50)
+
+- **A supported language could hold the decoder for 28 seconds, and nothing bounded it.**
+  Measured on `small`/int8: a 3.2 s Hindi clip - the *shortest* in the corpus - took a
+  median of 11,455 ms and was observed at 28,656 ms, against 1.9-2.5 s for every healthy
+  transcription regardless of audio length. `max_audio_seconds` could never have caught it;
+  the input was never large, only slow.
+
+  Worse than a slow reply: the socket's receive loop waits inside `SpeechTurnPipeline.push`,
+  so for those 28 seconds the agent could not classify a frame, notice a barge-in, or be
+  interrupted. `PITCHBOT_SPEECH_STT_TIMEOUT_MS` (default 6,000 ms) now bounds it and returns
+  a `transcription-timed-out` outcome, which is deliberately distinct from
+  `transcriber-unavailable` - the component was working, and working is what took too long.
+
+  The deadline recovers the **turn**, not the CPU: `asyncio.to_thread` cannot be interrupted,
+  so the abandoned decode runs to completion. That is why the default is generous.
+
+### Measured and rejected (PR 50)
+
+- **Four ways to shrink transcription, all refuted.** It is 66% of the spoken turn, so this
+  was the obvious place to look. A smaller model for English (`base` is 3.0x faster but
+  mangles 3 of 8 sales turns that `small` gets perfectly); `chunk_length` to avoid Whisper's
+  30 s padding (no latency effect, accuracy collapses at 5 s); transcribing during the 700 ms
+  endpoint wait (refuted by measurement - the same speech transcribes *differently* with
+  different trailing silence, 1/5 identical in Hindi); and CPU thread tuning (the default is
+  already within 7%).
+
+  Recorded because the conclusion is useful: the 1,717 ms is structural to Whisper `small`
+  on CPU, not a tuning oversight, and the mitigation that works is perceptual.
+
+- **A confidence-gated model cascade is possible but not shipped.** `avg_logprob` separates
+  `base`'s failures cleanly on this corpus (bad: -0.45/-0.50/-1.14, good: -0.24 to -0.36),
+  which would average ~1,315 ms against 1,855 ms. Not taken: the threshold would be fitted on
+  the eight sentences that motivate it, it needs a second resident model, and its fallback
+  path is slower than doing nothing.
+
+- **A transcription benchmark without number normalisation measures formatting, not
+  hearing.** The previous one-sentence reading charged both models 25% CER for writing
+  "50,000" where the reference said "fifty thousand" - both had heard it perfectly.

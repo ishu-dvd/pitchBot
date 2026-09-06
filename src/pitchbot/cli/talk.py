@@ -44,6 +44,7 @@ from pitchbot.conversation.planning import Slot, supported_languages
 from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
 from pitchbot.speech.backchannel import Backchannel
+from pitchbot.speech.pipeline import DEFAULT_TRANSCRIBE_TIMEOUT_MS
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
 VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
@@ -477,6 +478,9 @@ def build_listener(
         # duration the endpointer reasons about, so silence is measured eight times too
         # long and the buyer never gets to finish a sentence.
         frame_duration_ms=FRAME_MS,
+        # Bounded because a supported language can still hold the decoder: a 3.2 s Hindi
+        # clip measured 11,455 ms median against ~2 s for every healthy utterance.
+        transcribe_timeout_ms=args.transcribe_timeout_ms,
         on_thinking=listener.start_thinking,
     )
     listener.attach(pipeline)
@@ -709,6 +713,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-model",
         default="small",
         help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
+    )
+    parser.add_argument(
+        "--transcribe-timeout-ms",
+        type=float,
+        default=DEFAULT_TRANSCRIBE_TIMEOUT_MS,
+        help="give up on one utterance after this long and keep the conversation moving; "
+        "0 waits forever. A healthy transcription costs about two seconds whatever the "
+        "audio length, but a 3.2 s Hindi clip has been measured at 28,656 ms",
     )
     parser.add_argument(
         "--no-backchannel",
