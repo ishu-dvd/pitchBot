@@ -45,6 +45,7 @@ from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
 from pitchbot.speech.backchannel import Backchannel
 from pitchbot.speech.pipeline import DEFAULT_TRANSCRIBE_TIMEOUT_MS
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
 VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
@@ -556,6 +557,9 @@ def build_listener(
         # Bounded because a supported language can still hold the decoder: a 3.2 s Hindi
         # clip measured 11,455 ms median against ~2 s for every healthy utterance.
         transcribe_timeout_ms=args.transcribe_timeout_ms,
+        # The largest cost after transcription, and the only one tuned by ear rather than
+        # from data - a synthesised corpus has no natural pauses to fit it to.
+        config=TurnTakingConfig(end_silence_ms=args.end_silence_ms),
         on_thinking=listener.start_thinking,
     )
     listener.attach(pipeline)
@@ -563,7 +567,7 @@ def build_listener(
     filler = "off" if backchannel is None else f"after {Backchannel().first_after_ms} ms"
     note = (
         f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model} "
-        f"({hint}); backchannel {filler}"
+        f"({hint}); end-silence {args.end_silence_ms} ms; backchannel {filler}"
     )
     return listener, note
 
@@ -788,6 +792,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-model",
         default="small",
         help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
+    )
+    parser.add_argument(
+        "--end-silence-ms",
+        type=int,
+        default=TurnTakingConfig().end_silence_ms,
+        help="how long the buyer must be quiet before the agent decides they have "
+        "finished. 700 ms of a measured ~2,587 ms spoken turn - 27%% of it, and the "
+        "largest cost after transcription. It cannot be fitted from a synthesised corpus, "
+        "which has no natural pauses, so it is tuned by ear: lower it until the agent "
+        "starts cutting you off mid-thought, then back off",
     )
     parser.add_argument(
         "--transcribe-timeout-ms",

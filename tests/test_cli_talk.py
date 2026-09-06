@@ -28,6 +28,7 @@ from pitchbot.cli.talk import (
 )
 from pitchbot.conversation.planning import Slot, supported_languages
 from pitchbot.domain import LanguageCode, RequirementFact
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 
 def _fact(key: str) -> RequirementFact:
@@ -246,3 +247,15 @@ def test_hindi_and_hinglish_are_pointed_at_the_engine_that_serves_them(
     assert "supertonic" in notes[LanguageCode.MIXED]
     assert "supertonic" not in notes[LanguageCode.ENGLISH]
     assert "supertonic" not in notes[LanguageCode.TELUGU]
+
+
+def test_end_silence_is_tunable_from_the_command_line() -> None:
+    """The number can only be found by ear, so it has to be adjustable where you listen.
+
+    Exposing it in `Settings` alone would have left the argument circular: the server
+    documentation says to tune it against real speakers, and the tool you would use to
+    do that ran a hardcoded 700 ms.
+    """
+
+    assert build_parser().parse_args([]).end_silence_ms == TurnTakingConfig().end_silence_ms
+    assert build_parser().parse_args(["--end-silence-ms", "450"]).end_silence_ms == 450
