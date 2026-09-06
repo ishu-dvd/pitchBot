@@ -2520,3 +2520,163 @@ it removes one the wrapped object had. Audited for others of the same shape: `Pr
 `RetunableTranscriber` and `EarlyDetectingTranscriber` are the only capabilities detected by
 `isinstance` on an adapter, and the transcriber has no wrapper - the pipeline holds it
 directly. The synthesiser was the only place the defect could exist, and it did.
+
+### The backchannel was counting from the wrong instant (2026-09-07)
+
+`FIRST_AFTER_MS` reads 700 and is documented as *"a beat of silence after someone stops
+speaking is normal turn-taking"*. Measured on the real pipeline in **audio time** - frames
+times frame duration, which is exactly reproducible and is what the buyer experiences
+(`probe_filler_timing.py`):
+
+| counting from the buyer's last speech frame | before | after |
+|---|---:|---:|
+| endpointer closes the utterance | 720 ms | 720 ms |
+| `on_thinking` fires (filler clock starts) | 720 ms | 720 ms |
+| **first filler spoken** | **1,420 ms** | **920 ms** |
+| second filler spoken | 3,220 ms | 3,200 ms |
+| reply audio ready (measured whole turn) | 2,587 ms | 2,587 ms |
+
+The clock started at `on_thinking`, which the pipeline fires when the endpointer *closes*
+the utterance - and an utterance only closes after `end_silence_ms` (700 ms) of trailing
+silence. So a threshold that read 700 delivered **1,420 ms**, twice its own value and 7.1x
+the ~200 ms gap Stivers et al. (PNAS 2009) measured between human turns.
+
+**Both halves of that docstring were true and they were not the same instant.**
+
+The endpointer already tracked the trailing silence and discarded it at the boundary, so
+`SpeechSegment` now carries it. Measured rather than assumed to be `end_silence_ms`: a
+`MAX_DURATION` close arrives with the buyer possibly still mid-sentence, where the honest
+offset is zero and crediting 700 ms of silence that never happened would make the filler
+interrupt someone still talking.
+
+#### Crediting the silence broke the other half of the same docstring
+
+*"It also keeps the filler off any path that is already fast."* Against buyer-silence alone
+every spoken turn clears the beat the instant we learn there is work - including one whose
+reply is milliseconds away - because 700 ms of the threshold is spent before the filler
+task exists.
+
+That matters because a filler is not free to abandon: `settle` waits for one to finish
+rather than chopping it mid-word, so a filler starting just before the reply does not cover
+the wait, it **extends** it by the filler's own length (0.37-1.07 s measured).
+
+So there are two clocks, and a filler must satisfy both: enough silence for the buyer to
+feel a gap, and enough work for us to be sure there is one. `MIN_WORK_MS = 200` is the same
+human turn-gap - the beat a person takes before deciding someone else's pause needs filling
+- and it is capped at `first_after_ms` so it is a floor and never the binding constraint.
+With no silence credited (a typed turn) the wait is exactly `first_after_ms`, unchanged.
+
+`SECOND_AFTER_MS` moved 2,500 -> 3,200 to keep the position it actually had. 2,500 measured
+from a close that was already 720 ms late put it at 3,220 ms; left alone once the reference
+frame was corrected it would have fired **87 ms before the reply was ready**.
+
+### The dominant latency term was documented as configuration and was not (2026-09-07)
+
+`TurnTakingConfig` has described itself, since it was written, as *"configuration rather
+than a constant so it can be tuned against measurements once a real detector is
+benchmarked"*. Nothing ever built it from `Settings`. `SimulatorService` takes a
+`turn_taking` parameter and neither branch of `_build_service` passed it, so every
+deployment ran the dataclass defaults - which is what a constant is.
+
+The scale of what was unreachable, against the measured ~2,587 ms spoken turn:
+
+| term | cost | share | configurable before |
+|---|---:|---:|---|
+| `end_silence_ms` | 700 ms | **27%** | **no** |
+| transcription | ~1,717 ms | 66% | model, device, beam size, timeout - yes |
+| plan + synthesise | ~150 ms | 6% | voice, engine, steps - yes |
+
+`Settings` carried 26 speech knobs - down to `speech_stt_beam_size` - and not one for turn
+taking, while the largest term after transcription sat behind a dataclass default.
+
+This is also the only honest way to move that number. It cannot be fitted here: fitting it
+needs recordings of real speakers pausing mid-thought, and every corpus this project has is
+synthesised, with no natural pauses to fit to. That is why it has stayed on the backlog as
+*blocked* rather than being guessed at. A deployment with real traffic can find its own,
+and the trade-off is stated where they will read it - lower and the agent interrupts people
+who were still thinking, higher and every reply feels sluggish.
+
+All five thresholds are exposed rather than only the dominant one, since the same argument
+applies to each and `TurnTakingConfig` already validates them. Defaults are unchanged and
+asserted to be, so wiring it moves nothing by itself.
+
+#### Confirmed against a wall clock, with real speech (2026-09-07)
+
+The numbers above are *audio time* against a mock transcriber - exact and reproducible, but
+they assume the filler task is scheduled promptly and that a real decode running on the same
+loop does not delay it. `probe_filler_wallclock.py` checks that assumption: real synthesised
+buyer speech, pushed frame by frame with `asyncio.sleep(30 ms)` so audio time and wall time
+advance together, through the real WebRTC endpointer and a resident faster-whisper `small`.
+
+| buyer sentence | filler | transcript |
+|---|---:|---:|
+| "We run an online store selling handmade furniture." | 792 ms | 2,609 ms |
+| "Our budget is around two lakh rupees for the whole project." | 947 ms | 2,865 ms |
+| "We need the website live before the festival season starts." | 933 ms | 2,709 ms |
+| **median** | **933 ms** | **2,709 ms** |
+
+Predicted 920 ms, measured **933 ms** - within 1.4%, so the scheduling assumption holds and
+the audio-time model can be trusted for the rest of the reasoning.
+
+Two things fall out of the same run:
+
+- The 792 ms case is not noise. Synthesised speech carries its own trailing silence, so the
+  endpointer had already begun counting before the last frame was pushed. Real speakers
+  trail off the same way, which is an argument for measuring the offset rather than
+  assuming `end_silence_ms` - as this change does.
+- The transcript lands at **2,709 ms**, so `SECOND_AFTER_MS = 3,200` still sits past the
+  reply on a healthy turn and does not fire - confirmed in wall clock, not only in the
+  arithmetic that chose it.
+
+### Two drift audits that found nothing (2026-09-07)
+
+Recorded because a clean audit is a result, and repeating it is waste:
+
+- **Every `pip install` hint in source and docs names a real extra.** Checked every
+  `pitchbot[...]` and `.[...]` against `pyproject.toml`'s `optional-dependencies`: 0
+  mismatches across `dev`, `faster-whisper`, `local-llm`, `microphone`, `piper-tts`,
+  `supertonic-tts`, `webrtc-vad`.
+- **No documentation names a setting that does not exist.** Two `PITCHBOT_*` names appear in
+  docs without being `Settings` fields - `PITCHBOT_PIPER_VOICE_DIR` and
+  `PITCHBOT_WHISPER_MODEL` - and both are correct: they are live *test-harness* opt-ins that
+  gate the heavy piper and whisper integration tests, named inside `docs/PROGRESS.md`, which
+  is a historical per-PR log rather than guidance. Not stale, and not something to "fix" -
+  editing a historical entry would make the record wrong.
+
+### The whole turn, end to end, with nothing mocked (2026-09-07)
+
+Everything above argues against `~2,587 ms`, and the wall-clock run put the *transcript*
+alone at 2,709 ms - later than the whole turn was supposed to take. A justification resting
+on a stale figure is worth as little as one resting on none, so the turn was measured again:
+real synthesised speech fed at real time, real WebRTC endpointing, resident faster-whisper
+`small`, the real conversation engine and a resident Piper voice, with the clock stopped at
+the **first byte of reply audio** - the moment the buyer stops hearing silence
+(`probe_full_turn_wallclock.py`, 10 English turns).
+
+| from the buyer's last word | median | fastest | slowest |
+|---|---:|---:|---:|
+| first filler | 925 ms | 819 ms | 978 ms |
+| transcript ready | 2,668 ms | 2,401 ms | 3,181 ms |
+| reply planned | +1 ms | | |
+| **first byte of reply audio** | **2,875 ms** | **2,636 ms** | **3,383 ms** |
+
+Two conclusions, one comfortable and one not.
+
+**The timing fix is confirmed.** 925 ms measured against 920 ms predicted from audio time.
+
+**`SECOND_AFTER_MS = 3,200` was wrong.** It sat 183 ms *before* the slowest reply, so on
+one turn in ten it began speaking just as the reply became ready - and because the reply
+waits for a filler rather than chopping it, that does not cover the wait, it extends it by
+the filler's own length. This is precisely the failure the value was raised from 2,500 to
+avoid; it was wrong for the same reason, only less often, and only measuring the real thing
+could show it.
+
+**4,500** clears the slowest observed reply by 1,117 ms - a third again, which is the margin
+a ten-sample estimate deserves. It stays 1.5 s inside the 6,000 ms transcription deadline, so
+a genuinely slow turn is still covered before the recovery line speaks, and the longest
+mid-turn silence it can leave is ~3.2 s - under the ~4.5 s at which a person concludes the
+line has dropped.
+
+The `~2,587 ms` figure is corrected where it was load-bearing (the CLI help, `.env.example`,
+the settings comment) and left untouched in earlier entries, which recorded what was true
+when they were written.

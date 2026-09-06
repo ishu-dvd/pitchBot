@@ -31,6 +31,7 @@ from pitchbot.adapters.mocks import MockSpeechToTextAdapter, MockVoiceActivityDe
 from pitchbot.cli.talk import Listener
 from pitchbot.domain import LanguageCode
 from pitchbot.speech.backchannel import (
+    MIN_WORK_MS,
     Backchannel,
     BackchannelPhrases,
     backchannel_languages,
@@ -359,3 +360,113 @@ async def test_closing_the_listener_stops_it_thinking() -> None:
 
     assert microphone.stopped
     assert said == []
+
+
+# --------------------------------------------------------------------------------------
+# Two clocks: the buyer's silence, and our own work
+# --------------------------------------------------------------------------------------
+
+
+def test_silence_already_spent_endpointing_counts_towards_the_threshold() -> None:
+    """The bug: a "700 ms" first filler was measured landing at 1,420 ms.
+
+    `FIRST_AFTER_MS` is documented as a beat since the buyer stopped, but it was counted
+    from the moment the endpointer *noticed* - which is `end_silence_ms` later. Both halves
+    of that sentence were true and they were not the same instant.
+    """
+
+    policy = Backchannel()
+
+    # No silence to credit - a typed turn - so the wait is the threshold, unchanged.
+    assert policy.work_target_ms(policy.first_after_ms, 0.0) == float(policy.first_after_ms)
+
+    # 720 ms already spent means only the remainder is owed, floored by the work deadband.
+    assert policy.work_target_ms(policy.first_after_ms, 720.0) == float(policy.work_floor_ms)
+
+
+def test_the_work_deadband_never_becomes_the_binding_constraint() -> None:
+    """A floor on our work must not silently override a deliberately short beat.
+
+    Capping it at `first_after_ms` keeps every zero-silence path byte-identical to before,
+    so the change can only affect the path it was written for.
+    """
+
+    assert Backchannel().work_floor_ms == MIN_WORK_MS
+    assert Backchannel(first_after_ms=10, second_after_ms=20).work_floor_ms == 10
+    assert Backchannel(first_after_ms=10, second_after_ms=20).work_target_ms(10, 0.0) == 10.0
+
+
+def test_a_reply_that_is_nearly_ready_is_not_padded_with_a_filler() -> None:
+    """Why the deadband exists at all.
+
+    Once endpoint silence is credited, every spoken turn clears the beat the instant we
+    learn there is work - including one whose reply is milliseconds away. A filler is not
+    free to abandon: the reply waits for it rather than chopping it, so filling there would
+    extend the wait by the filler's own length rather than covering it.
+    """
+
+    policy = Backchannel()
+    target = policy.work_target_ms(policy.first_after_ms, 720.0)
+
+    assert target > 0, "a filler that starts at zero work can never be cancelled by a reply"
+    assert policy.due(720.0 + target, LanguageCode.ENGLISH) is not None
+
+
+def test_the_second_filler_still_lands_after_a_normal_reply() -> None:
+    """Crediting silence moves both thresholds earlier, and one of them must not move.
+
+    Measured end to end with nothing mocked (`probe_full_turn_wallclock.py`, 10 English
+    turns), the first byte of reply audio arrives at a median of 2,875 ms and at worst
+    3,383 ms. A second filler that begins before the reply is ready does not cover the
+    wait - the reply waits for it rather than chopping it - so it must clear that.
+
+    Asserted against the slowest observed reply, not the median: the failure this guards
+    is a tail event, and a threshold that only beats the median fails one turn in ten,
+    which is exactly what 3,200 did before it was measured.
+    """
+
+    policy = Backchannel()
+    spoken_at = 720.0 + policy.work_target_ms(policy.second_after_ms, 720.0)
+
+    assert spoken_at > 3_383
+
+
+@pytest.mark.asyncio
+async def test_the_pipeline_tells_the_filler_how_long_the_buyer_has_been_quiet() -> None:
+    """The wiring, end to end: without it the two clocks are still one clock.
+
+    Asserted against the endpointer's own threshold rather than a literal, because the
+    point is that it reports the silence that actually elapsed - not a constant either
+    side happens to agree on.
+    """
+
+    offsets: list[float] = []
+    pipeline = SpeechTurnPipeline(
+        detector=MockVoiceActivityDetector(speech_threshold_bytes=64),
+        transcriber=MockSpeechToTextAdapter(),
+        language=LanguageCode.ENGLISH,
+        frame_duration_ms=FRAME_MS,
+        on_thinking=offsets.append,
+    )
+
+    sequence = 0
+    for _ in range(10):
+        await pipeline.push(_chunk(sequence, SPEECH))
+        sequence += 1
+    for _ in range(60):
+        result = await pipeline.push(_chunk(sequence, b"\x00" * 16))
+        sequence += 1
+        if result.utterance is not None:
+            break
+
+    assert offsets, "the filler was never told there was work"
+    assert offsets[0] >= pipeline.turn_taking.config.end_silence_ms
+
+
+def _chunk(sequence: int, payload: bytes) -> AudioChunk:
+    return AudioChunk(
+        data=payload,
+        captured_at=datetime.now(UTC),
+        sequence=sequence,
+        sample_rate_hz=16_000,
+    )

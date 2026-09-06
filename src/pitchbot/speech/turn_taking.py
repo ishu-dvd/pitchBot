@@ -218,6 +218,7 @@ class TurnTaking:
             reason=reason,
             started_at=started_at,
             ended_at=ended_at,
+            trailing_silence_ms=self._trailing_silence_ms,
         )
         self._reset_utterance()
         self._state = TurnTakingState.IDLE

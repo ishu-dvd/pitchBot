@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -49,3 +52,20 @@ def test_durable_history_requires_a_managed_32_byte_hex_key() -> None:
         }
     )
     assert settings.enable_durable_history is True
+
+
+def test_every_setting_is_documented_in_env_example() -> None:
+    """A setting nobody can discover is barely more use than one that does not exist.
+
+    `.env.example` is where an operator finds out what they are allowed to change, so it
+    drifting from `Settings` is a silent loss of a feature - which is what happened to the
+    turn-taking thresholds: they were reachable in code and absent from the file, and
+    nothing noticed. Asserted in both directions, because a setting listed here and removed
+    from `Settings` is a line in someone's `.env` that quietly does nothing.
+    """
+
+    text = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    documented = {match.group(1).lower() for match in re.finditer(r"^PITCHBOT_(\w+)=", text, re.M)}
+
+    assert documented - set(Settings.model_fields) == set(), "documented but not a setting"
+    assert set(Settings.model_fields) - documented == set(), "a setting nobody can find"

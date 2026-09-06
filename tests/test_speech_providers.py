@@ -17,6 +17,7 @@ extras happen to be installed in the test environment.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -30,7 +31,10 @@ from pitchbot.adapters.routing_tts import LanguageRoutedTextToSpeech
 from pitchbot.adapters.supertonic_tts import SupertonicTextToSpeechAdapter
 from pitchbot.adapters.webrtc_vad import WebRtcVoiceActivityDetector
 from pitchbot.config import Settings
+from pitchbot.config import settings as app_settings
 from pitchbot.domain import LanguageCode
+from pitchbot.simulator.models import CreateSessionRequest
+from pitchbot.simulator.service import SimulatorService
 from pitchbot.speech.providers import (
     MOCK_VAD_ID,
     NO_SYNTHESIZER_ID,
@@ -42,10 +46,12 @@ from pitchbot.speech.providers import (
     build_speech_providers,
     build_speech_to_text,
     build_text_to_speech,
+    build_turn_taking,
     build_voice_activity_detector,
     parse_voice_map,
     preload_speech_providers,
 )
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 _PROVIDERS = "pitchbot.speech.providers"
 
@@ -590,3 +596,118 @@ async def test_the_startup_hook_still_preloads_once_a_language_is_routed() -> No
     await preload_speech_providers(providers)
 
     assert (piper.preloads, supertonic.preloads) == (1, 1)
+
+
+# --------------------------------------------------------------------------------------
+# Turn taking: the dominant latency term was documented as configuration and was not
+# --------------------------------------------------------------------------------------
+
+
+def test_turn_taking_thresholds_come_from_settings() -> None:
+    """`TurnTakingConfig` has always called itself configuration. Nothing ever built it.
+
+    `end_silence_ms` is 700 ms of a measured ~2,587 ms spoken turn - 27% of it - and until
+    this was wired no deployment could change it, while `speech_stt_beam_size` next door
+    could be tuned freely.
+    """
+
+    config = build_turn_taking(
+        _settings(
+            speech_turn_min_speech_ms=150,
+            speech_turn_end_silence_ms=450,
+            speech_turn_max_utterance_ms=15_000,
+            speech_turn_barge_in_speech_ms=250,
+            speech_turn_agent_floor_ms=20_000,
+        )
+    )
+
+    assert config.end_silence_ms == 450
+    assert config.min_speech_ms == 150
+    assert config.max_utterance_ms == 15_000
+    assert config.barge_in_speech_ms == 250
+    assert config.agent_floor_ms == 20_000
+
+
+def test_the_defaults_are_unchanged_so_wiring_it_changes_nothing_by_itself() -> None:
+    """Reachable is not the same as different. An untouched deployment must not move."""
+
+    assert build_turn_taking(_settings()) == TurnTakingConfig()
+
+
+def test_an_impossible_threshold_names_the_setting_the_operator_edited() -> None:
+    """The dataclass validates under its field names, which are not the .env names.
+
+    Being told `end_silence_ms must be between 1 and ...` sends someone hunting through
+    source for a line they wrote in their own configuration file.
+    """
+
+    with pytest.raises(PermanentAdapterError) as error:
+        build_turn_taking(_settings(speech_turn_end_silence_ms=0))
+
+    assert "speech_turn_end_silence_ms" in str(error.value)
+    assert "end_silence_ms must be between" in str(error.value)
+
+
+def test_a_custom_end_silence_reaches_the_pipeline_the_socket_uses() -> None:
+    """The setting is worthless if it stops at the service constructor.
+
+    Asserted through `create_speech_pipeline`, which is what the audio socket calls per
+    session - and which also feeds the `end_silence_ms` the socket reports back to the
+    browser and the perceived-latency figure the turn is logged with.
+    """
+
+    service = SimulatorService(turn_taking=TurnTakingConfig(end_silence_ms=450))
+    session = service.create_session(CreateSessionRequest(lead_ref="turn-taking"))
+
+    pipeline = service.create_speech_pipeline(session.session_id)
+
+    assert pipeline.turn_taking.config.end_silence_ms == 450
+
+
+def test_the_router_hands_the_configured_thresholds_to_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reaching the builder is not reaching the product.
+
+    `_build_service` has two branches - durable history on and off - and the thresholds
+    have to be passed in both. A test that only exercises `build_turn_taking` cannot see
+    a branch that forgets to use it, which is exactly how this was unreachable to begin
+    with: the service has always accepted `turn_taking` and nobody ever passed it.
+    """
+
+    from pitchbot.simulator import router
+
+    monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=450))
+    monkeypatch.setattr(app_settings, "enable_durable_history", False)
+
+    service = router._build_service()
+    session = service.create_session(CreateSessionRequest(lead_ref="router-turn-taking"))
+
+    assert (
+        service.create_speech_pipeline(session.session_id).turn_taking.config.end_silence_ms == 450
+    )
+
+
+def test_the_durable_history_branch_hands_them_over_too(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two branches build the service, and a threshold has to survive both.
+
+    Worth a second test rather than trusting symmetry: the two call sites already list the
+    same five speech arguments twice, and duplication is how one of them comes to be missing
+    an argument the other has.
+    """
+
+    from pitchbot.simulator import router
+
+    monkeypatch.setattr(router, "turn_taking", TurnTakingConfig(end_silence_ms=480))
+    monkeypatch.setattr(app_settings, "enable_durable_history", True)
+    monkeypatch.setattr(app_settings, "durable_history_digest_key", "ab" * 32)
+    monkeypatch.setattr(app_settings, "database_url", f"sqlite:///{tmp_path / 'turn.db'}")
+
+    service = router._build_service()
+    session = service.create_session(CreateSessionRequest(lead_ref="durable-turn-taking"))
+    pipeline = service.create_speech_pipeline(session.session_id)
+
+    assert pipeline.turn_taking.config.end_silence_ms == 480

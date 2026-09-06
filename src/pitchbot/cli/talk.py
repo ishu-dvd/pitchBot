@@ -45,6 +45,7 @@ from pitchbot.domain import LanguageCode
 from pitchbot.domain.models import RequirementFact
 from pitchbot.speech.backchannel import Backchannel
 from pitchbot.speech.pipeline import DEFAULT_TRANSCRIBE_TIMEOUT_MS
+from pitchbot.speech.turn_taking import TurnTakingConfig
 
 BANNER = "PitchBot - local sales conversation. Ctrl-C or an empty line to stop."
 VOICE_BANNER = "PitchBot - speak when it says listening. Ctrl-C to stop."
@@ -390,19 +391,23 @@ class Listener:
 
         self._pipeline = pipeline
 
-    def start_thinking(self) -> None:
+    def start_thinking(self, already_silent_ms: float = 0.0) -> None:
         """Begin filling the silence, called the moment transcription starts.
 
         Measured, that silence is ~4.5 s and is almost entirely transcription, so this is
         the only moment early enough to cover it.
+
+        ``already_silent_ms`` is how long the buyer had been quiet before the endpointer
+        noticed - 700 ms of it by default - which is time the thresholds in
+        :mod:`pitchbot.speech.backchannel` are supposed to include and used to miss.
         """
 
         if self._say is None or self._backchannel is None:
             return
         self._backchannel.begin_turn()
-        self._thinking = asyncio.get_running_loop().create_task(self._fill())
+        self._thinking = asyncio.get_running_loop().create_task(self._fill(already_silent_ms))
 
-    async def _fill(self) -> None:
+    async def _fill(self, already_silent_ms: float = 0.0) -> None:
         """Say at most a couple of short things while the transcriber works.
 
         Only the **microphone** is paused, never the turn-taking machine. This runs while
@@ -412,19 +417,23 @@ class Listener:
         copied out of the buffer before transcription began.
         """
 
+        # Zero is when we learned there was work; the thresholds are measured from the
+        # buyer's last word. `work_target_ms` reconciles the two.
         started = monotonic()
         if self._backchannel is None or self._say is None:  # pragma: no cover - guarded
             return
         for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            work_target = self._backchannel.work_target_ms(target, already_silent_ms)
             elapsed_ms = (monotonic() - started) * 1000
-            if elapsed_ms < target:
-                await asyncio.sleep((target - elapsed_ms) / 1000)
+            if elapsed_ms < work_target:
+                await asyncio.sleep((work_target - elapsed_ms) / 1000)
             # `max` rather than a fresh reading alone: having slept *to* the threshold, a
             # re-measurement can still land a fraction of a millisecond below it, and the
             # policy would then decline and the loop would end. The second filler would
             # silently never fire, on a timer that looked correct. Waiting for the target
             # is what happened, so that is what is reported.
-            waited_ms = max(float(target), (monotonic() - started) * 1000)
+            work_ms = max(work_target, (monotonic() - started) * 1000)
+            waited_ms = already_silent_ms + work_ms
             phrase = self._backchannel.due(waited_ms, self._language)
             if phrase is None:
                 continue
@@ -548,6 +557,9 @@ def build_listener(
         # Bounded because a supported language can still hold the decoder: a 3.2 s Hindi
         # clip measured 11,455 ms median against ~2 s for every healthy utterance.
         transcribe_timeout_ms=args.transcribe_timeout_ms,
+        # The largest cost after transcription, and the only one tuned by ear rather than
+        # from data - a synthesised corpus has no natural pauses to fit it to.
+        config=TurnTakingConfig(end_silence_ms=args.end_silence_ms),
         on_thinking=listener.start_thinking,
     )
     listener.attach(pipeline)
@@ -555,7 +567,7 @@ def build_listener(
     filler = "off" if backchannel is None else f"after {Backchannel().first_after_ms} ms"
     note = (
         f"webrtc vad (mode {args.vad_mode}) + faster-whisper {args.whisper_model} "
-        f"({hint}); backchannel {filler}"
+        f"({hint}); end-silence {args.end_silence_ms} ms; backchannel {filler}"
     )
     return listener, note
 
@@ -780,6 +792,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--whisper-model",
         default="small",
         help="faster-whisper model size; 'small' is the smallest that reads Hindi at all",
+    )
+    parser.add_argument(
+        "--end-silence-ms",
+        type=int,
+        default=TurnTakingConfig().end_silence_ms,
+        help="how long the buyer must be quiet before the agent decides they have "
+        "finished. 700 ms of a measured ~2,875 ms spoken turn - a quarter of it, and the "
+        "largest cost after transcription. It cannot be fitted from a synthesised corpus, "
+        "which has no natural pauses, so it is tuned by ear: lower it until the agent "
+        "starts cutting you off mid-thought, then back off",
     )
     parser.add_argument(
         "--transcribe-timeout-ms",

@@ -349,12 +349,20 @@ class ThinkingFiller:
     def enabled(self) -> bool:
         return self._sender is not None and self._sender.enabled
 
-    def start(self) -> None:
+    def start(self, already_silent_ms: float = 0.0) -> None:
         """Begin filling, called the moment an utterance closes and transcription begins.
 
         Synchronous because :class:`SpeechTurnPipeline` calls it from inside ``push``,
         before the transcription await, so that the wait is counted from when the buyer
         actually stopped rather than from whenever a coroutine is next scheduled.
+
+        ``already_silent_ms`` is how long the buyer had *already* been quiet when the
+        endpointer closed the utterance, and it is the difference between a threshold that
+        describes the buyer's experience and one that describes ours. An utterance closing
+        on silence has been quiet for ``end_silence_ms`` - 700 ms by default - so counting
+        from zero here made a "700 ms" first filler land at a measured **1,420 ms**. It is
+        a parameter rather than a constant because a ``MAX_DURATION`` close can arrive with
+        the buyer still mid-sentence, where the honest offset is zero.
         """
 
         if not self.enabled:
@@ -365,7 +373,7 @@ class ThinkingFiller:
             return
         self._stop = asyncio.Event()
         self._backchannel.begin_turn()
-        self._task = asyncio.get_running_loop().create_task(self._fill())
+        self._task = asyncio.get_running_loop().create_task(self._fill(already_silent_ms))
 
     async def settle(self) -> None:
         """Let any filler in flight finish, so the reply does not chop it mid-word.
@@ -400,20 +408,26 @@ class ThinkingFiller:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
-    async def _fill(self) -> None:
+    async def _fill(self, already_silent_ms: float = 0.0) -> None:
         started = perf_counter()
         sender = self._sender
         if sender is None:  # pragma: no cover - guarded by `enabled`
             return
         for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            # `target` is measured from the buyer's last word; `started` from the moment we
+            # learned there was work. `work_target_ms` reconciles them - crediting the
+            # silence already spent endpointing, and refusing to go below `min_work_ms`, so
+            # a reply that is nearly ready cancels the filler instead of waiting for it.
+            work_target = self._backchannel.work_target_ms(target, already_silent_ms)
             elapsed_ms = (perf_counter() - started) * 1000
-            if elapsed_ms < target and await self._sleep_until(target - elapsed_ms):
+            if elapsed_ms < work_target and await self._sleep_until(work_target - elapsed_ms):
                 return
             # `max` rather than a fresh reading alone: having slept *to* the threshold a
             # re-measurement can land a fraction of a millisecond below it, the policy
             # would decline, and the second filler would silently never fire on a timer
             # that looked correct.
-            waited_ms = max(float(target), (perf_counter() - started) * 1000)
+            work_ms = max(work_target, (perf_counter() - started) * 1000)
+            waited_ms = already_silent_ms + work_ms
             phrase = self._backchannel.due(waited_ms, self._language_of())
             if phrase is None:
                 continue

@@ -778,12 +778,17 @@ def test_the_reply_waits_for_a_filler_that_is_still_speaking(
     """Aborting a filler tells the browser to discard a half-said word.
 
     Arranged so the filler is genuinely still streaming when the transcript lands: it
-    starts 700 ms into a 1.0 s transcription and takes ~0.75 s to synthesise, so the reply
+    starts ~200 ms into a 0.5 s transcription and takes ~0.75 s to synthesise, so the reply
     has to wait ~450 ms for it. Without that wait the filler's stream is aborted, which is
     the whole difference this test exists to see.
+
+    The transcription used to be 1.0 s and the filler used to start 700 ms in. Both moved
+    when endpoint silence began counting towards the backchannel threshold: the filler now
+    begins after the work deadband rather than a further 700 ms, so a 1.0 s transcription
+    leaves it finished with time to spare and nothing to wait for.
     """
 
-    use_transcriber(monkeypatch, SlowTranscriber(1.0, [transcript("Hello.")]))
+    use_transcriber(monkeypatch, SlowTranscriber(0.5, [transcript("Hello.")]))
     use_synthesizer(monkeypatch, StubSynthesizer(64, 64, 64, 64, delay_s=0.25))
     session_id = new_session(client, "audio-filler-waits")
 

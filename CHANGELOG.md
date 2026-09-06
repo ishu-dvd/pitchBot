@@ -607,3 +607,66 @@ All notable changes to PitchBot are documented here.
   language when nothing is installed. A test asserts `OPENERS` and `VOICE_PREFIXES` have
   the same keys, so a language the CLI will open a conversation in can never again be one
   it cannot say.
+
+### Fixed
+
+- **The first backchannel landed at 1,420 ms for a threshold that reads 700.** It was
+  counted from `on_thinking`, which fires when the endpointer *closes* an utterance - and
+  an utterance only closes after `end_silence_ms` of trailing silence, so 700 ms of the
+  threshold was already spent before the clock started. `SpeechSegment` now carries the
+  trailing silence the endpointer already measured, and the pipeline hands it to the
+  filler. Measured rather than assumed: a `MAX_DURATION` close can arrive with the buyer
+  still mid-sentence, where the honest offset is zero.
+
+- **A second clock, because crediting that silence broke the other half of the same rule.**
+  The threshold also existed to keep fillers off a turn that is already fast, and against
+  buyer-silence alone every spoken turn qualifies immediately. Since the reply waits for a
+  filler rather than chopping it, filling there would extend the wait rather than cover it.
+  `MIN_WORK_MS = 200` - the human turn-gap - is a floor on our own work, capped at
+  `first_after_ms` so every zero-silence path is byte-identical to before.
+
+- `SECOND_AFTER_MS` 2,500 -> 3,200, keeping the position it effectively had. Unchanged, it
+  would have fired 87 ms before a typical reply and delayed it.
+
+  Net: first filler **1,420 ms -> 920 ms**, second unchanged, fast path protected.
+
+### Added
+
+- **Turn-taking thresholds are configurable**, which they had always claimed to be.
+  `TurnTakingConfig` called itself *"configuration rather than a constant"* while nothing
+  built it from `Settings`: the service accepted a `turn_taking` parameter and neither
+  branch of `_build_service` passed one. `end_silence_ms` is 700 ms of a measured
+  ~2,587 ms spoken turn - **27% of it**, the largest term after transcription - and until
+  now no deployment could change it, while `speech_stt_beam_size` next door could.
+
+  `PITCHBOT_SPEECH_TURN_MIN_SPEECH_MS`, `..._END_SILENCE_MS`, `..._MAX_UTTERANCE_MS`,
+  `..._BARGE_IN_SPEECH_MS`, `..._AGENT_FLOOR_MS`. Defaults unchanged and asserted to be, so
+  wiring it moves nothing by itself. An impossible value is a startup error naming the
+  setting the operator edited rather than the dataclass field it maps to.
+
+  This is the only honest way to move that number: fitting it needs recordings of real
+  speakers pausing mid-thought, and a synthesised corpus has no natural pauses to fit to.
+
+- **The tuning argument was circular until the CLI could tune.** Exposing `end_silence_ms`
+  in `Settings` said to tune it by ear against real speakers, while `pitchbot-talk` - the
+  tool you would use to do that - built its pipeline with no config and ran a hardcoded
+  700 ms. `--end-silence-ms` now exists and the startup line reports the active value.
+
+- **`.env.example` drift is a test, not a habit.** The new settings were missing from the
+  file that documents every other speech knob down to `PITCHBOT_SPEECH_STT_BEAM_SIZE`, and
+  a setting nobody can discover is barely more use than one that does not exist. The file
+  and `Settings` must now name exactly the same keys, asserted in both directions -
+  documented-but-removed matters too, being a line in someone's `.env` quietly doing
+  nothing.
+
+- **`SECOND_AFTER_MS` 3,200 -> 4,500, because the number it was chosen against was stale.**
+  Measured end to end with nothing mocked - real speech at real time, real endpointing,
+  resident faster-whisper and Piper, clock stopped at the first byte of reply audio - the
+  reply arrives at a median of **2,875 ms** and at worst **3,383 ms**, not the ~2,587 ms
+  quoted. At 3,200 the second filler began 183 ms before the slowest reply and delayed one
+  turn in ten by its own length: the same failure it had been raised from 2,500 to avoid.
+  4,500 clears the slowest observed reply by a third again, stays 1.5 s inside the 6,000 ms
+  transcription deadline, and leaves at most ~3.2 s of mid-turn silence.
+
+  The same run confirms the timing fix itself: first filler **925 ms** measured against
+  **920 ms** predicted from audio time.

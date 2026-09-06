@@ -726,7 +726,7 @@ class SimulatorService:
         self,
         session_id: UUID,
         *,
-        on_thinking: Callable[[], None] | None = None,
+        on_thinking: Callable[[float], None] | None = None,
     ) -> SpeechTurnPipeline:
         """Build a per-connection pipeline. Sessions never share turn-taking state."""
 
