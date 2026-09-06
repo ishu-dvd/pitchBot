@@ -2599,3 +2599,46 @@ who were still thinking, higher and every reply feels sluggish.
 All five thresholds are exposed rather than only the dominant one, since the same argument
 applies to each and `TurnTakingConfig` already validates them. Defaults are unchanged and
 asserted to be, so wiring it moves nothing by itself.
+
+#### Confirmed against a wall clock, with real speech (2026-09-07)
+
+The numbers above are *audio time* against a mock transcriber - exact and reproducible, but
+they assume the filler task is scheduled promptly and that a real decode running on the same
+loop does not delay it. `probe_filler_wallclock.py` checks that assumption: real synthesised
+buyer speech, pushed frame by frame with `asyncio.sleep(30 ms)` so audio time and wall time
+advance together, through the real WebRTC endpointer and a resident faster-whisper `small`.
+
+| buyer sentence | filler | transcript |
+|---|---:|---:|
+| "We run an online store selling handmade furniture." | 792 ms | 2,609 ms |
+| "Our budget is around two lakh rupees for the whole project." | 947 ms | 2,865 ms |
+| "We need the website live before the festival season starts." | 933 ms | 2,709 ms |
+| **median** | **933 ms** | **2,709 ms** |
+
+Predicted 920 ms, measured **933 ms** - within 1.4%, so the scheduling assumption holds and
+the audio-time model can be trusted for the rest of the reasoning.
+
+Two things fall out of the same run:
+
+- The 792 ms case is not noise. Synthesised speech carries its own trailing silence, so the
+  endpointer had already begun counting before the last frame was pushed. Real speakers
+  trail off the same way, which is an argument for measuring the offset rather than
+  assuming `end_silence_ms` - as this change does.
+- The transcript lands at **2,709 ms**, so `SECOND_AFTER_MS = 3,200` still sits past the
+  reply on a healthy turn and does not fire - confirmed in wall clock, not only in the
+  arithmetic that chose it.
+
+### Two drift audits that found nothing (2026-09-07)
+
+Recorded because a clean audit is a result, and repeating it is waste:
+
+- **Every `pip install` hint in source and docs names a real extra.** Checked every
+  `pitchbot[...]` and `.[...]` against `pyproject.toml`'s `optional-dependencies`: 0
+  mismatches across `dev`, `faster-whisper`, `local-llm`, `microphone`, `piper-tts`,
+  `supertonic-tts`, `webrtc-vad`.
+- **No documentation names a setting that does not exist.** Two `PITCHBOT_*` names appear in
+  docs without being `Settings` fields - `PITCHBOT_PIPER_VOICE_DIR` and
+  `PITCHBOT_WHISPER_MODEL` - and both are correct: they are live *test-harness* opt-ins that
+  gate the heavy piper and whisper integration tests, named inside `docs/PROGRESS.md`, which
+  is a historical per-PR log rather than guidance. Not stale, and not something to "fix" -
+  editing a historical entry would make the record wrong.
