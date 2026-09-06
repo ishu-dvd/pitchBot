@@ -223,6 +223,19 @@ CC0: Final[VoiceLicense] = VoiceLicense(
     attribution_required=False,
     reference_url="https://creativecommons.org/publicdomain/zero/1.0/",
 )
+PUBLIC_DOMAIN: Final[VoiceLicense] = VoiceLicense(
+    identifier="public-domain",
+    permits_commercial_use=True,
+    attribution_required=False,
+    reference_url="https://huggingface.co/rhasspy/piper-voices",
+)
+"""Voices whose upstream MODEL_CARD states, verbatim, ``* License: public domain``.
+
+Recorded separately from :data:`CC0` because they are not the same claim. CC0 is a specific
+waiver instrument with text to point at; "public domain" is an assertion by the publisher
+about the training data. Both permit commercial use without attribution, so they behave
+identically at the gate - but conflating them would lose which one was actually reviewed.
+"""
 CC_BY_4_0: Final[VoiceLicense] = VoiceLicense(
     identifier="CC-BY-4.0",
     permits_commercial_use=True,
@@ -234,6 +247,12 @@ CC_BY_NC_SA_4_0: Final[VoiceLicense] = VoiceLicense(
     permits_commercial_use=False,
     attribution_required=True,
     reference_url="https://creativecommons.org/licenses/by-nc-sa/4.0/",
+)
+CC_BY_SA_4_0: Final[VoiceLicense] = VoiceLicense(
+    identifier="CC-BY-SA-4.0",
+    permits_commercial_use=True,
+    attribution_required=True,
+    reference_url="https://creativecommons.org/licenses/by-sa/4.0/",
 )
 BLIZZARD_2013_RESTRICTED: Final[VoiceLicense] = VoiceLicense(
     identifier="Blizzard-2013-Lessac-restricted",
@@ -257,9 +276,23 @@ voice through a gate on the strength of a document nobody has read.
 
 KNOWN_VOICE_LICENSES: Final[Mapping[str, VoiceLicense]] = {
     # --- English, commercially usable -------------------------------------------------
+    # Female and `high` quality. The tier matters as much as the speaker: a `high` model is
+    # larger and carries more prosody, which is most of what "robotic" describes. Both are
+    # confirmed female by measurement (236 Hz and 202 Hz median F0) rather than by name.
+    #
+    # The tier is not free. Measured on CPU, a `high` voice reaches its first audio in ~448 ms
+    # against ~126 ms for a `medium` one, and its realtime factor falls from ~16x to ~4x. That
+    # is a quality-for-latency trade an operator must make deliberately, so both tiers stay
+    # listed and `docs/TRY_IT_LOCALLY.md` prints the cost next to the choice.
+    "en_US-ljspeech-high": PUBLIC_DOMAIN,
+    "en_GB-cori-high": PUBLIC_DOMAIN,
+    # Speaker unverified: 160 Hz median F0 falls between the adult male and female bands, so
+    # the licence table does not claim a gender it cannot support.
+    "en_US-kristin-medium": PUBLIC_DOMAIN,
     "en_US-joe-medium": CC0,
     "en_US-libritts_r-medium": CC_BY_4_0,
     "en_GB-alba-medium": CC_BY_4_0,
+    "en_GB-southern_english_female-low": CC_BY_SA_4_0,
     # --- English, NOT commercially usable ---------------------------------------------
     "en_US-amy-low": CC_BY_NC_SA_4_0,
     "en_US-ryan-low": CC_BY_NC_SA_4_0,
@@ -658,6 +691,7 @@ __all__ = [
     "CC0",
     "CC_BY_4_0",
     "CC_BY_NC_SA_4_0",
+    "CC_BY_SA_4_0",
     "DEFAULT_MAX_CHUNKS",
     "DEFAULT_MAX_TEXT_CHARS",
     "DETERMINISTIC_SYNTHESIS",
@@ -670,6 +704,7 @@ __all__ = [
     "PCM_MEDIA_TYPE",
     "PIPER_AVAILABLE",
     "PROVIDER_ID",
+    "PUBLIC_DOMAIN",
     "PiperProvenance",
     "PiperSynthesisOptions",
     "PiperTextToSpeechAdapter",

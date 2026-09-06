@@ -161,12 +161,14 @@ one for you. Put `.onnx` files (and their `.onnx.json` sidecars) in a directory:
 ```bash
 mkdir -p models/piper
 cd models/piper
-# English, CC0 - usable commercially
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json
-# Telugu, CC-BY-4.0 - usable commercially with attribution
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/venkatesh/medium/te_IN-venkatesh-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/venkatesh/medium/te_IN-venkatesh-medium.onnx.json
+# English: female, `high` quality, public domain - usable commercially, no attribution.
+# The quality tier is not cosmetic: a `high` model is larger and carries more prosody than
+# a `medium` one, which is most of what makes a synthetic voice sound mechanical.
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ljspeech/high/en_US-ljspeech-high.onnx.json
+# Telugu: female, CC-BY-4.0 - usable commercially with attribution
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/padmavathi/medium/te_IN-padmavathi-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/padmavathi/medium/te_IN-padmavathi-medium.onnx.json
 cd ../..
 
 pitchbot-talk --speak
@@ -176,12 +178,60 @@ pitchbot-talk --language te --speak
 The banner prints which voice was chosen and its licence:
 
 ```
-  voice     : te_IN-venkatesh-medium (CC-BY-4.0)
+  voice     : te_IN-padmavathi-medium (CC-BY-4.0)
 ```
 
 If it says **NOT licensed for commercial use**, that is not a bug — it is most of Piper's
 catalogue, and every published Hindi voice. See the licence table in
 [`docs/BENCHMARKS.md`](BENCHMARKS.md).
+
+### Choosing a voice
+
+The reviewed options a commercial deployment may use. Two measured columns, because both
+matter and they pull against each other:
+
+- **median F0** — the measured median fundamental frequency of a synthesised sentence, so the
+  "female" label is not merely inferred from the voice's name. Adult male speech sits near
+  85–155 Hz and adult female near 175–255 Hz; a voice in between is reported as unverified.
+- **first audio** — how long until the buyer hears anything. This is the number a
+  conversation is judged on, and the `high` quality tier is **not free**.
+
+| voice | language | quality | median F0 | first audio | licence | attribution |
+|---|---|---|---|---|---|---|
+| `en_US-joe-medium` *(male)* | English | medium | 104 Hz | 126 ms | CC0-1.0 | no |
+| **`en_GB-alba-medium`** *(female)* | English (GB) | medium | 203 Hz | **182 ms** | CC-BY-4.0 | yes |
+| `en_US-kristin-medium` *(unverified)* | English | medium | 160 Hz | 157 ms | public domain | no |
+| **`en_US-ljspeech-high`** *(female)* | English | **high** | 236 Hz | **448 ms** | public domain | no |
+| `en_GB-cori-high` *(female)* | English (GB) | **high** | 202 Hz | 477 ms | public domain | no |
+| `en_GB-southern_english_female-low` | English (GB) | low | — | — | CC-BY-SA-4.0 | yes |
+| `te_IN-padmavathi-medium` *(female)* | Telugu | medium | 197 Hz | — | CC-BY-4.0 | yes |
+
+**Pick by what you are optimising.** `en_GB-alba-medium` is female and costs only 56 ms more
+than the outgoing male voice. `en_US-ljspeech-high` sounds markedly less mechanical — that is
+what the `high` tier buys — but adds **322 ms to every reply**, which is *more than an entire
+human conversational turn-gap* (measured at ~200 ms across ten languages by Stivers et al.,
+PNAS 2009), and drops the realtime factor from 16.5× to 4.2×. The download commands above use
+`ljspeech-high`; swap in `alba-medium` if latency matters more than polish.
+
+> **Context for that trade.** The whole spoken turn currently takes ~2,587 ms from the buyer
+> finishing to the first audio — about **13× the human turn-gap** and 6.5× ITU-T G.114's
+> 400 ms ceiling for interactive voice. Transcription is 66% of it and the endpointer's fixed
+> 700 ms wait is another 27%, so the voice is not the problem — but 322 ms is not free either.
+> See [BENCHMARKS.md](BENCHMARKS.md), *"What 'real time' means to a person, not to a CPU"*.
+
+`en_US-kristin-medium` is listed as **unverified**, not female: at 160 Hz it falls inside the
+band where the measurement cannot distinguish the two, and the licence table should not carry
+a label that rests on a first name.
+
+Measurements: [`docs/BENCHMARKS.md`](BENCHMARKS.md). **Kokoro-82M was measured and rejected** —
+Apache-2.0 and it has Hindi, but 2,683 ms to first audio against Piper's 126 ms, and it cannot
+begin speaking before the whole clip exists. **Meta Voicebox** has no released weights.
+
+**Hindi has no commercially usable voice at all.** All three published `hi_IN` voices are
+CC-BY-NC-SA or carry an unresolved licence, including the female `hi_IN-priyamvada-medium`.
+Speaking Hindi aloud commercially is an owner decision that needs a licence PitchBot cannot
+supply; set `PITCHBOT_SPEECH_TTS_ALLOW_NON_COMMERCIAL=true` only if evaluation-only use is
+what you intend. Hindi *text* is unaffected.
 
 Audio plays through whatever your OS already has (`winsound`, `afplay`, `paplay`, `aplay`).
 No audio library is installed.

@@ -61,10 +61,15 @@ const OUTCOME_LABELS = {
 
 function onReplyAudio(payload) {
   if (payload.type === "reply-audio-begin") {
-    if (!player.begin(payload.sample_rate_hz)) {
+    // `after` for a reply only: it schedules behind a filler that is still draining
+    // rather than cutting it off. A filler never queues behind anything, because
+    // anything it could queue behind is the previous turn's answer.
+    if (!player.begin(payload.sample_rate_hz, { after: !payload.filler })) {
       // No WebAudio here, so the server's voice cannot be played at all. Speaking the
-      // text keeps the buyer hearing the answer and keeps the floor accounted for.
-      speak(pendingReplyText, () => audio.sendControl("playback-finished"));
+      // text keeps the buyer hearing the answer and keeps the floor accounted for - but
+      // only for a reply. There is no text for a filler, and a browser voice saying
+      // "hmm" over the top of the answer is worse than the silence it was covering.
+      if (!payload.filler) speak(pendingReplyText, () => audio.sendControl("playback-finished"));
     }
     return true;
   }
@@ -76,7 +81,14 @@ function onReplyAudio(payload) {
     return true;
   }
   if (payload.frame_count > 0) {
-    player.end();
+    // A filler is played but never reported: it never held the floor, and handing back
+    // one it does not hold would mute the reply that is about to take it.
+    player.end({ report: !payload.filler });
+    return true;
+  }
+  if (payload.filler) {
+    // Nothing to play. A missing "hmm" is a missing courtesy, not a missing answer.
+    player.stop();
     return true;
   }
   // Synthesis produced nothing - it failed, or the reply was punctuation only. The reply

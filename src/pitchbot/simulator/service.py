@@ -4,7 +4,7 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID, uuid4, uuid5
@@ -717,7 +717,12 @@ class SimulatorService:
     def speech_synthesizer(self) -> TextToSpeechAdapter | None:
         return self._speech_synthesizer
 
-    def create_speech_pipeline(self, session_id: UUID) -> SpeechTurnPipeline:
+    def create_speech_pipeline(
+        self,
+        session_id: UUID,
+        *,
+        on_thinking: Callable[[], None] | None = None,
+    ) -> SpeechTurnPipeline:
         """Build a per-connection pipeline. Sessions never share turn-taking state."""
 
         session = self._get_session(session_id)
@@ -728,6 +733,10 @@ class SimulatorService:
             config=self._turn_taking,
             clock=self._clock,
             early_detection_seconds=self._speech_early_detection_seconds,
+            # Told the instant an utterance closes, which is the only moment early enough
+            # to cover the wait: measured, transcription is two thirds of it, so anything
+            # waiting for the transcript speaks into the last of the silence.
+            on_thinking=on_thinking,
         )
 
     async def interrupt(self, session_id: UUID) -> SessionResponse:

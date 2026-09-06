@@ -70,10 +70,12 @@ class StubSynthesizer:
         *sizes: int,
         rate: int = 22_050,
         gate: asyncio.Event | None = None,
+        delay_s: float = 0.0,
     ) -> None:
         self._sizes = sizes or (2_048,)
         self._rate = rate
         self._gate = gate
+        self._delay_s = delay_s
         self.calls: list[str] = []
 
     async def synthesize(
@@ -85,6 +87,11 @@ class StubSynthesizer:
         for sequence, size in enumerate(self._sizes):
             if self._gate is not None and sequence:
                 await self._gate.wait()
+            if self._delay_s and sequence:
+                # Unlike `gate`, this keeps the stream open for a *known* duration, so a
+                # test can arrange for a filler to still be speaking when the reply is
+                # ready without needing to interleave with the server's own timing.
+                await asyncio.sleep(self._delay_s)
             yield SynthesizedAudioChunk(
                 data=b"\x01\x02" * (size // 2),
                 sequence=sequence,
@@ -645,3 +652,191 @@ def test_synthesised_audio_is_as_unrecorded_as_captured_audio(
     assert "\\u0001\\u0002" not in events
     assert "4096" not in events
     assert str(traffic[-1]["byte_count"]) not in events
+
+
+class SlowTranscriber(MockSpeechToTextAdapter):
+    """Takes long enough that the backchannel's real 700 ms threshold actually fires.
+
+    Not an artificial delay: measured, transcription is 1,700 ms of the 2,587 ms a spoken
+    turn takes. A mock that returns instantly is the reason every other test in this file
+    sees no filler at all.
+
+    ``batches`` returns a different transcript per utterance, so a test can make the first
+    utterance produce nothing - the path that reaches no reply, and therefore the only one
+    where the filler is stopped by the ``finally`` rather than before the reply.
+    """
+
+    def __init__(
+        self,
+        delay_s: float,
+        transcripts: list[TranscriptChunk] | None = None,
+        batches: list[list[TranscriptChunk]] | None = None,
+    ) -> None:
+        super().__init__(transcripts=transcripts or [])
+        self._delay_s = delay_s
+        self._batches = list(batches) if batches is not None else None
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Any],
+    ) -> AsyncIterator[TranscriptChunk]:
+        async for _ in audio:
+            pass
+        await asyncio.sleep(self._delay_s)
+        batch = self._transcripts
+        if self._batches is not None:
+            batch = self._batches.pop(0) if self._batches else []
+        for item in batch:
+            yield item
+
+
+def test_the_backchannel_is_announced_when_a_voice_can_speak_it(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client cannot tell filler audio from a reply without being told it exists."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(64))
+    session_id = new_session(client, "audio-backchannel-ready")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+
+    assert ready["backchannel_available"] is True
+
+
+def test_the_backchannel_is_off_when_the_deployment_turns_it_off(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(64))
+    monkeypatch.setattr(app_settings, "speech_backchannel_enabled", False)
+    session_id = new_session(client, "audio-backchannel-off")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+
+    assert ready["backchannel_available"] is False
+
+
+def test_a_slow_transcript_is_covered_by_a_filler_before_the_reply(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point, end to end: silence gets something in it, and the reply still wins.
+
+    Two streams reach the browser, in order, and they are distinguishable. The filler is
+    marked so the client plays it without reporting playback - reporting would hand back
+    a floor the filler never took, releasing the one the reply is about to hold.
+    """
+
+    use_transcriber(monkeypatch, SlowTranscriber(0.9, [transcript("Hello.")]))
+    synthesizer = StubSynthesizer(64)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-backchannel-fires")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        # Drained in two passes, both of which terminate on a message the server always
+        # sends. Draining twice to `reply-audio-end` blocks forever the moment a
+        # regression stops the filler being sent at all - and a test that hangs instead of
+        # failing tells CI nothing about what broke. Found by mutating `on_thinking` away.
+        traffic = drain_until(socket, "utterance", limit=60)
+        traffic += drain_until(socket, REPLY_AUDIO_END, limit=60)
+
+    begins = [item for item in traffic if item["type"] == REPLY_AUDIO_BEGIN]
+    ends = [item for item in traffic if item["type"] == REPLY_AUDIO_END]
+    assert [item["filler"] for item in begins] == [True, False]
+    assert [item["filler"] for item in ends] == [True, False]
+    # Nothing was abandoned: the reply waited for the filler rather than cutting it off.
+    assert [item["aborted"] for item in ends] == [False, False]
+
+    # The filler is spoken first and is not the reply. It may assert receipt and never
+    # assent, because at the moment it is said nobody knows what the buyer asked yet.
+    assert len(synthesizer.calls) == 2
+    assert synthesizer.calls[0] == "Hmm."
+    assert synthesizer.calls[1] != "Hmm."
+
+
+def test_the_reply_waits_for_a_filler_that_is_still_speaking(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aborting a filler tells the browser to discard a half-said word.
+
+    Arranged so the filler is genuinely still streaming when the transcript lands: it
+    starts 700 ms into a 1.0 s transcription and takes ~0.75 s to synthesise, so the reply
+    has to wait ~450 ms for it. Without that wait the filler's stream is aborted, which is
+    the whole difference this test exists to see.
+    """
+
+    use_transcriber(monkeypatch, SlowTranscriber(1.0, [transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(64, 64, 64, 64, delay_s=0.25))
+    session_id = new_session(client, "audio-filler-waits")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        drain_until(socket, "utterance", limit=80)
+        # The next stream to close is the filler's: it is still speaking when the
+        # transcript lands, and the reply is held until it finishes. Asserting on this one
+        # rather than draining for the reply as well keeps the test from blocking if a
+        # regression means the filler is aborted instead of drained.
+        after = drain_until(socket, REPLY_AUDIO_END, limit=80)
+
+    end = after[-1]
+    assert end["filler"] is True
+    assert end["aborted"] is False, "the reply cut the filler off instead of waiting for it"
+
+
+def test_a_filler_never_speaks_into_the_next_turn(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An utterance that produces no transcript still has to stop its own filler.
+
+    That path never reaches a reply, so the filler is only stopped by the handler's
+    `finally`. A leaked task would still be running when the next utterance closes, and
+    the guard against two fillers at once would then suppress the next turn's filler
+    entirely - so the second turn going quiet is what a leak looks like from outside.
+    """
+
+    use_transcriber(monkeypatch, SlowTranscriber(0.9, batches=[[], [transcript("Hello.")]]))
+    synthesizer = StubSynthesizer(64)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-filler-no-leak")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        first = drain_until(socket, "utterance", limit=80)
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        second = drain_until(socket, "utterance", limit=80)
+
+    def fillers(traffic: list[dict[str, Any]]) -> int:
+        return len([i for i in traffic if i["type"] == REPLY_AUDIO_BEGIN and i["filler"]])
+
+    assert fillers(first) == 1, "the first utterance produced no transcript but did wait"
+    assert fillers(second) == 1, "a filler leaked past its own turn and muted the next one"

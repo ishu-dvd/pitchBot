@@ -52,7 +52,7 @@ from pitchbot.simulator.service import (
     SimulatorService,
     TurnOperationCapacityError,
 )
-from pitchbot.simulator.speech_output import LockedSocket, ReplyAudioSender
+from pitchbot.simulator.speech_output import LockedSocket, ReplyAudioSender, ThinkingFiller
 from pitchbot.speech import BargeIn, SpeechTurnPipeline, UtteranceResult
 from pitchbot.speech.providers import build_speech_providers
 from pitchbot.storage import (
@@ -362,7 +362,20 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
         return
     try:
         simulator_service.get_session(session_id)
-        pipeline = simulator_service.create_speech_pipeline(session_id)
+        # Read lazily, not captured: the buyer may switch language mid-conversation, and a
+        # filler is spoken *before* this turn's transcript exists, so the best available
+        # answer to "what language is this call in" is the one the last turn settled on.
+        filler = (
+            ThinkingFiller(
+                language_of=lambda: simulator_service.get_session(session_id).language,
+            )
+            if settings.speech_backchannel_enabled
+            else None
+        )
+        pipeline = simulator_service.create_speech_pipeline(
+            session_id,
+            on_thinking=None if filler is None else filler.start,
+        )
     except SessionNotFoundError:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -382,6 +395,8 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
             TurnStage.SYNTHESIZE, milliseconds, language=language.value
         ),
     )
+    if filler is not None:
+        filler.attach(sender)
     sequence = 0
     try:
         await socket.send_json(
@@ -391,6 +406,7 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
                 "speech_input_available": simulator_service.speech_input_available,
                 "speech_output_available": sender.enabled,
                 "end_silence_ms": pipeline.turn_taking.config.end_silence_ms,
+                "backchannel_available": filler is not None and filler.enabled,
             }
         )
         while True:
@@ -453,11 +469,13 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
             if frame.barge_in is not None:
                 # Stop the voice before announcing the interruption: the sooner the task
                 # is cancelled, the less audio the buyer has to talk over.
+                if filler is not None:
+                    await filler.abort()
                 await sender.abort()
                 await socket.send_json(_barge_in_message(frame.barge_in))
             if frame.utterance is not None:
                 if not await _handle_utterance(
-                    websocket, socket, sender, session_id, pipeline, frame.utterance
+                    websocket, socket, sender, session_id, pipeline, frame.utterance, filler
                 ):
                     return
     except WebSocketDisconnect:
@@ -465,6 +483,8 @@ async def audio_socket(websocket: WebSocket, session_id: UUID) -> None:
     finally:
         # A reply nobody can hear must not keep synthesising, and its task must not
         # outlive the connection it was speaking to.
+        if filler is not None:
+            await filler.abort()
         await sender.abort()
 
 
@@ -499,6 +519,32 @@ async def _handle_utterance(
     session_id: UUID,
     pipeline: SpeechTurnPipeline,
     result: UtteranceResult,
+    filler: ThinkingFiller | None = None,
+) -> bool:
+    """Report one utterance and stop filling the silence it opened.
+
+    The ``finally`` is what guarantees the second half. Most of the paths below never
+    reach a reply - noise, a failed engine call, a closed socket - and a filler left
+    running past its own turn would speak into the next one.
+    """
+
+    try:
+        return await _reply_to_utterance(
+            websocket, socket, sender, session_id, pipeline, result, filler
+        )
+    finally:
+        if filler is not None:
+            await filler.settle()
+
+
+async def _reply_to_utterance(
+    websocket: WebSocket,
+    socket: LockedSocket,
+    sender: ReplyAudioSender,
+    session_id: UUID,
+    pipeline: SpeechTurnPipeline,
+    result: UtteranceResult,
+    filler: ThinkingFiller | None,
 ) -> bool:
     """Report one utterance. Returns ``False`` when the socket has been closed."""
 
@@ -571,6 +617,11 @@ async def _handle_utterance(
     # reply is announced, so speech arriving during synthesis is an interruption too.
     pipeline.agent_started_speaking()
     await socket.send_json(message)
+    # Let the filler finish its word first. `start` would otherwise abort it mid-syllable
+    # and tell the client to discard what it had buffered, which sounds like a fault where
+    # a completed "hmm" sounds like a person. Bounded, because this is the receive loop.
+    if filler is not None:
+        await filler.settle()
     # Scheduled, not awaited: synthesis of a long reply was measured at 1,052 ms, and the
     # caller is the only thing classifying buyer audio.
     await sender.start(turn.reply, language)

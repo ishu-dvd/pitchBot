@@ -340,3 +340,108 @@ All notable changes to PitchBot are documented here.
   It is male and flat. `en_GB-alba-medium` (female, CC BY 4.0) and `te_IN-padmavathi-medium`
   (female, CC BY 4.0) are licence-clean alternatives; every reviewed `hi_IN` female voice is
   non-commercial, so Hindi remains an owner decision.
+### Changed (PR 49)
+
+- **The agent has a female voice, at a higher quality tier, under a better licence.**
+  `en_US-joe-medium` was male and `medium`, chosen in PR 33 for being CC0 rather than for how
+  it sounded. The documented default is now **`en_US-ljspeech-high`**: female, `high` quality,
+  and public domain. Telugu moves from `te_IN-venkatesh-medium` to the female
+  `te_IN-padmavathi-medium`, still CC-BY-4.0.
+
+  The quality tier is half the answer to "robotic": a `high` model is larger and carries more
+  prosody than a `medium` one. Piper publishes three `high` English voices and two are female,
+  so the requirement cost nothing - the new default is female **and** higher quality **and**
+  needs no attribution, where the old one did require none but was male and `medium`.
+
+- Four voices added to the reviewed licence table, each verified from its upstream MODEL_CARD:
+  `en_US-ljspeech-high`, `en_GB-cori-high` and `en_US-kristin-medium` (public domain), and
+  `en_GB-southern_english_female-low` (CC-BY-SA-4.0). `en_GB-jenny_dioco-medium` is
+  deliberately **excluded**: its card says only "See URL", and an unread licence is denied.
+
+- `PUBLIC_DOMAIN` is a distinct `VoiceLicense` rather than an alias of `CC0`. They behave
+  identically at the gate but are not the same claim - CC0 is a waiver instrument, "public
+  domain" is the publisher's assertion about the training data - and collapsing them would
+  lose which one was actually reviewed.
+
+### Unchanged (PR 49)
+
+- **Hindi still has no commercially usable voice**, including the female
+  `hi_IN-priyamvada-medium` (CC-BY-NC-SA-4.0). Telugu remains the only Indic language this
+  project can speak commercially. Hindi text is unaffected.
+- Probe audio remains flatter than the product: probes pass `noise_scale=0` /
+  `noise_w_scale=0` so a corpus item's SHA-256 can cover the exact file, and that is precisely
+  the variation that makes a voice sound alive. `speech_tts_deterministic` defaults to `False`.
+
+### Corrected before merge (PR 49)
+
+- `en_US-kristin-medium` was listed as **female** on the strength of its first name. Measuring
+  the synthesised audio put its median fundamental frequency at **160 Hz**, inside the band
+  where male and female cannot be separated, so it is now recorded as **unverified**. The two
+  voices actually recommended are unambiguous: `en_US-ljspeech-high` at 236 Hz and
+  `en_GB-cori-high` at 202 Hz, against the outgoing `en_US-joe-medium` at 104 Hz.
+
+### Measured and rejected (PR 49)
+
+- **Kokoro-82M** (Apache-2.0) is the only credible open-weights CPU alternative to Piper, and
+  it publishes Hindi voices where Piper has none that are commercially usable. Measured here
+  it is **6x slower to first audio** - 2,683 ms against Piper's 126 ms in English, 2,187 ms
+  against 156 ms in Hindi - and `kokoro-onnx` returns the whole clip from one call, so it
+  cannot begin speaking before the reply is finished the way Piper's per-sentence streaming
+  can. Not adopted. Recorded because its Hindi remains the only route found so far to
+  commercial Hindi *speech*.
+- **Meta Voicebox** has no released weights; it is research-only, and GitHub projects using
+  the name are unrelated. **Coqui XTTS-v2** is non-commercial and discontinued.
+
+### Corrected before merge, second pass (PR 49)
+
+- The `high` quality tier was recommended for sounding less mechanical without measuring what
+  it costs. It costs **+322 ms to first audio** (448 ms against 126 ms) and drops the realtime
+  factor from 16.5x to 4.2x. PRs 44, 46 and 47 each fought for a few hundred milliseconds of
+  exactly this kind of time, so returning some of it silently would have undone part of that
+  work. Both tiers are now documented with their measured cost, and `en_GB-alba-medium` is
+  offered as the low-latency female option at 182 ms - 56 ms more than the outgoing male voice.
+
+### Reframed (PR 49)
+
+- **Latency is now measured against a human standard, not a system one.** Every figure in this
+  repository had been reported as milliseconds or a realtime factor; neither says whether a
+  conversation feels natural, and the realtime factor describes concurrency rather than what
+  one buyer experiences. Stivers et al. (PNAS 2009) measured the median human turn-taking gap
+  at **~200 ms** across ten unrelated languages, and ITU-T G.114 puts the outer limit for
+  interactive voice at **400 ms**.
+
+  Against that, the shipped English path answers in **~2,587 ms** - about **13x the human gap**
+  and 6.5x G.114's ceiling. The breakdown matters: transcription is 66%, and the endpointer's
+  fixed `end_silence_ms` wait is another 27%, so the agent is already 1.75x past G.114 before a
+  single instruction runs. The `high` voice's +322 ms is, in these terms, **more than one
+  entire human turn-gap spent on timbre**.
+
+### Gap recorded, not closed (PR 49)
+
+- **The one research-backed mitigation in the codebase is not connected to the product.**
+  Filled pauses and backchannels are shown to reduce *perceived* delay even when measured delay
+  is unchanged. `speech/backchannel.py` implements exactly that, in all three languages, and
+  `SpeechTurnPipeline` exposes an `on_thinking` hook - but it is wired only in `cli/talk.py`.
+  `create_speech_pipeline` never passes it, so the WebSocket path spends the full ~2.6 s in
+  silence. `FIRST_AFTER_MS` is also 700 ms *after* the endpoint, so even on the CLI the first
+  filler lands ~1,400 ms after the buyer stops, 7x the human gap.
+
+### Fixed (PR 49)
+
+- **The browser now says "hmm" instead of going silent for 2.6 seconds.** The backchannel
+  and the `on_thinking` hook that fires it both already existed, in all three languages -
+  but `create_speech_pipeline` never passed the hook, so only `pitchbot-talk` ever used
+  them. Every spoken turn in the simulator sat in complete silence for the whole measured
+  gap. `ThinkingFiller` carries it onto the WebSocket, gated by
+  `PITCHBOT_SPEECH_BACKCHANNEL_ENABLED` and inert when no voice is configured.
+
+  It fills the wait; it does not shorten it. No measured millisecond moves.
+
+- **A filler is not a turn, and is now marked as one that is not.** Three hazards had to be
+  handled, each a property of the socket rather than of the backchannel: a filler that
+  reported playback would release the floor the *reply* is about to take, silencing
+  barge-in for that turn; `ReplyAudioSender.start` aborting a filler mid-word would tell
+  the browser to discard a half-said syllable; and counting a filler as
+  `TurnStage.SYNTHESIZE` would report a synthesis time for a turn whose reply had not been
+  planned yet. The reply now drains the filler (bounded at 1.5 s) and the browser
+  schedules behind it (capped at 2 s), so the "hmm" completes and the answer follows it.
