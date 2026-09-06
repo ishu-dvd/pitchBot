@@ -2361,3 +2361,58 @@ Worth stating as a rule, because it would have produced a false rejection of the
 Hindi option: **when a candidate scores far worse than its own published numbers on a
 language you can check, suspect the harness before the model.** English was the control, and
 it is what exposed the bug.
+
+## Hinglish had no voice at all (2026-09-06)
+
+`LanguageCode.MIXED` is a first-class language in this product. It has its own reply table,
+its own backchannel phrases and its own recovery line, all deliberately romanised with the
+English business nouns kept, because answering a Hinglish speaker in literary Devanagari
+reads as correcting them.
+
+None of it could be said out loud. `MIXED` appeared **nowhere** in the TTS layer - no voice
+mapped, none documented - and `PiperVoiceRegistry.resolve` refuses an unmapped language. In
+the socket path that refusal is caught and reported as a stream with zero frames, so the
+browser quietly spoke the reply in its own voice: the exact situation the server-side voice
+provider exists to replace, reached silently.
+
+An operator *could* map `mixed=<voice>`. Nothing said which, and the answer is not obvious -
+the text is Latin script but the words are Hindi, so an English phonemiser reads the letters
+and a Hindi phonemiser expects Devanagari.
+
+`probe_hinglish_voice.py`, on the product's own Hinglish reply lines. Each line is
+synthesised, transcribed back forcing `hi`, and scored against the **Devanagari** a listener
+should hear - the question is whether the Hindi words survive, not the Latin spelling.
+
+| candidate | median ms | median CER | worst CER | commercial? |
+|---|---:|---:|---:|---|
+| `piper en_US-joe-medium` | 134 ms | 49.9% | 64.1% | yes |
+| `piper en_US-ljspeech-high` | 609 ms | 54.5% | 70.4% | yes |
+| `piper hi_IN-pratham-medium` | 196 ms | 43.4% | 59.5% | **no** |
+| supertonic `lang=en` | 1,080 ms | 38.6% | 43.2% | yes |
+| **supertonic `lang=hi`** | 1,305 ms | **21.2%** | 37.0% | yes |
+
+Twice as intelligible as the best Piper option, and 6.7x slower. The Piper Hindi voice in
+that table is CC-BY-NC-SA, so the best *legal* alternative scores 49.9%.
+
+What that difference sounds like, for *"Aapka budget kitna soch rahe hain?"* (should be
+आपका बजट कितना सोच रहे हैं?):
+
+| candidate | transcribed back as |
+|---|---|
+| `piper en_US-joe-medium` | अखग भज़ट कितनिसाख राहें |
+| `piper hi_IN-pratham-medium` | आपका बज्द कितने से क्वेहें |
+| supertonic `lang=en` | आपका बजँत कितना सोक रेहें |
+| **supertonic `lang=hi`** | **अपका बज़त कितना सुख्रे हैं** |
+
+The winner is recognisably the sentence. The best legal Piper option is not.
+
+### The first timings were four times too slow, and it was the harness again
+
+The probe loaded the ONNX voice on every call, so ~2 s of file I/O sat inside what was
+supposed to be a synthesis measurement: `en_US-joe-medium` read 2,391 ms instead of 134 ms.
+The CER column was unaffected - loading does not change the audio - but the latency column
+was meaningless, and it was the column the decision would have been argued over. The product
+loads a voice once and keeps it resident; the probe now does too.
+
+That is twice in two days that a measurement, not a model, was the thing that was wrong.
+Both times the tell was a number that made no sense next to a known-good baseline.

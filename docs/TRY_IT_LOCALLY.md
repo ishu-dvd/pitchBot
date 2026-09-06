@@ -47,7 +47,7 @@ took. Nothing is hidden behind a log file.
 ```bash
 pitchbot-talk --language hi     # Hindi
 pitchbot-talk --language te     # Telugu
-pitchbot-talk --language mixed  # Hinglish input, answered in Hindi
+pitchbot-talk --language mixed  # Hinglish input, answered in Hinglish
 ```
 
 `--language` only chooses which language to *open* in. It is not a lock: the conversation
@@ -451,3 +451,47 @@ utterances on background noise. Raise `--vad-mode` to `3`.
 
 **It never stops listening while you talk.** The endpointer closes on trailing silence, so
 pause for about a second at the end of a sentence.
+
+## Speaking Hindi and Hinglish
+
+Neither could be spoken at all until PR 51/52: every published Piper Hindi voice reviewed is
+CC-BY-NC-SA or has an unresolvable licence, and `mixed` (Hinglish) appeared nowhere in the
+TTS layer, so a spoken Hinglish reply fell through to a zero-frame stream and the browser's
+own voice.
+
+```bash
+pip install -e ".[supertonic-tts]"
+```
+
+```env
+PITCHBOT_SPEECH_TTS_PROVIDER=piper
+PITCHBOT_SPEECH_TTS_VOICES=en=en_US-ljspeech-high,te=te_IN-padmavathi-medium
+PITCHBOT_SPEECH_TTS_SUPERTONIC_LANGUAGES=hi,mixed
+PITCHBOT_SPEECH_TTS_SUPERTONIC_ALLOW_DOWNLOAD=true
+```
+
+Piper keeps English and Telugu; Supertonic takes Hindi and Hinglish. Both Supertonic
+languages read through its **Hindi** frontend - measured, and not the obvious choice for
+Hinglish, whose letters are Latin:
+
+| what says Hinglish | median ms | median CER | commercial? |
+|---|---:|---:|---|
+| `piper en_US-joe-medium` | 134 ms | 49.9% | yes |
+| `piper en_US-ljspeech-high` | 609 ms | 54.5% | yes |
+| `piper hi_IN-pratham-medium` | 196 ms | 43.4% | **no** |
+| supertonic `lang=en` | 1,080 ms | 38.6% | yes |
+| **supertonic `lang=hi`** | 1,305 ms | **21.2%** | yes |
+
+Scored by transcribing the audio back and comparing against the Devanagari a listener should
+hear, because the question is whether the Hindi *words* survive, not the Latin spelling. The
+best legal Piper option scores 49.9%, which is not a voice so much as a noise.
+
+> **Obligation, not a footnote.** Supertonic's weights are OpenRAIL-M. Commercial use is
+> permitted, but Attachment A clause (e) requires that generated content be **expressly and
+> intelligibly disclaimed as machine generated**, and clause (g) forbids impersonation
+> without consent. Enabling this accepts those for your deployment. The server logs the
+> obligation at startup.
+
+It costs latency - roughly 1,130 ms per sentence against Piper's 126-448 ms - and the model
+has **no Telugu**, which is why it is a route rather than a replacement. See
+[BENCHMARKS.md](BENCHMARKS.md).

@@ -38,6 +38,11 @@ multi-sentence reply starts speaking before the last sentence exists.
 for some languages, never a replacement - which is what
 :class:`~pitchbot.adapters.routing_tts.LanguageRoutedTextToSpeech` exists for.
 
+**It is also the only thing that can say Hinglish.** ``LanguageCode.MIXED`` is a first-class
+language in this product - its own reply table, backchannel and recovery line - and had no
+voice at all: `MIXED` appeared nowhere in the TTS layer, so a spoken Hinglish reply fell
+through to a zero-frame stream and the browser's own voice. See ``SUPPORTED_LANGUAGES``.
+
 Licensing, read from the files rather than the badge:
 
 - sample code: MIT.
@@ -84,19 +89,41 @@ DEFAULT_MAX_TEXT_CHARS: Final[int] = 2_000
 DEFAULT_MAX_CHUNKS: Final[int] = 512
 
 SUPPORTED_LANGUAGES: Final[frozenset[LanguageCode]] = frozenset(
-    {LanguageCode.ENGLISH, LanguageCode.HINDI}
+    {LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.MIXED}
 )
 """What this adapter will serve, which is narrower than what the model supports.
 
-The model lists 31 languages. Only the two PitchBot has measured are offered, because an
+The model lists 31 languages. Only the ones PitchBot has measured are offered, because an
 unmeasured language is a claim rather than a capability. Telugu is absent from the model
-entirely, and `MIXED` is absent from this set on purpose: romanised Hinglish through a
-Hindi frontend is a different question that has not been measured.
+entirely.
+
+``MIXED`` - romanised Hinglish - is served through the **Hindi** frontend, which is a
+measured decision and not an obvious one: the text is Latin script but the words are Hindi,
+so an English phonemiser reads the letters and a Hindi phonemiser expects Devanagari.
+Measured 2026-09-06 on the product's own Hinglish reply lines, transcribed back forcing
+`hi` and scored against the Devanagari a listener should hear:
+
+===========================  ==========  ==========
+candidate                    median ms   median CER
+===========================  ==========  ==========
+piper ``en_US-joe-medium``   134 ms      49.9%
+piper ``en_US-ljspeech-high``  609 ms    54.5%
+piper ``hi_IN-pratham-medium`` 196 ms    43.4%
+supertonic ``lang=en``       1,080 ms    38.6%
+**supertonic ``lang=hi``**   1,305 ms    **21.2%**
+===========================  ==========  ==========
+
+Twice as intelligible as the best Piper option and 6.7x slower, and the Piper Hindi voice
+in that table is CC-BY-NC-SA anyway - so the best *legal* alternative is 49.9%, which is
+not a voice, it is a noise. Hinglish had no voice at all before this.
 """
 
 _LANGUAGE_CODES: Final[dict[LanguageCode, str]] = {
     LanguageCode.ENGLISH: "en",
     LanguageCode.HINDI: "hi",
+    # Hinglish is read by the Hindi frontend. See SUPPORTED_LANGUAGES for the measurement:
+    # the words are Hindi even though the letters are Latin, and it shows.
+    LanguageCode.MIXED: "hi",
 }
 
 # Sentence boundaries for English and Devanagari. Splitting here rather than letting the

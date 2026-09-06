@@ -266,3 +266,55 @@ def test_sentences_split_on_english_and_devanagari_terminators(
     text: str, expected: list[str]
 ) -> None:
     assert split_sentences(text, 100) == expected
+
+
+# --------------------------------------------------------------------------------------
+# Hinglish, which had no voice at all
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hinglish_is_read_by_the_hindi_frontend() -> None:
+    """The letters are Latin but the words are Hindi, and it is the words that matter.
+
+    Measured against the product's own Hinglish reply lines: the Hindi frontend scores
+    21.2% CER, the English one 38.6%, and the best *legal* Piper option 49.9%. Routing this
+    to `en` would be the obvious choice and the wrong one.
+    """
+
+    engine = FakeSupertonic()
+    adapter = SupertonicTextToSpeechAdapter(engine=engine)
+
+    _ = [
+        chunk
+        async for chunk in adapter.synthesize(
+            "Aapka budget kitna soch rahe hain?", LanguageCode.MIXED
+        )
+    ]
+
+    assert [lang for _text, lang, _steps in engine.spoken] == ["hi"]
+
+
+def test_hinglish_is_offered_and_telugu_is_not() -> None:
+    assert LanguageCode.MIXED in SUPPORTED_LANGUAGES
+    assert LanguageCode.TELUGU not in SUPPORTED_LANGUAGES
+
+
+@pytest.mark.asyncio
+async def test_hinglish_sentences_split_on_latin_terminators() -> None:
+    """A Hinglish reply is Latin-punctuated, so it must still start speaking early."""
+
+    engine = FakeSupertonic()
+    adapter = SupertonicTextToSpeechAdapter(engine=engine)
+
+    _ = [
+        chunk
+        async for chunk in adapter.synthesize(
+            "Theek hai, samajh gaya. Aapka budget kitna hai?", LanguageCode.MIXED
+        )
+    ]
+
+    assert [text for text, _lang, _steps in engine.spoken] == [
+        "Theek hai, samajh gaya.",
+        "Aapka budget kitna hai?",
+    ]

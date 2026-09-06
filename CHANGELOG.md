@@ -532,3 +532,29 @@ All notable changes to PitchBot are documented here.
   `faster-whisper` assumes 16,000; the raw array plays 2.76x too slow. Resampling moved
   Hindi from 72.1% to 13.2%. English was the control that exposed it, and without it the
   only viable Hindi option would have been rejected on a bug.
+
+### Added (PR 52)
+
+- **Hinglish can be spoken, for the first time.** `LanguageCode.MIXED` is a first-class
+  language here - its own reply table, backchannel and recovery line - and had no voice at
+  all. It appeared nowhere in the TTS layer, so a spoken Hinglish reply fell through to a
+  zero-frame stream and the browser's own voice: the exact situation the server-side voice
+  provider exists to replace, reached silently.
+
+  Routed to Supertonic's **Hindi** frontend, which is measured rather than obvious - the
+  letters are Latin but the words are Hindi. On the product's own Hinglish reply lines it
+  scores **21.2% CER** against 38.6% for the English frontend and 49.9% for the best
+  *legal* Piper option, which is not a voice so much as a noise.
+
+  Enable with `PITCHBOT_SPEECH_TTS_SUPERTONIC_LANGUAGES=hi,mixed`.
+
+- **Fixed a stale claim in the docs.** `TRY_IT_LOCALLY.md` said `--language mixed` was
+  "answered in Hindi". It has been answered in Hinglish since the `MIXED` reply table was
+  added; the line had simply never been updated.
+
+### Method (PR 52)
+
+- **The first Hinglish timings were four times too slow**, because the probe loaded the ONNX
+  voice on every call - `en_US-joe-medium` read 2,391 ms instead of 134 ms. CER was
+  unaffected, but latency was the column the decision would have been argued over. Second
+  time in two days that the harness, not the model, was the thing that was wrong.
