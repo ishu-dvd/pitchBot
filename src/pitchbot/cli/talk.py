@@ -67,7 +67,26 @@ VOICE_PREFIXES = {
     LanguageCode.ENGLISH: "en_",
     LanguageCode.HINDI: "hi_",
     LanguageCode.TELUGU: "te_",
+    # Hinglish falls back to a Hindi voice reading romanised text, which is poor - 43.4%
+    # CER measured against the 21.2% Supertonic manages - but it is a voice. Before this
+    # the CLI had a Hinglish greeting, a Hinglish reply table and no way to say either.
+    LanguageCode.MIXED: "hi_",
 }
+
+SUPERTONIC_PREFERRED = frozenset({LanguageCode.HINDI, LanguageCode.MIXED})
+"""Languages where Supertonic is the measured winner, so the CLI reaches for it first.
+
+Not "better engine, use it everywhere": English is Piper's, at 134 ms against Supertonic's
+1,080 ms for no accuracy gain. These two are different because Piper cannot really serve
+them at all (`docs/BENCHMARKS.md`):
+
+======================  ===================  ==============================
+language                Supertonic           best Piper
+======================  ===================  ==============================
+Hindi                   13.2% CER            18.3%, and CC-BY-NC-SA only
+Hinglish (romanised)    21.2% CER            43.4%, also the NC voice; 49.9% legal
+======================  ===================  ==============================
+"""
 
 
 def known_slots(facts: Iterable[RequirementFact]) -> list[str]:
@@ -194,8 +213,44 @@ class Voices:
         return self._cache[language]
 
 
+def build_supertonic_speaker(language: LanguageCode) -> tuple[Speaker | None, str] | None:
+    """A Supertonic speaker for a language it serves better, or ``None`` to fall through.
+
+    ``None`` rather than an error string, because Supertonic not being installed is not a
+    problem to report here - the Piper path below is a real answer, just a worse one. The
+    only thing worth saying out loud is what a listener is actually about to hear.
+    """
+
+    if language not in SUPERTONIC_PREFERRED:
+        return None
+    from pitchbot.adapters.supertonic_tts import (
+        SUPERTONIC_AVAILABLE,
+        SupertonicTextToSpeechAdapter,
+    )
+
+    if not SUPERTONIC_AVAILABLE:
+        return None
+    adapter = SupertonicTextToSpeechAdapter(allow_download=True)
+    # Downloading is on here and off on the server, deliberately. This is the try-it tool:
+    # the alternative to fetching weights is no Hindi voice at all, which is the situation
+    # that made this adapter necessary. The server has an operator to make that choice.
+    #
+    # OpenRAIL-M Attachment A clause (e) obliges a *deployment* to disclaim generated
+    # content as machine generated. Printed here for the same reason the server logs it at
+    # startup: someone trying this on their laptop should meet the obligation before they
+    # meet the voice, not after they have shipped it.
+    return Speaker(adapter, language), (
+        "supertonic-3 (OpenRAIL-M, downloads on first use) - commercial use permitted; "
+        "generated audio must be disclaimed as machine generated"
+    )
+
+
 def build_speaker(language: LanguageCode, voices_dir: Path) -> tuple[Speaker | None, str]:
     """A speaker for this language, or the reason there is not one."""
+
+    preferred = build_supertonic_speaker(language)
+    if preferred is not None:
+        return preferred
 
     from pitchbot.adapters.piper_tts import (
         INSTALL_HINT,
@@ -207,7 +262,12 @@ def build_speaker(language: LanguageCode, voices_dir: Path) -> tuple[Speaker | N
     )
 
     if not PIPER_AVAILABLE:
-        return None, f"not installed. Install it with: {INSTALL_HINT}"
+        hint = f"not installed. Install it with: {INSTALL_HINT}"
+        if language in SUPERTONIC_PREFERRED:
+            # Sending someone to Piper for Hindi or Hinglish would be sending them to the
+            # worse voice, and for Hindi to a CC-BY-NC-SA one they may not ship.
+            hint += f'; for {language.value} prefer: pip install -e ".[supertonic-tts]"'
+        return None, hint
     if not voices_dir.exists():
         return None, f"no voices directory at {voices_dir}"
     prefix = VOICE_PREFIXES.get(language)
@@ -218,7 +278,7 @@ def build_speaker(language: LanguageCode, voices_dir: Path) -> tuple[Speaker | N
         path for path in voices_dir.glob(f"{prefix}*.onnx") if path.stem in KNOWN_VOICE_LICENSES
     )
     if not candidates:
-        return None, f"no reviewed {language.value} voice in {voices_dir}"
+        return None, f"no reviewed {prefix}* voice in {voices_dir}"
 
     # A non-commercial voice is fine for someone trying the product on their own machine,
     # and refusing to speak would teach the wrong lesson here. The license is still
@@ -228,6 +288,13 @@ def build_speaker(language: LanguageCode, voices_dir: Path) -> tuple[Speaker | N
     note = f"{spec.voice_id} ({spec.license.identifier})"
     if not spec.license.permits_commercial_use:
         note += " - NOT licensed for commercial use"
+    if language is LanguageCode.MIXED:
+        # Said plainly rather than left to be discovered by ear: this is a Hindi voice
+        # being handed Latin letters, and it is twice as wrong as the alternative.
+        note += (
+            " - a Hindi voice reading romanised text (43.4% CER measured); "
+            'install ".[supertonic-tts]" for the 21.2% one'
+        )
     return Speaker(adapter, language), note
 
 
