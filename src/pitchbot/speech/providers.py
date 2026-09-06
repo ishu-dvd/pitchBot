@@ -27,6 +27,7 @@ importing this module is always safe; only *constructing* a provider can fail.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -53,6 +54,13 @@ from pitchbot.adapters.piper_tts import (
     voice_spec,
 )
 from pitchbot.adapters.piper_tts import INSTALL_HINT as PIPER_INSTALL_HINT
+from pitchbot.adapters.routing_tts import LanguageRoutedTextToSpeech
+from pitchbot.adapters.supertonic_tts import (
+    SUPERTONIC_AVAILABLE,
+    SUPERTONIC_INSTALL_HINT,
+    SupertonicTextToSpeechAdapter,
+)
+from pitchbot.adapters.supertonic_tts import SUPPORTED_LANGUAGES as SUPERTONIC_LANGUAGES
 from pitchbot.adapters.webrtc_vad import INSTALL_HINT as WEBRTC_INSTALL_HINT
 from pitchbot.adapters.webrtc_vad import (
     WEBRTC_VAD_AVAILABLE,
@@ -60,6 +68,8 @@ from pitchbot.adapters.webrtc_vad import (
 )
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
+
+logger = logging.getLogger(__name__)
 
 
 class VadProvider(StrEnum):
@@ -267,7 +277,66 @@ def build_text_to_speech(settings: Settings) -> tuple[TextToSpeechAdapter | None
         synthesis=DETERMINISTIC_SYNTHESIS if settings.speech_tts_deterministic else None,
     )
     mapped = ",".join(sorted(spec.voice_id for spec in specs))
-    return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+    routes = _supertonic_routes(settings)
+    if not routes:
+        return adapter, f"{TtsProvider.PIPER.value}:{mapped}"
+    routed = ",".join(sorted(language.value for language in routes))
+    return (
+        LanguageRoutedTextToSpeech(adapter, routes),
+        f"{TtsProvider.PIPER.value}:{mapped}+supertonic:{routed}",
+    )
+
+
+def _supertonic_routes(settings: Settings) -> dict[LanguageCode, TextToSpeechAdapter]:
+    """Languages handed to Supertonic instead of Piper, or an empty map.
+
+    Every failure is a refusal to start, for the same reason the Piper path refuses: a
+    server that comes up without the engine it was configured with speaks in some other
+    voice, and nobody is told.
+    """
+
+    codes = [code.strip() for code in settings.speech_tts_supertonic_languages.split(",")]
+    languages: list[LanguageCode] = []
+    for code in codes:
+        if not code:
+            continue
+        try:
+            language = LanguageCode(code)
+        except ValueError as error:
+            raise PermanentAdapterError(
+                f"speech_tts_supertonic_languages contains unknown language {code!r}"
+            ) from error
+        if language not in SUPERTONIC_LANGUAGES:
+            # Narrower than the model's own 31 languages on purpose: an unmeasured
+            # language is a claim, not a capability, and Telugu is absent from the model.
+            raise PermanentAdapterError(
+                f"supertonic is not offered for {code!r}; measured languages are "
+                f"{sorted(item.value for item in SUPERTONIC_LANGUAGES)}"
+            )
+        languages.append(language)
+    if not languages:
+        return {}
+    if not SUPERTONIC_AVAILABLE:
+        raise PermanentAdapterError(
+            "speech_tts_supertonic_languages is set but the optional dependency is not "
+            f"installed. Install it with: {SUPERTONIC_INSTALL_HINT}. Refusing to fall back "
+            "to Piper, because the languages routed here are the ones Piper cannot serve "
+            "under a commercial licence - falling back would silently ship a voice this "
+            "project denies."
+        )
+    logger.warning(
+        "Supertonic is enabled for %s. Its weights are OpenRAIL-M: Attachment A clause (e) "
+        "requires that generated content be expressly and intelligibly disclaimed as "
+        "machine generated. That obligation is on this deployment.",
+        ",".join(language.value for language in languages),
+    )
+    adapter = SupertonicTextToSpeechAdapter(
+        voice_style=settings.speech_tts_supertonic_voice,
+        model_dir=settings.speech_tts_supertonic_model_dir or None,
+        total_steps=settings.speech_tts_supertonic_steps,
+        allow_download=settings.speech_tts_supertonic_allow_download,
+    )
+    return dict.fromkeys(languages, adapter)
 
 
 def build_speech_providers(settings: Settings) -> SpeechProviders:

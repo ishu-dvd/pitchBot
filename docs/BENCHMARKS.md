@@ -2285,3 +2285,79 @@ have done it a second time.
 No import can catch that - one side is Python, the other a JavaScript object literal - so it
 is now a test that parses the real `app.js` and asserts the two sets match exactly, in both
 directions. A label for an outcome that no longer exists fails it too.
+
+## Hindi can be spoken commercially after all (2026-09-06)
+
+PitchBot has never been able to say a Hindi word aloud in a deployment that sells anything.
+Every published Piper Hindi voice reviewed on 2026-09-03 is CC-BY-NC-SA or points at an IITM
+licence that returns 403, and this project treats an unread licence and a denied one
+identically. English and Telugu are cleared. Hindi was simply unavailable - and that is a
+*structural* hole rather than a missing file, because one synthesiser served every language,
+so a language its engine could not license was unspeakable.
+
+A survey of the alternatives left exactly one candidate that clears the licence gate **and**
+runs on CPU without torch: **Supertonic 3**. Verified at source rather than from metadata.
+
+### Why "verified at source" is not pedantry here
+
+The most popular project in that survey, `debpalash/VoiceStudio` (19.4k stars), defaults to
+`k2-fsa/OmniVoice`. Its Hugging Face API `cardData.license` field is **empty**, so a check
+reading metadata alone passes it. Its model card says, verbatim:
+
+> "Our code is released under the Apache 2.0 License. **The pre-trained model is licensed
+> under the CC-BY-NC** due to constraints from its training data (e.g., Emilia)."
+
+Apache code, non-commercial weights, and nothing in the machine-readable field to say so.
+That is this project's per-checkpoint rule proving itself.
+
+Supertonic 3, read the same way: sample code MIT; weights **BigScience OpenRAIL-M**, which
+permits commercial use subject to Attachment A. Clause (e) forbids disseminating generated
+content "without expressly and intelligibly disclaiming that the information and/or content
+is machine generated", and clause (g) forbids impersonation without consent. Those are
+obligations on the deployment, which is why the provider is off by default and names them in
+its startup log. 31 languages including `hi`; **no `te`**.
+
+### Measured on this hardware
+
+`probe_supertonic_hindi.py`, 8 Hindi sales turns, 16 logical cores, CPU only. Intelligibility
+is checked by transcribing the output back through `faster-whisper` `small`, not by ear -
+nobody here can judge Hindi by listening.
+
+| `total_steps` | median ms | Hindi CER | worst CER | verdict |
+|---:|---:|---:|---:|---|
+| 2 | 509 ms | 46.2% | 75.8% | too few steps |
+| 4 | 658 ms | 21.9% | 31.4% | about Piper's quality |
+| **8** | **1,130 ms** | **13.2%** | 26.5% | **better than Piper, and legal** |
+| 16 | 2,048 ms | 13.5% | 21.2% | 1.8x the cost for nothing |
+
+The comparison is `hi_IN-pratham-medium` at **18.3%** CER through the same transcriber - the
+voice this project may not ship. So at 8 steps Supertonic is *more* intelligible than the
+Hindi voice PitchBot could never use.
+
+English is 0.0% median CER at every step count, so the dial only matters for Hindi.
+
+**What it costs.** ~1,130 ms per sentence against Piper's 126-448 ms, and no within-sentence
+streaming: `synthesize()` returns one complete waveform. The adapter therefore splits on
+sentence boundaries and yields each as it lands, which is how Piper already behaves and is
+the only reason a multi-sentence reply starts speaking before its last sentence exists.
+Against the latency budget this is expensive; against the alternative - *no Hindi speech at
+all* - it is the only option on the table.
+
+Footprint: four ONNX graphs, `pip install supertonic` pulls **no torch**, cold load ~10.3 s
+including the download.
+
+### The measurement was wrong the first time, and the tell was English
+
+The first run scored Hindi at 72-87% CER and **English at 64%** - against ~0% for Piper
+through the same transcriber. A model being sixty times worse than its own published numbers
+is not a finding, it is a broken measurement.
+
+Supertonic emits **44,100 Hz**; `faster-whisper` assumes 16,000. Handing it the raw array
+plays the speech 2.76x too slow, and the transcriber scores mush. Resampling with
+`scipy.signal.resample_poly` moved Hindi from 72.1% to **13.2%** and English from 64.2% to
+**0.0%** - the same audio, correctly interpreted.
+
+Worth stating as a rule, because it would have produced a false rejection of the only viable
+Hindi option: **when a candidate scores far worse than its own published numbers on a
+language you can check, suspect the harness before the model.** English was the control, and
+it is what exposed the bug.

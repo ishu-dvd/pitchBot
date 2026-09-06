@@ -22,6 +22,8 @@ from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.adapters.faster_whisper_stt import FasterWhisperSpeechToTextAdapter
 from pitchbot.adapters.mocks import MockVoiceActivityDetector
 from pitchbot.adapters.piper_tts import DETERMINISTIC_SYNTHESIS, PiperTextToSpeechAdapter
+from pitchbot.adapters.routing_tts import LanguageRoutedTextToSpeech
+from pitchbot.adapters.supertonic_tts import SupertonicTextToSpeechAdapter
 from pitchbot.adapters.webrtc_vad import WebRtcVoiceActivityDetector
 from pitchbot.config import Settings
 from pitchbot.domain import LanguageCode
@@ -479,3 +481,59 @@ async def test_preload_loads_both_models_and_is_a_no_op_by_default() -> None:
         await preload_speech_providers(providers)
 
     assert "model file not found" in str(error.value)
+
+
+# --------------------------------------------------------------------------------------
+# A language whose engine Piper cannot license
+# --------------------------------------------------------------------------------------
+
+
+def test_supertonic_is_off_by_default_and_piper_still_serves_everything() -> None:
+    """The route must be opt-in: its weights carry a content-disclosure obligation."""
+
+    adapter, describe = build_text_to_speech(_voice_settings())
+
+    assert not isinstance(adapter, LanguageRoutedTextToSpeech)
+    assert "supertonic" not in describe
+
+
+def test_an_unknown_language_in_the_supertonic_route_refuses_to_start() -> None:
+    with pytest.raises(PermanentAdapterError, match="unknown language"):
+        build_text_to_speech(_voice_settings(speech_tts_supertonic_languages="klingon"))
+
+
+def test_a_language_supertonic_does_not_have_refuses_to_start() -> None:
+    """Telugu is absent from the model, so routing it there is a silent wrong voice."""
+
+    with pytest.raises(PermanentAdapterError, match="not offered for 'te'"):
+        build_text_to_speech(_voice_settings(speech_tts_supertonic_languages="te"))
+
+
+def test_a_missing_supertonic_dependency_refuses_to_fall_back_to_piper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Falling back would ship the exact voice this project denies.
+
+    The languages routed to Supertonic are, by construction, the ones Piper cannot serve
+    under a commercial licence. Quietly serving them with Piper anyway would turn a
+    licensing decision into a startup accident.
+    """
+
+    monkeypatch.setattr(f"{_PROVIDERS}.SUPERTONIC_AVAILABLE", False)
+
+    with pytest.raises(PermanentAdapterError, match="Refusing to fall back"):
+        build_text_to_speech(_voice_settings(speech_tts_supertonic_languages="hi"))
+
+
+def test_hindi_is_routed_away_from_piper_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(f"{_PROVIDERS}.SUPERTONIC_AVAILABLE", True)
+
+    adapter, describe = build_text_to_speech(_voice_settings(speech_tts_supertonic_languages="hi"))
+
+    assert isinstance(adapter, LanguageRoutedTextToSpeech)
+    assert adapter.routed_languages == frozenset({LanguageCode.HINDI})
+    assert isinstance(adapter.adapter_for(LanguageCode.HINDI), SupertonicTextToSpeechAdapter)
+    assert isinstance(adapter.adapter_for(LanguageCode.ENGLISH), PiperTextToSpeechAdapter)
+    assert "supertonic:hi" in describe

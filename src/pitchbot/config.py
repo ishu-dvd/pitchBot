@@ -129,6 +129,28 @@ class Settings(BaseSettings):
     # assistant, and shipping a non-commercial voice in one would be a licensing breach.
     speech_tts_allow_non_commercial: bool = False
     speech_tts_deterministic: bool = False
+    # Languages served by Supertonic 3 instead of Piper, as a comma-separated list of
+    # codes -- "hi" is the only one this project has measured and the reason the option
+    # exists. Empty (the default) means Piper serves everything, as before.
+    #
+    # This is the only route out of a structural hole: every published Piper Hindi voice
+    # reviewed is CC-BY-NC-SA or has an unresolvable licence, so a commercial deployment
+    # can map `hi` to nothing at all. Measured 2026-09-06, Supertonic at 8 steps scores
+    # 13.2% CER on Hindi against 18.3% for the Piper voice PitchBot may not ship -- better,
+    # and legal. It costs latency: ~1,130 ms per sentence against Piper's 126-448 ms, and
+    # it has no Telugu, which is why it is a route rather than a replacement.
+    #
+    # Its weights are OpenRAIL-M. Commercial use is permitted, but Attachment A clause (e)
+    # requires that generated content be expressly disclaimed as machine generated. That is
+    # an obligation on YOUR deployment; enabling this is accepting it.
+    speech_tts_supertonic_languages: str = ""
+    speech_tts_supertonic_voice: str = "F1"
+    speech_tts_supertonic_model_dir: str = ""
+    # Steps per sentence: 4 halves the latency and costs 8.7 points of CER, 16 costs 1.8x
+    # the latency for nothing. See docs/BENCHMARKS.md.
+    speech_tts_supertonic_steps: int = 8
+    # PitchBot never downloads models by default; the voice files are operator-supplied.
+    speech_tts_supertonic_allow_download: bool = False
     # Say "hmm" while the transcriber works, instead of going silent. Measured, the spoken
     # turn takes ~2.6 s end to end - about 13x the ~200 ms gap Stivers et al. (PNAS 2009)
     # measured between human turns - and two thirds of it is transcription, so nothing can
