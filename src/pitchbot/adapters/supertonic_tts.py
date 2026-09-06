@@ -51,10 +51,12 @@ Licensing, read from the files rather than the badge:
 
 from __future__ import annotations
 
+import array
 import asyncio
 import importlib
 import logging
 import re
+import sys
 from collections.abc import AsyncIterator
 from types import ModuleType
 from typing import Any, Final
@@ -128,6 +130,27 @@ def require_supertonic() -> ModuleType:
             f"supertonic is not installed. Install it with: {SUPERTONIC_INSTALL_HINT}"
         )
     return module
+
+
+def _to_pcm16(samples: Any) -> bytes:
+    """Float samples in [-1, 1] to 16-bit little-endian PCM, without numpy.
+
+    The stdlib rather than ``numpy.astype`` deliberately. numpy arrives *with* Supertonic,
+    but this project's rule is that an optional dependency is never a runtime requirement -
+    and a static ``import numpy`` here made ``mypy`` fail on any machine without the extra,
+    which is exactly the class of local-accident diagnostic the importlib pattern exists to
+    avoid. Measured against 658-1,130 ms of synthesis per sentence, converting ~130k
+    samples in Python costs a few percent.
+
+    32767 rather than 32768 so a sample of exactly 1.0 does not wrap to the most negative
+    value, and the result is byte-swapped on a big-endian host because the socket contract
+    is little-endian regardless of where the server runs.
+    """
+
+    out = array.array("h", (int(max(-1.0, min(1.0, float(s))) * 32767.0) for s in samples))
+    if sys.byteorder == "big":  # pragma: no cover - CI and the target host are little-endian
+        out.byteswap()
+    return out.tobytes()
 
 
 def split_sentences(text: str, limit: int) -> list[str]:
@@ -243,8 +266,6 @@ class SupertonicTextToSpeechAdapter(TextToSpeechAdapter):
 
     async def _speak(self, engine: Any, style: Any, sentence: str, code: str) -> tuple[bytes, int]:
         def run() -> tuple[bytes, int]:
-            import numpy
-
             audio, _extra = engine.synthesize(
                 sentence,
                 style,
@@ -252,12 +273,12 @@ class SupertonicTextToSpeechAdapter(TextToSpeechAdapter):
                 speed=self._speed,
                 lang=code,
             )
-            wave = numpy.asarray(audio, dtype=numpy.float32).reshape(-1)
-            # The model emits float32 in [-1, 1] at 44,100 Hz; the socket contract is
-            # 16-bit little-endian PCM at the voice's own rate. 32767 rather than 32768 so
-            # a sample of exactly 1.0 does not wrap to the most negative value.
-            clipped = numpy.clip(wave, -1.0, 1.0)
-            return (clipped * 32767.0).astype("<i2").tobytes(), int(engine.sample_rate)
+            # `reshape(-1)` when it is a numpy array, a plain sequence otherwise. The model
+            # emits float32 in [-1, 1]; the socket contract is 16-bit little-endian PCM at
+            # the voice's own rate, which is 44,100 Hz here and not the 16,000 the rest of
+            # the pipeline uses.
+            flat = audio.reshape(-1) if hasattr(audio, "reshape") else audio
+            return _to_pcm16(flat), int(engine.sample_rate)
 
         try:
             return await asyncio.to_thread(run)

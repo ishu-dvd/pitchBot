@@ -59,7 +59,7 @@ piper-tts = ["piper-tts>=1.7.0,<2"]
 # Attachment A, whose clause (e) requires generated content to be expressly disclaimed as
 # machine generated. That obligation lands on the deployment, not on this file. Installs on
 # onnxruntime with NO torch. See `SupertonicTextToSpeechAdapter` and docs/BENCHMARKS.md.
-supertonic-tts = ["supertonic>=1.3.0,<2", "numpy>=1.26"]
+supertonic-tts = ["supertonic>=1.3.0,<2"]
 # Optional speech-to-text provider. Never a runtime requirement: pitchbot imports, and the
 # whole test suite passes, with this absent.
 #

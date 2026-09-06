@@ -80,10 +80,10 @@ class FakeSupertonic:
         if self._fail:
             raise RuntimeError("engine exploded")
         self.spoken.append((text, lang or "", total_steps))
-        import numpy
-
-        # A tenth of a second of quiet tone, enough to frame and to check the conversion.
-        samples = numpy.linspace(-1.0, 1.0, 4_410, dtype=numpy.float32)
+        # A plain list, not a numpy array: numpy arrives with the optional extra and the
+        # adapter must not need it, so the fake must not quietly supply it either.
+        step = 2.0 / 4_409
+        samples = [-1.0 + step * index for index in range(4_410)]
         return samples, samples
 
 
