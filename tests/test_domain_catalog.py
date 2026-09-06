@@ -79,6 +79,7 @@ def test_adding_a_vertical_without_a_pitch_fails_at_import(language: LanguageCod
         LanguagePhrases(
             acknowledge=existing.acknowledge,
             ask=existing.ask,
+            ask_again=existing.ask_again,
             objection=existing.objection,
             pitch={key: value for key, value in existing.pitch.items() if key != "toys"},
             closing=existing.closing,
@@ -101,6 +102,7 @@ def test_a_language_that_cannot_answer_an_objection_fails_at_import(
         LanguagePhrases(
             acknowledge=existing.acknowledge,
             ask=existing.ask,
+            ask_again=existing.ask_again,
             objection={
                 key: value
                 for key, value in existing.objection.items()

@@ -288,6 +288,18 @@ class LanguagePhrases:
 
     acknowledge: Mapping[Slot, str]
     ask: Mapping[Slot, str]
+    ask_again: Mapping[Slot, str]
+    """How to ask a second time, when the first attempt did not land.
+
+    Repeating a question word for word is what the closing line used to do, and it reads
+    the same way here: the buyer said something, and the agent replied with the sentence it
+    had just used. Measured on the shipped script, turn 2 of a recorded call answered a
+    statement of pain with a verbatim repeat of turn 1's question.
+
+    A person rephrases and lowers the bar - "even a rough range helps" - rather than saying
+    it again louder. `MAX_ASKS_PER_SLOT` still caps the attempts at two.
+    """
+
     objection: Mapping[Intent, str]
     pitch: Mapping[str, str]
     closing: str
@@ -310,7 +322,9 @@ class LanguagePhrases:
 
     def __post_init__(self) -> None:
         missing = [
-            slot for slot in ASK_ORDER if slot not in self.acknowledge or slot not in self.ask
+            slot
+            for slot in ASK_ORDER
+            if slot not in self.acknowledge or slot not in self.ask or slot not in self.ask_again
         ]
         if missing:
             raise ValueError(f"language phrases missing slots: {[s.value for s in missing]}")
@@ -341,6 +355,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.REQUESTED_FEATURES: "What should the website let your customers do?",
             Slot.BUDGET: "What budget range are you working with?",
             Slot.TIMELINE: "When would you like this live?",
+        },
+        ask_again={
+            Slot.BUSINESS_TYPE: "Let me put it another way - what does the business sell?",
+            Slot.REQUESTED_FEATURES: (
+                "To put it another way, what should a customer be able to do on the site?"
+            ),
+            Slot.BUDGET: "Even a rough range helps me scope this - what are you thinking?",
+            Slot.TIMELINE: "Roughly when would you want this live?",
         },
         closing=("That covers what I need. Would a short demo or a written proposal help more?"),
         closing_again=(
@@ -419,6 +441,12 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.BUDGET: "आपका अनुमानित बजट कितना है?",
             Slot.TIMELINE: "यह वेबसाइट कब तक चालू करनी है?",
         },
+        ask_again={
+            Slot.BUSINESS_TYPE: "थोड़ा और साफ़ कर दीजिए — आपका व्यवसाय बेचता क्या है?",
+            Slot.REQUESTED_FEATURES: "दूसरे शब्दों में — ग्राहक साइट पर क्या कर पाए?",
+            Slot.BUDGET: "मोटा-मोटा अंदाज़ा भी चलेगा — कितना सोच रहे हैं?",
+            Slot.TIMELINE: "लगभग कब तक चालू करना चाहेंगे?",
+        },
         closing="मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
         closing_again=(
             "दोनों में से कुछ भी ठीक है। मैं एक छोटा प्रस्ताव तैयार करके भेज देता हूँ, फिर आप देखकर बता दीजिएगा।"
@@ -485,6 +513,12 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.REQUESTED_FEATURES: "వెబ్‌సైట్‌లో మీ కస్టమర్లు ఏమి చేయగలగాలి?",
             Slot.BUDGET: "మీ బడ్జెట్ ఎంత అనుకుంటున్నారు?",
             Slot.TIMELINE: "ఇది ఎప్పటికి సిద్ధంగా ఉండాలి?",
+        },
+        ask_again={
+            Slot.BUSINESS_TYPE: "కొంచెం స్పష్టంగా చెప్పండి — మీ వ్యాపారం ఏమి అమ్ముతుంది?",
+            Slot.REQUESTED_FEATURES: "మరో విధంగా అడుగుతాను — సైట్‌లో కస్టమర్ ఏమి చేయగలగాలి?",
+            Slot.BUDGET: "సుమారు అంచనా అయినా చాలు — ఎంత అనుకుంటున్నారు?",
+            Slot.TIMELINE: "సుమారు ఎప్పటికి సిద్ధంగా ఉండాలి?",
         },
         closing=("నాకు కావలసిన సమాచారం వచ్చింది. ఒక చిన్న డెమో మంచిదా లేక రాతపూర్వక ప్రతిపాదనా?"),
         closing_again=("రెండూ సరిపోతాయి. నేను ఒక చిన్న ప్రతిపాదన సిద్ధం చేసి పంపుతాను, చూసిన తర్వాత మాట్లాడుకుందాం."),
@@ -553,6 +587,12 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.REQUESTED_FEATURES: "Website par aapke customers kya kar paayein?",
             Slot.BUDGET: "Aapka budget kitna soch rahe hain?",
             Slot.TIMELINE: "Yeh website kab tak live karni hai?",
+        },
+        ask_again={
+            Slot.BUSINESS_TYPE: "Thoda saaf kar dijiye - aapka business bechta kya hai?",
+            Slot.REQUESTED_FEATURES: "Doosre shabdon mein - customer site par kya kar paaye?",
+            Slot.BUDGET: "Mota-mota andaaza bhi chalega - kitna soch rahe hain?",
+            Slot.TIMELINE: "Lagbhag kab tak live karna chahenge?",
         },
         closing=(
             "Itni jaankari kaafi hai. Ek chhota demo theek rahega ya likhit proposal bhej doon?"
@@ -658,6 +698,7 @@ def render_reply(
     repeated: bool = False,
     switched: bool = False,
     closing_count: int = 0,
+    ask_count: int = 0,
 ) -> str:
     """Compose the reply from fixed phrases only.
 
@@ -689,7 +730,10 @@ def render_reply(
     if plan.pitch is not None:
         parts.append(phrases.pitch[plan.pitch])
     if plan.ask is not None:
-        parts.append(phrases.ask[plan.ask])
+        # How many times this slot has already been asked, so the second attempt rephrases
+        # instead of repeating. A question asked twice word for word reads as not having
+        # listened, which is the failure this module exists to remove.
+        parts.append(phrases.ask[plan.ask] if ask_count <= 0 else phrases.ask_again[plan.ask])
     elif plan.intent is Intent.READY:
         # A buyer who has agreed must not be asked the closing question again. Repeating
         # "would a demo or a proposal help?" at the one moment they said yes is the most

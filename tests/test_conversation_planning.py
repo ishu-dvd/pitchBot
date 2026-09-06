@@ -589,3 +589,49 @@ def test_asking_for_something_now_is_still_asking() -> None:
     """
 
     assert _extracted_features("Right now we need a catalog.") == {"catalog"}
+
+
+@pytest.mark.parametrize("language", sorted(supported_languages()))
+@pytest.mark.parametrize("slot", sorted(ASK_ORDER))
+def test_a_question_asked_twice_is_rephrased(language: LanguageCode, slot: Slot) -> None:
+    """Repeating a question word for word reads as not having listened.
+
+    Measured on the shipped script: turn 2 of a recorded call answered a statement of pain
+    with a verbatim repeat of turn 1's question and nothing else.
+    """
+
+    known = frozenset(ASK_ORDER) - {slot}
+    plan = plan_reply(TurnUnderstanding(known_slots=known))
+    assert plan.ask is slot
+
+    first = render_reply(plan, language, ask_count=0)
+    second = render_reply(plan, language, ask_count=1)
+
+    assert first != second
+    assert second.endswith(_PHRASES[language].ask_again[slot])  # noqa: SLF001
+
+
+def test_the_engine_rephrases_rather_than_repeating() -> None:
+    """The count has to reach the renderer from real turns, not just be supported by it."""
+
+    from uuid import uuid4
+
+    from pitchbot.conversation.engine import ConversationEngine
+
+    engine = ConversationEngine()
+    session_id = uuid4()
+    engine.create_session(session_id)
+
+    first = engine.process_turn(
+        session_id,
+        text="We run a clothing store and want to sell online.",
+        language=LanguageCode.ENGLISH,
+    ).reply
+    # A turn that answers nothing, so the same slot is still the one to ask for.
+    second = engine.process_turn(
+        session_id,
+        text="Right now everything is on WhatsApp and it is getting hard to manage.",
+        language=LanguageCode.ENGLISH,
+    ).reply
+
+    assert second not in first, "the agent asked the identical question again"

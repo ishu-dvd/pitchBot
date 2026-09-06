@@ -260,19 +260,21 @@ class ConversationEngine:
                 repeated=repeated,
                 asked_counts=state.asked_slot_counts,
             )
+            asked_before = (
+                state.asked_slot_counts.get(plan.ask.value, 0) if plan.ask is not None else 0
+            )
             if plan.ask is not None:
                 # Counted here, not in the planner, because only the engine knows a reply
                 # was actually sent. A plan that is computed and discarded must not make
                 # the agent believe it has already asked.
-                state.asked_slot_counts[plan.ask.value] = (
-                    state.asked_slot_counts.get(plan.ask.value, 0) + 1
-                )
+                state.asked_slot_counts[plan.ask.value] = asked_before + 1
             reply = render_reply(
                 plan,
                 language,
                 repeated=repeated,
                 switched=switched,
                 closing_count=state.closing_count,
+                ask_count=asked_before,
             )
             if plan.is_closing and plan.intent is not Intent.READY:
                 # Counted here for the same reason the asks are: only the engine knows a
