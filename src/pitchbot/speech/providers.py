@@ -31,9 +31,10 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Protocol, runtime_checkable
+from typing import Final
 
 from pitchbot.adapters.contracts import (
+    Preloadable,
     SpeechToTextAdapter,
     TextToSpeechAdapter,
     VoiceActivityDetector,
@@ -117,13 +118,6 @@ class SpeechProviders:
     @property
     def can_synthesize(self) -> bool:
         return self.synthesizer is not None
-
-
-@runtime_checkable
-class Preloadable(Protocol):
-    """A provider that can load its weights ahead of first use."""
-
-    async def preload(self) -> None: ...
 
 
 async def preload_speech_providers(providers: SpeechProviders) -> None:

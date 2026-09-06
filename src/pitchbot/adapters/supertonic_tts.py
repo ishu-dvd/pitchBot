@@ -271,6 +271,32 @@ class SupertonicTextToSpeechAdapter(TextToSpeechAdapter):
                     ) from error
             return engine, self._style
 
+    async def preload(self) -> None:
+        """Load the model now, because loading stalls the loop and synthesising does not.
+
+        Measured 2026-09-06 with the weights already on disk, against a 5 ms heartbeat task
+        that records how late each tick actually was:
+
+        ==============  ===============  ============
+        loop lateness   median           worst
+        ==============  ===============  ============
+        idle            10.9 ms          11.7 ms
+        during load     60.9 ms          **488.7 ms**
+        during synth    10.8 ms          11.5 ms
+        ==============  ===============  ============
+
+        Loading is 1,358 ms of work that holds the GIL in bursts despite running on a
+        worker thread, so ``asyncio.to_thread`` moves it off the loop's *stack* but not out
+        of its way. Synthesis - 972 ms of it - is indistinguishable from idle.
+
+        The loop carries the audio socket, so a 489 ms stall is 489 ms in which the buyer's
+        frames are not read and barge-in cannot fire. Paid at startup it is a slow boot;
+        paid on the first Hinglish turn it is a freeze in front of a customer, and it takes
+        that turn's time-to-first-audio from 972 ms to 2,329 ms.
+        """
+
+        await self._load()
+
     async def synthesize(
         self,
         text: str,

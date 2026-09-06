@@ -16,8 +16,12 @@ extras happen to be installed in the test environment.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import cast
+
 import pytest
 
+from pitchbot.adapters.contracts import SynthesizedAudioChunk, TextToSpeechAdapter
 from pitchbot.adapters.errors import PermanentAdapterError
 from pitchbot.adapters.faster_whisper_stt import FasterWhisperSpeechToTextAdapter
 from pitchbot.adapters.mocks import MockVoiceActivityDetector
@@ -539,3 +543,50 @@ def test_hindi_is_routed_away_from_piper_when_configured(
     assert isinstance(adapter.adapter_for(LanguageCode.HINDI), SupertonicTextToSpeechAdapter)
     assert isinstance(adapter.adapter_for(LanguageCode.ENGLISH), PiperTextToSpeechAdapter)
     assert "supertonic:hi" in describe
+
+
+class _PreloadCounter:
+    """A synthesiser stand-in that records whether the startup hook reached it."""
+
+    def __init__(self) -> None:
+        self.preloads = 0
+
+    async def preload(self) -> None:
+        self.preloads += 1
+
+    async def synthesize(  # pragma: no cover - never spoken in these tests
+        self,
+        text: str,
+        language: LanguageCode,
+    ) -> AsyncIterator[SynthesizedAudioChunk]:
+        yield SynthesizedAudioChunk(data=b"\x00\x00", sequence=0, is_final=True)
+
+
+@pytest.mark.asyncio
+async def test_the_startup_hook_still_preloads_once_a_language_is_routed() -> None:
+    """The hook sees whatever `build_text_to_speech` returned, which becomes the router.
+
+    `preload_speech_providers` decides by `isinstance(provider, Preloadable)`. Before the
+    router forwarded preload, that check was False for every routed configuration, so
+    enabling Hindi silently moved Piper's ~2 s voice load - which serves English and
+    Telugu - into the first buyer turn. No extras are needed to prove it: the contract
+    being tested is the hook's, not either engine's.
+    """
+
+    piper = _PreloadCounter()
+    supertonic = _PreloadCounter()
+    providers = SpeechProviders(
+        detector=MockVoiceActivityDetector(),
+        transcriber=None,
+        synthesizer=LanguageRoutedTextToSpeech(
+            cast(TextToSpeechAdapter, piper),
+            {LanguageCode.HINDI: cast(TextToSpeechAdapter, supertonic)},
+        ),
+        detector_id=MOCK_VAD_ID,
+        transcriber_id=NO_TRANSCRIBER_ID,
+        synthesizer_id="piper:x+supertonic:hi",
+    )
+
+    await preload_speech_providers(providers)
+
+    assert (piper.preloads, supertonic.preloads) == (1, 1)

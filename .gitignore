@@ -33,3 +33,6 @@ model-cache/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch PR descriptions written next to the repo while a PR is being prepared.
+pr*-body.md
