@@ -120,10 +120,39 @@ classified by a `VoiceActivityDetector`, fed to a `TurnTaking` state machine
 
 | Message | Meaning |
 |---|---|
-| `ready` | Connection accepted; carries `audio_retained`, `speech_input_available`, `end_silence_ms` |
+| `ready` | Connection accepted; carries `audio_retained`, `speech_input_available`, `end_silence_ms`, `backchannel_available` |
 | `ack` | One frame observed; carries sequence, byte count, `audio_retained`, turn-taking state |
 | `barge-in` | The buyer took the floor while the agent was speaking |
 | `utterance` | An utterance closed; carries the outcome, counts, durations, and any resulting turn |
+| `reply-audio-begin` / `reply-audio-end` | One PCM stream, framed between them; `filler` distinguishes a backchannel from a reply |
+
+### Filling the silence
+
+Measured, a spoken turn takes ~2,587 ms from the buyer finishing to the first audio -
+about 13x the ~200 ms gap Stivers et al. (PNAS 2009) measured between human turns, and
+6.5x ITU-T G.114's 400 ms ceiling for interactive voice. Two thirds of it is
+transcription, so nothing can be said *about what the buyer said* until almost all of it
+has already elapsed.
+
+`PITCHBOT_SPEECH_BACKCHANNEL_ENABLED` (default on) fills that silence with a short
+receipt-only phrase - "Hmm.", "अच्छा।", "అలాగా." - starting 700 ms after the utterance
+closes, at most twice per turn. It does not shorten the wait; the literature on filled
+pauses is about *perceived* delay.
+
+Three properties make it safe on a live socket, and each is asserted in
+`tests/test_thinking_filler.py`:
+
+- **One stream at a time.** A filler and a reply share one sender, so they can never
+  interleave into a single PCM stream.
+- **A filler never holds the floor.** It is marked `filler: true`, and the browser plays
+  it without reporting playback. Reporting would hand back a floor the filler never took,
+  releasing the one the reply is about to hold and silencing barge-in for that turn.
+- **The reply never chops it mid-word.** The reply waits for a filler to finish (bounded
+  at 1.5 s) and the browser schedules the reply behind it, capped at 2 s of queued audio.
+
+A filler may assert **receipt** and never **assent**: it is chosen before the transcript
+exists, so if the untranscribed sentence was *"so you'll do it for fifty thousand?"*, an
+"ok" would have agreed to a number nobody quoted. See `pitchbot/speech/backchannel.py`.
 
 ## Not implemented
 

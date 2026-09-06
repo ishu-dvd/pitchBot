@@ -2044,10 +2044,10 @@ hears nothing is.
 `src/pitchbot/speech/backchannel.py` implements exactly this, with phrases in English, Hindi
 and Telugu, and `SpeechTurnPipeline` exposes an `on_thinking` hook to fire it.
 
-**It is wired only in `cli/talk.py`.** `SimulatorService.create_speech_pipeline` never passes
-`on_thinking`, so the WebSocket path - the browser, and every deployment built on it - has no
-filler at all and spends the full ~2.6 s in complete silence. The one research-backed
-mitigation in the codebase is connected to the path a developer uses and not to the path a
+**It was wired only in `cli/talk.py`.** `SimulatorService.create_speech_pipeline` never passed
+`on_thinking`, so the WebSocket path - the browser, and every deployment built on it - had no
+filler at all and spent the full ~2.6 s in complete silence. The one research-backed
+mitigation in the codebase was connected to the path a developer uses and not to the path a
 buyer uses.
 
 Two numbers bound the fix. `FIRST_AFTER_MS` is 700 ms, measured *after* the endpoint, so even
@@ -2055,4 +2055,30 @@ on the CLI the earliest filler lands ~1,400 ms after the buyer stops - 7x the hu
 filler that is meant to cover a 2.6 s silence should probably start nearer the endpoint than
 that, and the endpoint wait itself is unfillable by construction.
 
-Neither is changed here. Both are now measured, cited, and named, which is what was missing.
+**Closed, in this PR, for the socket path only.** `ThinkingFiller`
+(`simulator/speech_output.py`) now carries the backchannel onto the WebSocket, gated by
+`PITCHBOT_SPEECH_BACKCHANNEL_ENABLED` and inert without a configured voice. It fills the
+silence; it shortens nothing. Transcription is still 66% of the wait, `end_silence_ms` is
+still 27%, and the measured 2,587 ms is unchanged - the literature on filled pauses is about
+*perceived* delay, and this repository does not have a way to measure that.
+
+`FIRST_AFTER_MS` is deliberately **not** changed. Lowering it is a guess without a listener,
+and 700 ms is the one number here with a stated rationale - below it a person would not have
+said anything either. It is left as the next question rather than answered by assertion.
+
+Three hazards were found while wiring it, and each is a property of the socket rather than of
+the filler:
+
+- **The floor.** The browser hands the floor back when playback ends. A filler that reported
+  playback would release the floor the *reply* takes moments later, so barge-in would stop
+  working for that turn. Fillers are therefore marked `filler: true` and played without being
+  reported.
+- **The word being chopped.** `ReplyAudioSender.start` aborts whatever is streaming, which
+  tells the client to discard what it buffered. On a fast turn that clips a filler
+  mid-syllable, which sounds like a fault where a completed one sounds like a person. The
+  reply now drains the filler first (bounded at 1.5 s, because the receive loop is the only
+  thing classifying buyer audio) and the browser schedules the reply behind it (capped at 2 s
+  of queued audio, so a stuck stream costs a beat and not a minute).
+- **The metric.** A filler is spoken before the reply has been planned. Counting it as
+  `TurnStage.SYNTHESIZE` would have reported a synthesis time for a turn that did not have a
+  reply yet, quietly making the one number a voice product is judged on meaningless.

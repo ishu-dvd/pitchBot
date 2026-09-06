@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     # assistant, and shipping a non-commercial voice in one would be a licensing breach.
     speech_tts_allow_non_commercial: bool = False
     speech_tts_deterministic: bool = False
+    # Say "hmm" while the transcriber works, instead of going silent. Measured, the spoken
+    # turn takes ~2.6 s end to end - about 13x the ~200 ms gap Stivers et al. (PNAS 2009)
+    # measured between human turns - and two thirds of it is transcription, so nothing can
+    # be said about the buyer's words until almost all of it has already elapsed. On by
+    # default because it costs nothing when no voice is configured: without a synthesiser
+    # there is no audio path to fill, and the filler stays inert.
+    speech_backchannel_enabled: bool = True
 
     # --- Local language model ---------------------------------------------------------
     # Off by default, and for a stronger reason than the speech providers: measured on this

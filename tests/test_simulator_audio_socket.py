@@ -645,3 +645,103 @@ def test_synthesised_audio_is_as_unrecorded_as_captured_audio(
     assert "\\u0001\\u0002" not in events
     assert "4096" not in events
     assert str(traffic[-1]["byte_count"]) not in events
+
+
+class SlowTranscriber(MockSpeechToTextAdapter):
+    """Takes long enough that the backchannel's real 700 ms threshold actually fires.
+
+    Not an artificial delay: measured, transcription is 1,700 ms of the 2,587 ms a spoken
+    turn takes. A mock that returns instantly is the reason every other test in this file
+    sees no filler at all.
+    """
+
+    def __init__(self, delay_s: float, transcripts: list[TranscriptChunk]) -> None:
+        super().__init__(transcripts=transcripts)
+        self._delay_s = delay_s
+
+    async def transcribe(
+        self,
+        audio: AsyncIterator[Any],
+    ) -> AsyncIterator[TranscriptChunk]:
+        async for _ in audio:
+            pass
+        await asyncio.sleep(self._delay_s)
+        for item in self._transcripts:
+            yield item
+
+
+def test_the_backchannel_is_announced_when_a_voice_can_speak_it(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client cannot tell filler audio from a reply without being told it exists."""
+
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(64))
+    session_id = new_session(client, "audio-backchannel-ready")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+
+    assert ready["backchannel_available"] is True
+
+
+def test_the_backchannel_is_off_when_the_deployment_turns_it_off(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_transcriber(monkeypatch, MockSpeechToTextAdapter(transcripts=[transcript("Hello.")]))
+    use_synthesizer(monkeypatch, StubSynthesizer(64))
+    monkeypatch.setattr(app_settings, "speech_backchannel_enabled", False)
+    session_id = new_session(client, "audio-backchannel-off")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        ready = socket.receive_json()
+
+    assert ready["backchannel_available"] is False
+
+
+def test_a_slow_transcript_is_covered_by_a_filler_before_the_reply(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point, end to end: silence gets something in it, and the reply still wins.
+
+    Two streams reach the browser, in order, and they are distinguishable. The filler is
+    marked so the client plays it without reporting playback - reporting would hand back
+    a floor the filler never took, releasing the one the reply is about to hold.
+    """
+
+    use_transcriber(monkeypatch, SlowTranscriber(0.9, [transcript("Hello.")]))
+    synthesizer = StubSynthesizer(64)
+    use_synthesizer(monkeypatch, synthesizer)
+    session_id = new_session(client, "audio-backchannel-fires")
+
+    with client.websocket_connect(
+        f"/api/simulator/sessions/{session_id}/audio",
+        headers=ORIGIN,
+    ) as socket:
+        socket.receive_json()
+        for payload in [SPEECH, SILENCE, SILENCE, SILENCE]:
+            socket.send_bytes(payload)
+        traffic = drain_until(socket, REPLY_AUDIO_END, limit=60)
+        traffic += drain_until(socket, REPLY_AUDIO_END, limit=60)
+
+    begins = [item for item in traffic if item["type"] == REPLY_AUDIO_BEGIN]
+    ends = [item for item in traffic if item["type"] == REPLY_AUDIO_END]
+    assert [item["filler"] for item in begins] == [True, False]
+    assert [item["filler"] for item in ends] == [True, False]
+    # Nothing was abandoned: the reply waited for the filler rather than cutting it off.
+    assert [item["aborted"] for item in ends] == [False, False]
+
+    # The filler is spoken first and is not the reply. It may assert receipt and never
+    # assent, because at the moment it is said nobody knows what the buyer asked yet.
+    assert len(synthesizer.calls) == 2
+    assert synthesizer.calls[0] == "Hmm."
+    assert synthesizer.calls[1] != "Hmm."

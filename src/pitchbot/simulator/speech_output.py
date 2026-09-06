@@ -34,6 +34,7 @@ from typing import Final, Protocol
 from pitchbot.adapters.contracts import TextToSpeechAdapter
 from pitchbot.adapters.errors import AdapterError
 from pitchbot.domain import LanguageCode
+from pitchbot.speech.backchannel import Backchannel
 from pitchbot.speech.reply_audio import (
     BYTES_PER_SAMPLE,
     DEFAULT_FRAME_BYTES,
@@ -143,13 +144,36 @@ class ReplyAudioSender:
     def streaming(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def start(self, text: str, language: LanguageCode) -> None:
-        """Begin speaking ``text``. Returns as soon as the task is scheduled."""
+    async def start(self, text: str, language: LanguageCode, *, filler: bool = False) -> None:
+        """Begin speaking ``text``. Returns as soon as the task is scheduled.
+
+        ``filler`` marks the stream as a backchannel rather than a reply. It changes
+        nothing about how the audio is produced or framed - only what the client is told,
+        because a filler must not be reported back as playback of a turn. The floor is
+        handed back when a *reply* finishes playing, and a filler that reported the same
+        thing would hand back a floor it never held, silencing the reply that follows it.
+        """
 
         if self._synthesizer is None:
             return
         await self.abort()
-        self._task = asyncio.create_task(self._speak(self._synthesizer, text, language))
+        self._task = asyncio.create_task(
+            self._speak(self._synthesizer, text, language, filler=filler)
+        )
+
+    async def drain(self) -> None:
+        """Wait for the stream in flight to finish sending, without cancelling it.
+
+        The counterpart to :meth:`abort`: used when the current stream is still wanted and
+        the caller simply must not write over it. Returns immediately when nothing is
+        streaming, and never raises what the stream raised - a failed reply is already
+        reported to the client by the task itself.
+        """
+
+        task = self._task
+        if task is None or task.done():
+            return
+        await asyncio.wait({task})
 
     async def abort(self) -> None:
         """Stop any reply in flight and tell the client to discard what it buffered.
@@ -189,6 +213,8 @@ class ReplyAudioSender:
         synthesizer: TextToSpeechAdapter,
         text: str,
         language: LanguageCode,
+        *,
+        filler: bool = False,
     ) -> None:
         audio = ReplyAudio(
             synthesizer,
@@ -208,14 +234,18 @@ class ReplyAudioSender:
                     begun = True
                     # Taken before the send: this is how long the buyer waited for the
                     # voice to start, and putting the socket write inside it would blame
-                    # synthesis for the network.
-                    self._report_first_frame((perf_counter() - started) * 1000, language)
+                    # synthesis for the network. Not reported for a filler - a backchannel
+                    # is not the reply, and counting it would report a synthesis time for
+                    # a turn whose reply had not been planned yet.
+                    if not filler:
+                        self._report_first_frame((perf_counter() - started) * 1000, language)
                     if not await self._socket.try_send_json(
                         {
                             "type": REPLY_AUDIO_BEGIN,
                             "sample_rate_hz": frame.sample_rate_hz,
                             "media_type": frame.media_type,
                             "bytes_per_sample": BYTES_PER_SAMPLE,
+                            "filler": filler,
                         }
                     ):
                         return
@@ -237,6 +267,7 @@ class ReplyAudioSender:
                 "type": REPLY_AUDIO_END,
                 "aborted": False,
                 "failed": failed,
+                "filler": filler,
                 "truncated": audio.truncated,
                 "frame_count": audio.frame_count,
                 "byte_count": audio.byte_count,
@@ -251,10 +282,162 @@ def _duration_ms(byte_count: int, sample_rate_hz: int) -> float:
     return round(byte_count / BYTES_PER_SAMPLE / sample_rate_hz * 1000, 1)
 
 
+DEFAULT_SETTLE_TIMEOUT_S: Final[float] = 1.5
+"""How long the reply will wait for a filler to stop talking before talking over it.
+
+Bounded because this is awaited by the receive loop, which is the only thing classifying
+buyer audio. The longest measured filler is 1.1 s all-in, so this clears every one of them
+with margin; a filler still speaking after 1.5 s is a stuck synthesiser, and delaying the
+answer indefinitely to be polite to it is the wrong trade.
+"""
+
+
+class ThinkingFiller:
+    """Says "hmm" over the socket while the transcriber works, instead of going silent.
+
+    The CLI has done this since the backchannel was measured; the browser never has. The
+    hook existed on :class:`~pitchbot.speech.pipeline.SpeechTurnPipeline` and only
+    ``cli/talk.py`` passed it, so every spoken turn in the simulator spent the whole
+    measured ~2.6 s gap in silence - about thirteen times the ~200 ms gap Stivers et al.
+    (PNAS 2009) measured between human turns, and six times ITU-T G.114's 400 ms ceiling
+    for interactive voice.
+
+    It fills that silence rather than shortening it, which is the honest description: the
+    literature on filled pauses is about *perceived* delay, and no measured millisecond
+    moves. Transcription is still 66% of the wait.
+
+    Three properties make it safe to bolt onto a live socket:
+
+    **One stream at a time.** Everything goes through the same :class:`ReplyAudioSender`,
+    so a filler and a reply can never interleave into one PCM stream.
+
+    **It never holds the floor.** A filler is explicitly designed to be talked over, so
+    buyer speech during one is an ordinary turn rather than a barge-in, and the client is
+    told not to report playback of it - reporting would hand back a floor the filler never
+    took, muting the reply that follows.
+
+    **It says nothing that could be agreement.** That rule lives in
+    :mod:`pitchbot.speech.backchannel` and is inherited whole: a filler may assert receipt
+    and never assent, because at the moment it speaks nobody knows what was said yet.
+    """
+
+    def __init__(
+        self,
+        *,
+        language_of: Callable[[], LanguageCode],
+        backchannel: Backchannel | None = None,
+        settle_timeout_s: float = DEFAULT_SETTLE_TIMEOUT_S,
+    ) -> None:
+        self._language_of = language_of
+        self._backchannel = backchannel if backchannel is not None else Backchannel()
+        self._settle_timeout_s = settle_timeout_s
+        self._sender: ReplyAudioSender | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+
+    def attach(self, sender: ReplyAudioSender) -> None:
+        """Give the filler its voice after construction.
+
+        Needed because the two are built in opposite orders: the pipeline must be handed
+        ``start`` before it can be constructed, and the sender needs the accepted socket.
+        Attaching keeps that knot explicit instead of hiding it in a closure.
+        """
+
+        self._sender = sender
+
+    @property
+    def enabled(self) -> bool:
+        return self._sender is not None and self._sender.enabled
+
+    def start(self) -> None:
+        """Begin filling, called the moment an utterance closes and transcription begins.
+
+        Synchronous because :class:`SpeechTurnPipeline` calls it from inside ``push``,
+        before the transcription await, so that the wait is counted from when the buyer
+        actually stopped rather than from whenever a coroutine is next scheduled.
+        """
+
+        if not self.enabled:
+            return
+        if self._task is not None and not self._task.done():
+            # A previous turn never settled. Speaking twice at once is worse than not
+            # speaking, and the running task will be settled by its own turn.
+            return
+        self._stop = asyncio.Event()
+        self._backchannel.begin_turn()
+        self._task = asyncio.get_running_loop().create_task(self._fill())
+
+    async def settle(self) -> None:
+        """Let any filler in flight finish, so the reply does not chop it mid-word.
+
+        Called before the reply's audio starts. Idempotent, and a no-op when nothing is
+        filling, which is the common case for a typed turn or an utterance that produced
+        no transcript.
+        """
+
+        task, self._task = self._task, None
+        if task is None:
+            return
+        self._stop.set()
+        try:
+            await asyncio.wait_for(task, self._settle_timeout_s)
+        except TimeoutError:
+            # `wait_for` has already cancelled it. The reply is worth more than the tail
+            # of an "hmm", and the sender's abort tells the client to drop what it holds.
+            logger.warning("Backchannel did not settle within %.1fs", self._settle_timeout_s)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a courtesy must never cost the reply
+            logger.warning("Backchannel failed", exc_info=True)
+
+    async def abort(self) -> None:
+        """Stop filling now, for teardown. The audio in flight is abandoned."""
+
+        task, self._task = self._task, None
+        if task is None:
+            return
+        self._stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def _fill(self) -> None:
+        started = perf_counter()
+        sender = self._sender
+        if sender is None:  # pragma: no cover - guarded by `enabled`
+            return
+        for target in (self._backchannel.first_after_ms, self._backchannel.second_after_ms):
+            elapsed_ms = (perf_counter() - started) * 1000
+            if elapsed_ms < target and await self._sleep_until(target - elapsed_ms):
+                return
+            # `max` rather than a fresh reading alone: having slept *to* the threshold a
+            # re-measurement can land a fraction of a millisecond below it, the policy
+            # would decline, and the second filler would silently never fire on a timer
+            # that looked correct.
+            waited_ms = max(float(target), (perf_counter() - started) * 1000)
+            phrase = self._backchannel.due(waited_ms, self._language_of())
+            if phrase is None:
+                continue
+            await sender.start(phrase, self._language_of(), filler=True)
+            # Drained here rather than left in flight, so that `settle` awaiting this task
+            # is the same thing as the filler having finished speaking.
+            await sender.drain()
+
+    async def _sleep_until(self, milliseconds: float) -> bool:
+        """Sleep, or return ``True`` as soon as the reply is ready and wants the floor."""
+
+        try:
+            await asyncio.wait_for(self._stop.wait(), milliseconds / 1000)
+        except TimeoutError:
+            return False
+        return True
+
+
 __all__ = [
+    "DEFAULT_SETTLE_TIMEOUT_S",
     "REPLY_AUDIO_BEGIN",
     "REPLY_AUDIO_END",
     "LockedSocket",
     "ReplyAudioSender",
     "SocketSender",
+    "ThinkingFiller",
 ]

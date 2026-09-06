@@ -425,3 +425,23 @@ All notable changes to PitchBot are documented here.
   `create_speech_pipeline` never passes it, so the WebSocket path spends the full ~2.6 s in
   silence. `FIRST_AFTER_MS` is also 700 ms *after* the endpoint, so even on the CLI the first
   filler lands ~1,400 ms after the buyer stops, 7x the human gap.
+
+### Fixed (PR 49)
+
+- **The browser now says "hmm" instead of going silent for 2.6 seconds.** The backchannel
+  and the `on_thinking` hook that fires it both already existed, in all three languages -
+  but `create_speech_pipeline` never passed the hook, so only `pitchbot-talk` ever used
+  them. Every spoken turn in the simulator sat in complete silence for the whole measured
+  gap. `ThinkingFiller` carries it onto the WebSocket, gated by
+  `PITCHBOT_SPEECH_BACKCHANNEL_ENABLED` and inert when no voice is configured.
+
+  It fills the wait; it does not shorten it. No measured millisecond moves.
+
+- **A filler is not a turn, and is now marked as one that is not.** Three hazards had to be
+  handled, each a property of the socket rather than of the backchannel: a filler that
+  reported playback would release the floor the *reply* is about to take, silencing
+  barge-in for that turn; `ReplyAudioSender.start` aborting a filler mid-word would tell
+  the browser to discard a half-said syllable; and counting a filler as
+  `TurnStage.SYNTHESIZE` would report a synthesis time for a turn whose reply had not been
+  planned yet. The reply now drains the filler (bounded at 1.5 s) and the browser
+  schedules behind it (capped at 2 s), so the "hmm" completes and the answer follows it.

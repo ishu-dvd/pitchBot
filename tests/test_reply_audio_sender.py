@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest
 
@@ -436,3 +437,50 @@ async def test_a_failed_write_latches_the_socket_closed() -> None:
     assert socket.closed is True
     assert await socket.try_send_bytes(b"\x00\x01") is False
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reply_is_not_marked_as_a_filler() -> None:
+    """The flag is what the client uses to decide whether to report playback."""
+
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(socket.locked(), StubSynthesizer(chunk(64)))
+
+    await sender.start("The answer.", LanguageCode.ENGLISH)
+    await drain(sender)
+
+    assert socket.typed(REPLY_AUDIO_BEGIN)["filler"] is False
+    assert socket.typed(REPLY_AUDIO_END)["filler"] is False
+
+
+@pytest.mark.asyncio
+async def test_draining_waits_for_the_stream_instead_of_cancelling_it() -> None:
+    """The counterpart to `abort`, for when the stream in flight is still wanted.
+
+    A backchannel is drained rather than aborted, because aborting tells the client to
+    discard what it buffered - which would silence a filler that was still being said.
+    """
+
+    gate = asyncio.Event()
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(socket.locked(), StubSynthesizer(chunk(64), chunk(64), gate=gate))
+
+    await sender.start("Hmm.", LanguageCode.ENGLISH)
+    await asyncio.sleep(0)
+    gate.set()
+    await sender.drain()
+
+    assert sender.streaming is False
+    end = socket.typed(REPLY_AUDIO_END)
+    assert end["aborted"] is False
+    assert cast(int, end["frame_count"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_draining_nothing_returns_at_once() -> None:
+    socket = RecordingSocket()
+    sender = ReplyAudioSender(socket.locked(), StubSynthesizer(chunk(64)))
+
+    await sender.drain()
+
+    assert socket.messages == []

@@ -66,3 +66,33 @@ def test_websocket_origin_must_exactly_match_host() -> None:
     assert not is_allowed_websocket_origin("https://evil.example", "demo.example")
     assert not is_allowed_websocket_origin(None, "demo.example")
     assert not is_allowed_websocket_origin("https://demo.example", None)
+
+
+def test_the_client_plays_a_filler_without_handing_the_floor_back() -> None:
+    """A backchannel never took the floor, so it must never report playing one.
+
+    Reporting would release the floor the *reply* is about to hold, and the buyer talking
+    over the answer would stop counting as an interruption for that turn.
+    """
+
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    player = (WEB / "reply-audio.js").read_text(encoding="utf-8")
+
+    assert "report: !payload.filler" in javascript
+    assert "end({ report = true } = {})" in player
+    assert "if (report) this.onFinished();" in player
+
+
+def test_a_reply_queues_behind_a_finished_filler_rather_than_cutting_it_off() -> None:
+    """`begin` used to stop everything, which would clip a filler mid-syllable.
+
+    A clipped syllable sounds like a fault where a completed one sounds like a person.
+    Capped, so a stuck stream delays the answer by a beat and never by a minute.
+    """
+
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    player = (WEB / "reply-audio.js").read_text(encoding="utf-8")
+
+    assert "after: !payload.filler" in javascript
+    assert "MAX_CARRY_OVER_SECONDS = 2" in player
+    assert "queued <= MAX_CARRY_OVER_SECONDS" in player
