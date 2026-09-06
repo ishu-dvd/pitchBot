@@ -554,17 +554,20 @@ class SimulatorService:
                             requested_at=operation.started_at,
                         )
                     else:
-                        features = tuple(
-                            item.strip()
-                            for item in str(facts.get("requested_features", "")).split(",")
-                            if item.strip()
-                        )
                         preview = await self._actions.preview_deck(
                             session_id=session.session_id,
                             lead_id=snapshot.lead_id,
                             industry=request.deck_industry,
                             language=request.language,
-                            features=features,
+                            # The same minimised summary the WhatsApp branch builds, so a
+                            # deck carries the budget and timing the buyer stated instead
+                            # of only their feature list.
+                            follow_up=build_follow_up(
+                                lead_id=snapshot.lead_id,
+                                language=request.language,
+                                facts=facts,
+                                next_steps=("Confirm requirements",),
+                            ),
                             context=context,
                             operation_id=request.operation_id,
                         )

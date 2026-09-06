@@ -111,10 +111,18 @@ class ActionWorkflowService:
         lead_id: UUID,
         industry: DeckIndustry,
         language: LanguageCode,
-        features: tuple[str, ...],
+        follow_up: FollowUpSummary,
         context: ActionAuthorizationContext,
         operation_id: UUID,
     ) -> ActionPreviewResult:
+        """Build the deck from the same minimised summary WhatsApp already receives.
+
+        Taking a `FollowUpSummary` rather than a bare feature tuple means there is exactly
+        one place that decides what a conversation may emit - `build_follow_up` - so the
+        deck cannot widen it. Before PR 54 this took only the features and the buyer's
+        budget and timing never reached a slide.
+        """
+
         decision = self._policy.authorize(ActionType.ARTIFACT_PREVIEW, context)
         if decision.status is AuthorizationStatus.BLOCKED:
             return ActionPreviewResult(
@@ -126,7 +134,9 @@ class ActionWorkflowService:
                 deck_id=f"sim-{session_id.hex}-{operation_id.hex}",
                 industry=industry,
                 language=language,
-                requested_features=features,
+                requested_features=follow_up.requested_features,
+                budget_summary=follow_up.budget_summary,
+                timeline_summary=follow_up.timeline_summary,
                 idempotency_key=f"simulator:{session_id}:deck:{operation_id}",
             )
         )

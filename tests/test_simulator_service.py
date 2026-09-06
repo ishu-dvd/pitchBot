@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -1499,3 +1499,56 @@ async def test_a_resumed_call_starts_its_own_clock(
     assert resumed.session_id == session.session_id
     # Timed from the resume, so the reconnecting buyer gets a working call.
     await resumed_service.process_turn(session.session_id, _turn("after reconnecting"))
+
+
+@pytest.mark.asyncio
+async def test_a_deck_requested_mid_call_carries_the_facts_of_that_call() -> None:
+    """The service branch had `facts` in scope and used only the feature list.
+
+    A component test cannot see that: `DeckService` was given a budget in its own tests
+    and rendered it correctly, while the caller never passed one. This drives the whole
+    seam - conversation, minimiser, workflow, deck - the way a real call does.
+    """
+
+    service = SimulatorService(clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)))
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref="deck-wiring",
+            language=LanguageCode.ENGLISH,
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    for text in (
+        "We run a clothing store and want to sell online.",
+        "We need a catalog and online payment.",
+        "Our budget is 150000 and we want it live in 3 months.",
+    ):
+        await service.process_turn(
+            session.session_id,
+            TurnRequest(operation_id=uuid4(), text=text, language=LanguageCode.ENGLISH),
+        )
+
+    turn = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            operation_id=uuid4(),
+            text="Please send a sample deck.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.ARTIFACT,
+            deck_industry=DeckIndustry.APPAREL,
+        ),
+    )
+
+    assert turn.preview is not None
+    deck = turn.preview.deck
+    assert deck is not None
+    rendered = deck.model_dump_json()
+    assert "150000" in rendered
+    assert "3 months" in rendered
+    assert "Sample Business" not in rendered
