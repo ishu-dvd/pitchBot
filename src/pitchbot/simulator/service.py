@@ -6,7 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID, uuid4, uuid5
 
 from pitchbot.actions import (
@@ -136,6 +136,14 @@ class SessionCapacityError(RuntimeError):
     pass
 
 
+class CallDurationLimitError(RuntimeError):
+    """A call has run for as long as this deployment permits.
+
+    Terminal for the session in the same way `TurnOperationCapacityError` is: a clock
+    does not run backwards, so no retry and no reconnect makes the next turn acceptable.
+    """
+
+
 _LEAD_ID_NAMESPACE = UUID("a327c17a-6d9f-4c26-b255-5366e5bb8d1d")
 
 # One audio-metadata event per this many frames, plus one for the first frame. At 30 ms
@@ -163,6 +171,7 @@ class _Session:
     events: deque[SimulatorEvent]
     preview_consent_granted: bool
     contact_policy: ContactPolicy
+    started_at: datetime
     next_sequence: int = 1
     audio_chunks_received: int = 0
     audio_bytes_received: int = 0
@@ -186,6 +195,10 @@ class SimulatorService:
         # budget needs 8.3x the count: this is ~10 minutes of continuous speech.
         max_audio_chunks_per_session: int = 20_000,
         max_turn_operations_per_session: int = 100,
+        # Wall-clock ceiling on a single call, in minutes. 0 disables it, following
+        # `speech_transcribe_timeout_ms`. Enforced exactly like its sibling `max_turns`:
+        # the limit refuses the next turn, it does not end the call politely.
+        max_call_minutes: int = 12,
         conversation_engine: ConversationEngine | None = None,
         conversation_journal: ConversationJournal | None = None,
         action_workflows: ActionWorkflowService | None = None,
@@ -228,6 +241,9 @@ class SimulatorService:
         if speech_transcribe_timeout_ms < 0:
             raise ValueError("Simulator speech_transcribe_timeout_ms must not be negative")
         self._speech_transcribe_timeout_ms = speech_transcribe_timeout_ms
+        if max_call_minutes < 0:
+            raise ValueError("Simulator max_call_minutes must not be negative")
+        self._max_call_minutes = max_call_minutes
         self._clock = clock or SystemClock()
         self._max_sessions = max_sessions
         self._max_events_per_session = max_events_per_session
@@ -321,6 +337,7 @@ class SimulatorService:
             events=deque(maxlen=self._max_events_per_session),
             preview_consent_granted=request.preview_consent_granted,
             contact_policy=request.contact_policy,
+            started_at=self._clock.now(),
         )
         self._append_event(
             session,
@@ -379,6 +396,7 @@ class SimulatorService:
                 if operation.injected_failure is not None:
                     raise InjectedSimulatorError(operation.injected_failure)
             else:
+                self._ensure_within_call_duration(session)
                 if len(session.turn_operations) >= self._max_turn_operations_per_session:
                     raise TurnOperationCapacityError("Simulator turn operation capacity reached")
                 operation = _TurnOperation(fingerprint=fingerprint, started_at=self._clock.now())
@@ -852,6 +870,11 @@ class SimulatorService:
                 events=deque(maxlen=self._max_events_per_session),
                 preview_consent_granted=False,
                 contact_policy=ContactPolicy(),
+                # The resumed leg starts its own clock. The journal does not record the
+                # original call's wall-clock start, and a buyer who reconnects after a
+                # crash must not find the call already over. `max_turns` is the backstop
+                # that does survive a resume, because conversation state is restored.
+                started_at=self._clock.now(),
                 recovered=True,
             )
         except BaseException:
@@ -1132,6 +1155,20 @@ class SimulatorService:
     def _ensure_session_active(self, session_id: UUID, session: _Session) -> None:
         if session.closing or self._sessions.get(session_id) is not session:
             raise SessionNotFoundError(f"Unknown session: {session_id}")
+
+    def _ensure_within_call_duration(self, session: _Session) -> None:
+        """Refuse a *new* turn once the call has run for its permitted time.
+
+        Checked where a new turn operation is registered rather than on entry, so a
+        client retrying a turn that was already answered still receives that answer.
+        Idempotent replay is a network concern, not a way to keep talking.
+        """
+
+        if self._max_call_minutes <= 0:
+            return
+        limit = timedelta(minutes=self._max_call_minutes)
+        if self._clock.now() - session.started_at >= limit:
+            raise CallDurationLimitError(f"Call exceeded its {self._max_call_minutes}-minute limit")
 
     def _ensure_conversation_open(self, session_id: UUID) -> None:
         if self._conversation.snapshot(session_id).stopped:

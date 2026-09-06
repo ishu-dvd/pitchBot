@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -41,6 +41,7 @@ from pitchbot.simulator.models import (
     TurnRequest,
 )
 from pitchbot.simulator.service import (
+    CallDurationLimitError,
     DurableActionReplayUnavailableError,
     InjectedSimulatorError,
     SessionAdmissionConflictError,
@@ -1382,3 +1383,119 @@ async def test_a_failed_discard_keeps_the_session_addressable_for_a_cleanup_retr
     assert workflows.cleanup_attempts == 2
     with pytest.raises(LookupError):
         workflows.callbacks.get(callback_id)
+
+
+def _duration_service(minutes: int, clock: FakeClock) -> SimulatorService:
+    return SimulatorService(clock=clock, max_call_minutes=minutes)
+
+
+def _turn(text: str = "Still there?") -> TurnRequest:
+    return TurnRequest(text=text, language=LanguageCode.ENGLISH)
+
+
+@pytest.mark.asyncio
+async def test_a_call_is_refused_once_it_has_run_for_its_permitted_time() -> None:
+    """The cap Settings has always declared is the cap the service applies.
+
+    Before PR 54 `max_call_minutes` had no consumer anywhere in the tree: a session
+    accepted turns a full day after it began.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    service = _duration_service(12, clock)
+    session = service.create_session(
+        CreateSessionRequest(lead_ref="duration", language=LanguageCode.ENGLISH)
+    )
+
+    clock.advance(timedelta(minutes=11, seconds=59))
+    await service.process_turn(session.session_id, _turn("inside the limit"))
+
+    clock.advance(timedelta(seconds=1))
+    with pytest.raises(CallDurationLimitError):
+        await service.process_turn(session.session_id, _turn("on the limit"))
+
+
+@pytest.mark.asyncio
+async def test_a_zero_duration_limit_disables_the_cap() -> None:
+    """0 disables, matching `speech_transcribe_timeout_ms`."""
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    service = _duration_service(0, clock)
+    session = service.create_session(
+        CreateSessionRequest(lead_ref="unlimited", language=LanguageCode.ENGLISH)
+    )
+
+    clock.advance(timedelta(days=1))
+    response = await service.process_turn(session.session_id, _turn())
+
+    assert response.session_id == session.session_id
+
+
+@pytest.mark.asyncio
+async def test_an_answered_turn_can_still_be_retried_after_the_limit() -> None:
+    """Idempotent replay is a network concern, not a way to keep talking.
+
+    The cap is checked where a *new* turn operation is registered, so a client whose
+    connection dropped mid-response still recovers the answer it already earned.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    service = _duration_service(12, clock)
+    session = service.create_session(
+        CreateSessionRequest(lead_ref="retry", language=LanguageCode.ENGLISH)
+    )
+    request = _turn("answered just in time")
+    first = await service.process_turn(session.session_id, request)
+
+    clock.advance(timedelta(hours=3))
+    replayed = await service.process_turn(session.session_id, request)
+
+    assert replayed.reply == first.reply
+    with pytest.raises(CallDurationLimitError):
+        await service.process_turn(session.session_id, _turn("a genuinely new turn"))
+
+
+def test_a_negative_duration_limit_is_rejected() -> None:
+    with pytest.raises(ValueError, match="max_call_minutes"):
+        SimulatorService(max_call_minutes=-1)
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_call_starts_its_own_clock(
+    migrated_database: tuple[str, sessionmaker[Session]],
+) -> None:
+    """A buyer who reconnects after a crash must not find the call already over.
+
+    The journal does not record the original call's wall-clock start, so the resumed
+    leg is timed from the resume. `max_turns` is the cap that does survive a resume.
+    """
+
+    _, session_factory = migrated_database
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    repository = SqlAlchemyEventRepository(session_factory)
+    journal = ConversationJournal(repository)
+
+    def build() -> SimulatorService:
+        return SimulatorService(
+            clock=clock,
+            conversation_engine=ConversationEngine(turn_digest_key=TURN_DIGEST_KEY),
+            conversation_journal=journal,
+            action_workflows=action_workflows(clock),
+            max_call_minutes=12,
+        )
+
+    service = build()
+    session = service.create_session(
+        CreateSessionRequest(lead_ref="resumed", language=LanguageCode.ENGLISH)
+    )
+    await service.process_turn(session.session_id, _turn("first"))
+
+    clock.advance(timedelta(hours=5))
+    resumed_service = build()
+    resumed = resumed_service.resume_session(
+        session.session_id, ResumeSessionRequest(lead_ref="resumed")
+    )
+
+    assert resumed.session_id == session.session_id
+    # Timed from the resume, so the reconnecting buyer gets a working call.
+    await resumed_service.process_turn(session.session_id, _turn("after reconnecting"))
