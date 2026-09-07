@@ -3267,3 +3267,60 @@ opt-out, and the politest one.
 | false opt-outs | 2/15 | **0/15** |
 
 Mutation score for the opt-out change: **12/12** (33/33 across the whole PR).
+
+## WhatsApp: what is actually free (PR 56)
+
+Read from Meta's documentation 2026-09-07. Meta may change pricing "only on the 1st day of
+each quarter", so every figure is dated.
+
+### Free
+
+| Free | Rule |
+| --- | --- |
+| Non-template message inside an open 24h window | "All non-template messages are free... can only be sent within an open customer service window" |
+| **Utility** template inside that window | "Utility templates delivered within an open customer service window are free" |
+| **Any** message inside a 72h Free Entry Point window | "FEP windows remain open for 72 hours. While open, you can send any type of message to the user at no charge" |
+| Every user-initiated call | "All user-initiated calls are free" |
+| Service messages, uncapped | "Effective November 1, 2024 - Service conversations are now free for all businesses" |
+
+Two of these were wrong in the first draft of `pricing.py`. "Every template costs money" is
+false, and the 72h FEP window did not exist in the model at all.
+
+### Charged, India (INR, effective 2026-07-01)
+
+| Category | Rate |
+| --- | --- |
+| Marketing | 0.8631 |
+| Utility | 0.1150 |
+| Authentication | 0.1150 |
+| Authentication-International | 2.4971 |
+| Service | free |
+| Business-initiated call | 0.3885 / minute, six-second pulses rounded up |
+
+### Calling
+
+| | Free? |
+| --- | --- |
+| User calls you | yes, always, no payment method |
+| You call the user | no - per minute, payment method mandatory, and gated behind a 2,000 recipient/day messaging limit that a new portfolio (250) cannot reach |
+
+A call also opens or refreshes the free messaging window, so an inbound call is a zero-cost
+way to buy 24 hours of free messaging.
+
+### Zero-cost development path
+
+| Phase | What | Cost |
+| --- | --- | --- |
+| 0 | Local fake + webhook receiver, in-process | free, indefinite |
+| 1 | Real Meta app + test number + Render/Cloudflare webhook, Dashboard "Test" button | free |
+| 2 | Real messages to your own phone inside the window | free |
+| 3 | Inbound calling on the test number | free |
+
+Skip: 360dialog (EUR 49/mo), Wati, AiSensy (INR 50 credit is not a sandbox), Embedded
+Signup sandbox ("cannot send or receive messages"), Calling sandbox ("only available to
+Tech Partners"). Twilio's sandbox is the only genuinely free BSP one, with a 3-day rejoin
+and only 3 pre-approved templates.
+
+**Never** automate the WhatsApp Business app or WhatsApp Web: Business Terms Sec.5(g) bans
+"applications that interact with our Business Services without our prior written consent".
+That is the number-ban vector.

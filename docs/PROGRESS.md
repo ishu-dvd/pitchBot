@@ -2646,3 +2646,33 @@ clean. 4/4 mutations caught. Live server before and after.
 - **Caught by the existing suite:** the first widening made "Does it let me remove contacts
   from the list?" an opt-out. That test already existed and did its job.
 - **Mutation score:** 12/12 for the opt-out change, 33/33 across the PR.
+
+### PR 56 addendum 3 - WhatsApp integration framework
+
+- **Why:** the WhatsApp adapter had only ever been a mock. Nothing had exercised the wire
+  protocol, and "can this be done for free" had never been answered from a source.
+- **The framework:** `pitchbot.whatsapp.fake_graph.FakeGraphApi` is a local Graph API
+  stand-in driven in-process through `httpx.ASGITransport`, so the real
+  `WhatsAppCloudAdapter` runs its HTTP layer, auth header, request body and error handling
+  with no account and no network. `pitchbot-whatsapp status | demo | inbound` exposes it.
+- **The inbound half is not optional:** a free-form message is only permitted inside the 24h
+  window after the customer writes, so the webhook is what creates the ability to send
+  anything for free. Implements the verify handshake, HMAC over raw bytes, and
+  deduplication (Meta retries for 7 days; a replay would reopen a closed free window).
+- **Contract discipline:** the fake's required fields come from the published spec, not
+  from the client. `recipient_type` is required by the spec and omitted by nearly every
+  published example - a fake written from those examples would accept what Meta rejects.
+- **Two errors found in my own first draft of the cost model**, both counter-intuitive:
+  a *utility* template inside an open window is free (so "templates cost money" is wrong),
+  and a Free Entry Point window makes every message type free for 72 hours. Tests that had
+  encoded the wrong model failed loudly when it was corrected.
+- **Calling:** user-initiated calls are free with no payment method; business-initiated
+  calling is charged per minute, needs a payment method, and is gated behind a 2,000
+  recipient/day limit a new portfolio (250) cannot reach. Messaging-only can be free;
+  outbound calling cannot.
+- **Mutation score:** 22/22. The one survivor was instructive - nothing asserted the *fake*
+  enforces the contract, only that the client satisfies it, so the fake could silently
+  weaken and agree with whatever it was sent.
+- **Deferred / unverified:** the commonly-cited "5 recipients" test-number limit could not
+  be confirmed in current docs; nor a test-number expiry or a fixed free-message allowance.
+  Recorded as unverified in docs/WHATSAPP.md rather than stated.
