@@ -116,3 +116,105 @@ def test_a_language_that_cannot_answer_an_objection_fails_at_import(
             repeated=existing.repeated,
             switched=existing.switched,
         )
+
+
+# --------------------------------------------------------------------------------------
+# A deadline can be stated in any language the product sells in (PR 54)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        # English, unchanged - the existing pattern is tried first so this cannot regress.
+        ("We want it live in 3 months.", "3 months"),
+        ("We need it within 6 weeks.", "6 weeks"),
+        # Hindi, in words and in digits, nominative and oblique.
+        ("तीन महीने में चालू करना है।", "3 months"),
+        ("3 महीने में चाहिए।", "3 months"),
+        ("छह महीनों में", "6 months"),
+        ("दो हफ्ते में", "2 weeks"),
+        # Telugu writes the case ending onto the unit itself.
+        ("మూడు నెలల్లో సిద్ధం కావాలి.", "3 months"),
+        ("రెండు వారాల్లో", "2 weeks"),
+        # Hinglish.
+        ("teen mahine mein live karna hai", "3 months"),
+        ("do hafte mein", "2 weeks"),
+    ],
+)
+def test_a_deadline_is_understood_in_every_language(said: str, expected: str) -> None:
+    """Measured before this existed: eight of ten phrasings failed.
+
+    Three of the four languages this product sells in could not state a deadline at all, so
+    the agent asked for it twice, gave up, and the deck reported it as never discussed.
+    """
+
+    from pitchbot.conversation.rules import _match_timeline, normalize_text
+
+    assert _match_timeline(normalize_text(said)) == expected
+
+
+def test_a_deadline_is_normalised_to_one_canonical_shape() -> None:
+    """The value reaches a slide, and `policy._TIMELINE` is the allowlist that bounds it.
+
+    Emitting canonical English units keeps that allowlist tight rather than widening it to
+    accept arbitrary Devanagari and Telugu, which is the safer of the two directions.
+    """
+
+    from pitchbot.actions.policy import _TIMELINE
+    from pitchbot.conversation.rules import _match_timeline, normalize_text
+
+    for said in ("तीन महीने में", "మూడు నెలల్లో", "teen mahine mein"):
+        value = _match_timeline(normalize_text(said))
+        assert value is not None
+        assert _TIMELINE.fullmatch(value), f"{said!r} produced {value!r}, which policy drops"
+
+
+def test_text_with_no_deadline_reports_none() -> None:
+    from pitchbot.conversation.rules import _match_timeline, normalize_text
+
+    assert _match_timeline(normalize_text("We sell clothes and want a website.")) is None
+
+
+# --------------------------------------------------------------------------------------
+# A business names itself in the case its language actually uses (PR 54)
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("we sell clothing", "apparel"),
+        ("हम कपड़े की दुकान चलाते हैं", "apparel"),
+        # The oblique. This is the wording the product's own deck uses for a clothes shop.
+        ("हम कपड़ों की दुकान चलाते हैं", "apparel"),
+        ("kapdon ki dukaan", "apparel"),
+        # Telugu names a shop with the genitive, so this is the ordinary way to say it.
+        ("దుస్తుల దుకాణం", "apparel"),
+        ("బట్టల షాప్", "apparel"),
+        ("బొమ్మల దుకాణం", "toys"),
+        ("పుస్తకాల షాప్", "books"),
+        ("खिलौनों की दुकान", "toys"),
+    ],
+)
+def test_a_business_type_survives_inflection(said: str, expected: str) -> None:
+    """Six of eleven natural phrasings were missed, all of them inflected forms."""
+
+    from pitchbot.conversation.rules import _match_named_value, normalize_text
+
+    assert _match_named_value(normalize_text(said), BUSINESS_TYPES) == expected
+
+
+def test_widening_the_vocabulary_did_not_reopen_the_booking_form() -> None:
+    """The guard these stems had to survive.
+
+    Plain substring matching once read "a booking form" as the *books* vertical and told a
+    furniture buyer the agent thought they sold books. Stems are matched as whole terms
+    with only case and number endings allowed, so that stays fixed.
+    """
+
+    from pitchbot.conversation.rules import _match_named_value, normalize_text
+
+    said = normalize_text("a booking form for furniture")
+
+    assert _match_named_value(said, BUSINESS_TYPES) is None

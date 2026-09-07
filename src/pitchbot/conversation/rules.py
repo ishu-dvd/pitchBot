@@ -928,6 +928,76 @@ _TIMELINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_TIMELINE_UNIT_STEMS: Final[Mapping[str, str]] = {
+    "day": "days",
+    "week": "weeks",
+    "month": "months",
+    "दिन": "days",
+    "हफ्त": "weeks",
+    "हफ़्त": "weeks",
+    "सप्ताह": "weeks",
+    "महीन": "months",
+    "माह": "months",
+    "రోజు": "days",
+    "వార": "weeks",
+    "నెల": "months",
+    "din": "days",
+    "haft": "weeks",
+    "mahin": "months",
+}
+"""Time units as stems, because the unit carries the case ending in these languages.
+
+Telugu writes *"మూడు నెలల్లో"* as one token - `నెలల్లో` is `నెల` plus "in" - so a pattern
+that demands a word boundary after the unit cannot match it. Hindi inflects the same way
+(महीने / महीनों).
+"""
+
+_TIMELINE_WORD_NUMBERS: Final[Mapping[str, int]] = {
+    "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पांच": 5, "पाँच": 5,
+    "छह": 6, "सात": 7, "आठ": 8, "नौ": 9, "दस": 10,
+    "ఒక": 1, "రెండు": 2, "మూడు": 3, "నాలుగు": 4, "ఐదు": 5, "ఆరు": 6, "పది": 10,
+    "ek": 1, "do": 2, "teen": 3, "char": 4, "paanch": 5, "panch": 5,
+    "chhe": 6, "saat": 7, "aath": 8, "nau": 9, "das": 10,
+}  # fmt: skip
+"""Counts written as words, which is how a deadline is usually spoken outside English."""
+
+_TIMELINE_MULTILINGUAL = re.compile(
+    r"(?:^|\s)("
+    + "|".join(re.escape(word) for word in sorted(_TIMELINE_WORD_NUMBERS, key=len, reverse=True))
+    + r"|\d{1,3})\s+("
+    + "|".join(re.escape(stem) for stem in sorted(_TIMELINE_UNIT_STEMS, key=len, reverse=True))
+    + r")"
+)
+
+
+def _match_timeline(normalized: str) -> str | None:
+    """A stated deadline, in any language PitchBot sells in, as one canonical phrase.
+
+    English is tried first and unchanged, so nothing that worked before can regress. The
+    multilingual reading then answers everything else and **normalises to English units** -
+    "3 months" whether the buyer said तीन महीने, మూడు నెలల్లో or teen mahine.
+
+    Canonical on purpose. The value is buyer-derived text that reaches a slide, and
+    `pitchbot.actions.policy._TIMELINE` is the allowlist that bounds it; emitting one
+    fixed shape keeps that allowlist tight instead of widening it to accept arbitrary
+    Devanagari and Telugu.
+
+    Before this, a deadline could only be stated in English: measured on ten phrasings,
+    eight failed, and three of the four supported languages could not fill the slot at all.
+    """
+
+    english = _TIMELINE_PATTERN.search(normalized)
+    if english is not None:
+        return english.group(1)
+    match = _TIMELINE_MULTILINGUAL.search(normalized)
+    if match is None:
+        return None
+    count, unit = match.group(1), match.group(2)
+    number = int(count) if count.isdigit() else _TIMELINE_WORD_NUMBERS[count]
+    if not 1 <= number <= 999:
+        return None
+    return f"{number} {_TIMELINE_UNIT_STEMS[unit]}"
+
 
 @dataclass(frozen=True, slots=True)
 class ExtractionResult:
@@ -1081,9 +1151,9 @@ def extract_business_signals(
     if budget_match:
         candidates["budget_stated"] = budget_match.group(0)[:100]
 
-    timeline_match = _TIMELINE_PATTERN.search(normalized)
-    if timeline_match:
-        candidates["timeline"] = timeline_match.group(1)
+    timeline = _match_timeline(normalized)
+    if timeline is not None:
+        candidates["timeline"] = timeline
     elif _contains_any(normalized, ("this week", "this month", "इस महीने", "जल्दी")):
         candidates["timeline"] = "near-term"
 
