@@ -2510,7 +2510,7 @@ clean. 4/4 mutations caught. Live server before and after.
 - **What was measured first:** `probe_deck_and_budget.py` - the same apparel call in four
   languages with the artefact printed, plus seventeen real ways a budget is stated read
   through both the extractor and the outbound minimiser.
-- **What it found:** three defects, all silent, none caught by 1,346 passing tests.
+- **What it found:** four defects, all silent, none caught by 1,346 passing tests.
   1. `actions.policy._BUDGET` re-declared the budget cue list and omitted `బడ్జెట్`, so a
      Telugu budget was extracted, stored, then discarded on the way out. The buyer's deck
      read "budget not yet discussed".
@@ -2520,12 +2520,19 @@ clean. 4/4 mutations caught. Live server before and after.
      Hindi phrasings that put a digit before the first vowel.
   3. The deck rendered the canonical English unit the timeline matcher normalises to, so a
      Telugu slide said "3 months".
+  4. Found only by driving the whole product afterwards: `rules._POSITIVE_EVIDENCE` was a
+     **fourth** copy of the budget vocabulary. A buyer saying "we can spend up to ten lakh"
+     filled all four slots and produced no evidence at all, so the lead classified
+     `REVIEW_NEEDED` and `ActionPolicy` blocked the deck outright. Its timeline list
+     stopped at `weeks`, so "in 3 months" counted for nothing either.
 - **What changed:** `BUDGET_CUES`, `BUDGET_INTENT_CUES`, `CURRENCY_MARKERS` and
   `INDIC_SCRIPT_RANGES` now live in `domain.catalog` with `budget_alternation()` building
   the shared cue half; `conversation.rules`, `actions.policy` and `actions.decks` all
   consume it. The extractor reads word numbers in four languages, each required to name its
   scale and each anchored to a cue. `DeckPhrases` gains `timeline_units`, validated at
-  import against every form the matcher can emit.
+  import against every form the matcher can emit. `_POSITIVE_EVIDENCE` builds its budget
+  and timeline phrases from `BUDGET_CUES + BUDGET_INTENT_CUES` and `_TIMELINE_UNIT_STEMS`
+  respectively, so extraction and classification cannot learn a phrasing separately.
 - **Judgement calls:** the word-number table is deliberately *not* shared with
   `_TIMELINE_WORD_NUMBERS` - that matcher needs no preceding cue, so English number words
   there would read "we shipped two months ago" as a deadline. `spend` is a cue only with a

@@ -3003,3 +3003,36 @@ Refutations, kept because the next person will be tempted:
 | "We can spend up to ten lakh." | **yes** | the modal is the difference |
 
 Missing a budget costs one more question. Inventing one prices a proposal.
+
+### The defect that only running it end to end could find
+
+The corpus above read the two regexes directly and reported 17/17. Driving the whole
+product - session, turns, extraction, classification, authorization, minimisation, render -
+found a **fourth** copy of the budget vocabulary, in the lead classifier.
+
+| call | slots filled | deck |
+| --- | --- | --- |
+| "हमारा बजट दो लाख है और तीन महीने में..." | 4 / 4 | delivered |
+| "మా బడ్జెట్ రెండు లక్షలు, మూడు నెలల్లో..." | 4 / 4 | delivered |
+| "Budget pachas hazaar hai aur teen mahine..." | 4 / 4 | delivered |
+| "We can spend up to ten lakh and want it live in 3 months." | **4 / 4** | **BLOCKED** |
+
+Facts extracted on the blocked call:
+
+```
+{'business_type': 'apparel', 'requested_features': 'catalog,online-payments',
+ 'budget_stated': 'can spend up to ten lakh', 'timeline': '3 months'}
+```
+
+A perfectly qualified lead. `rules._POSITIVE_EVIDENCE` held its own budget word list, which
+knew `budget`/`बजट`/`బడ్జెట్` but not the modal forms, so the turn produced **no evidence of
+any kind** - and `_classify` maps "no evidence" to `REVIEW_NEEDED`, which `ActionPolicy`
+blocks. The buyer was refused their deck with `CLASSIFICATION_REVIEW` and nothing logged a
+problem.
+
+The same list stopped at `weeks`, so `in 3 months` filled the `timeline` slot and
+contributed nothing to the classification. Both now build from the shared vocabularies:
+`BUDGET_CUES + BUDGET_INTENT_CUES` and `_TIMELINE_UNIT_STEMS`.
+
+Teaching the extractor a new phrasing is half a fix. The classifier decides whether the
+buyer receives anything at all.
