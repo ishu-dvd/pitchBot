@@ -80,17 +80,41 @@ _OPT_OUT_PHRASES = (
     "నా నంబర్ తీసివేయండి",
 )
 _ABUSE_TERMS = (
-    "idiot",
-    "stupid",
-    "moron",
     "shut up",
-    "बेवकूफ",
     "चुप रह",
-    "bakwas",
-    "bewakoof",
-    "మూర్ఖుడు",
     "వెధవ",
     "నోరు మూసుకో",
+    # Scripts and inflections of concepts this list already accepts. Measured as a
+    # concept-by-language matrix, seven of twenty-four cells were heard: `चुप रह` was
+    # listed only in Devanagari so romanised "chup raho" missed.
+    "चुप रहो",
+    "chup raho",
+    "chup kar",
+    # Directed dismissals. Unambiguous imperatives aimed at the person, which is what
+    # this signal is for - the redirect says "I want to keep this respectful", and a
+    # second one ends the call.
+    "get lost",
+    "go away",
+    "दफा हो",
+    "भाग जाओ",
+    "nikal yahan",
+    "bhaag ja",
+    "పోరా",
+    "వెళ్ళిపో",
+    # Second-person insults whose inflected form the stem cannot reach, and the
+    # *directed* forms of the rubbish family - telling the agent to stop talking
+    # nonsense, as opposed to calling a website rubbish. `మూర్ఖుడివి` carries the Telugu
+    # second-person ending `-డివి`, so it is directed by construction; the bare stem
+    # `మూర్ఖ` is not, and lives with the other ambiguous adjectives.
+    "మూర్ఖుడివి",
+    "పిచ్చి మాటలు",
+    "faltu baat",
+    "बकवास मत",
+    "बकवास बंद",
+    "bakwas mat",
+    "bakwas band",
+    "talking rubbish",
+    "talking nonsense",
 )
 _INTERNAL_INFO_PHRASES = (
     "api key",
@@ -876,8 +900,94 @@ _SECOND_PERSON = frozenset(
         "आप",
         "आपके",
         "तुम",
+        # Telugu was absent entirely, so every template built on second person was
+        # English-and-Hindi-only - the same shape that left the opt-out guard unusable
+        # in two of four languages.
+        "నువ్వు",
+        "నీవు",
+        "మీరు",
+        "నీ",
     }
 )
+_INSULT_ADJECTIVES = frozenset(
+    {
+        "useless",
+        "worthless",
+        "rubbish",
+        "nonsense",
+        "pathetic",
+        "idiot",
+        "idiotic",
+        "stupid",
+        "stupidity",
+        "moron",
+        "moronic",
+        "fool",
+        "foolish",
+        "बेकार",
+        "बकवास",
+        "नालायक",
+        "बेवकूफ",
+        "बेवकूफी",
+        "bekaar",
+        "bekar",
+        "faltu",
+        "nalayak",
+        "bewakoof",
+        "bewakoofi",
+        "పనికిరాని",
+        "పనికిరానివాడివి",
+        "చెత్త",
+        "పిచ్చి",
+        "మూర్ఖ",
+        "మూర్ఖుడు",
+    }
+)
+"""Words that insult when aimed at a person and merely criticise when aimed at a thing.
+
+Inflected surface forms are enumerated rather than stemmed, because templates match exact
+tokens from the tokenizer - the same reason :data:`_REMOVAL_VERBS` lists its imperatives.
+``idiotic``, ``bewakoofi`` and ``మూర్ఖుడు`` are each a real turn from the existing suite.
+
+These are deliberately **not** in :data:`_ABUSE_TERMS`. Measured, *"That feature is useless
+for us"*, *"यह फीचर बेकार है"* and *"The old website was rubbish"* are all ordinary product
+criticism from a buyer worth selling to, and listing the bare adjective would have flagged
+every one of them. The cost of getting that wrong is not a stray label: the engine redirects
+on the first abuse signal and **ends the call on the second**, so two frank opinions about a
+feature would hang up on a live buyer.
+
+``stupid``, ``बेवकूफ``, ``idiot`` and ``moron`` were bare terms and moved here, because the
+same word is how a buyer talks about *themselves*: **"I feel stupid asking this"**, *"we
+made a stupid mistake with our old site"*, *"that was a stupid decision on our part"* and
+*"हमने बेवकूफी की थी"* were all read as abuse. A non-technical buyer apologising for a
+question is the last person who should be redirected, and two such sentences ended the call.
+
+What separates the two readings is who the word is aimed at, so it is expressed as a
+template against :data:`_SECOND_PERSON` rather than as a phrase - which also survives the
+word orders these languages actually use, where the pronoun and the adjective are separated
+by a copula that differs per language (*"you are useless"*, *"तुम बेकार हो"*,
+*"నువ్వు పనికిరానివాడివి"*).
+"""
+
+_ABUSE_TEMPLATES = (
+    _IntentTemplate((_SECOND_PERSON, _INSULT_ADJECTIVES), ordered=True, max_gaps=(3,)),
+)
+"""An insult counts when it lands on *you*, and a pronoun alone does not decide that.
+
+``reject_first_person`` looked like the right switch and is a no-op here: it means "the
+buyer is quoting their own earlier words", so it needs a self-reporting verb (*"I said"*,
+*"I told"*) and never fires on *"I am an idiot"*. Removing it changed no behaviour at all,
+which is how the mutation sweep found it.
+
+What actually separates the readings is which pronoun the insult sits next to.
+*"I think **you** are an idiot"* is three tokens apart; *"**You** know I am an idiot with
+computers"* is five, because the insult belongs to the *I*. The gap is a distance rather
+than a count of the words between, so three is the copula-plus-article case (*"you are an
+idiot"*) and is exactly the boundary: it accepts every directed insult measured across the
+four languages - where the pronoun and the adjective are adjacent or separated only by a
+copula - and rejects the self-deprecating ones that happen to carry a second-person token,
+including the Hindi *"आप जानते हैं मैं बेवकूफ हूँ"* at four.
+"""
 _REPORTED_DIRECTIVE = frozenset(
     {"told", "instructed", "given", "programmed", "trained", "configured", "taught"}
 )
@@ -1030,6 +1140,41 @@ that demands a word boundary after the unit cannot match it. Hindi inflects the 
 Declared here, above the evidence tables, because the lead classifier reads the same stems.
 A deadline that fills the `timeline` slot must also count as timeline evidence, or a
 qualified buyer is classified as needing review and refused every action.
+"""
+
+_REQUIREMENT_WEIGHT: Final[float] = 0.15
+"""What a buyer is worth once they have told you what they want built.
+
+Measured, not chosen. Twelve realistic call shapes were driven through the engine and the
+real :class:`~pitchbot.actions.policy.ActionPolicy`: four of the ten that should have been
+actionable were refused every action, and all four failed the same way - a buyer who named
+their vertical and listed exact features produced **no evidence of any kind**, so
+``_classify`` returned ``REVIEW_NEEDED`` and the policy blocked with
+``CLASSIFICATION_REVIEW``. Money, deadline, decision and next-step were scored; the one
+thing the buyer had definitely said was not.
+
+ADR-0003 has the policy validate "classification evidence" and fail closed on unknown
+state, and the threat model's classification harm is *accent or frustration read as
+purchase intent*. A specific feature request is the opposite of both: it is attributable,
+evidence-grounded and carries a source span. Widening here is what that ADR asks for; the
+``REVIEW_NEEDED`` state itself is untouched and still means "nothing was said".
+
+The value is the lowest positive weight in the table, below ``next-step`` at 0.20, because
+saying what you want is weaker intent than asking for a demo. It is deliberately not 0.10:
+the base score is 0.35 and the WARM line is 0.45, and ``0.35 + 0.10`` is
+``0.44999999999999996`` in binary floating point - a tenth would have classified COLD and
+looked like a design decision rather than the rounding accident it is.
+
+Emitted from the *recorded fact* rather than from a phrase list of its own. That is what
+keeps it honest: the fact only exists once ``_requesting_clauses`` has already discarded
+refusals, third parties and descriptions of today, so *"we do not want online payments"*
+cannot warm a lead. A parallel phrase list here would have re-introduced exactly the false
+positives that guard was built to remove - ``_extract_evidence`` matches whole turns and
+has no clause scoping. It also means restating the same requirement adds nothing, since an
+unchanged value records no new fact.
+
+Naming a *vertical* deliberately does not count. "We are a pharmacy distributor" is context
+about who is speaking, not a statement of what they want bought.
 """
 
 _POSITIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
@@ -1317,7 +1462,9 @@ def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
         for tokens, seen in zip(variants, present, strict=True)
     ):
         signals.append(SafetySignal.OPT_OUT)
-    if _contains_any_form(variants, present, compact, _ABUSE_INDEX, _ABUSE_COMPACT):
+    if _contains_any_form(
+        variants, present, compact, _ABUSE_INDEX, _ABUSE_COMPACT
+    ) or _matches_any_template(variants, present, _ABUSE_TEMPLATES):
         signals.append(SafetySignal.ABUSE)
     if _contains_any_form(
         variants, present, compact, _INTERNAL_INFO_INDEX, _INTERNAL_INFO_COMPACT
@@ -1445,7 +1592,12 @@ def extract_business_signals(
                 )
             )
 
-    evidence = _extract_evidence(state.lead_id, normalized, source_span_id)
+    evidence = _extract_evidence(
+        state.lead_id,
+        text,
+        source_span_id,
+        requirement_recorded=any(fact.key == "requested_features" for fact in facts),
+    )
     return ExtractionResult(tuple(facts), tuple(revisions), evidence)
 
 
@@ -1504,6 +1656,54 @@ adverbs cover both, and they cannot over-suppress on their own because a clause 
 kept when it asks for something.
 """
 
+_PAST_STATE_CUES: Final[tuple[str, ...]] = (
+    "stopped using",
+    "used to",
+    "no longer",
+    "last year",
+    "last month",
+    "we dropped",
+    "we moved off",
+    "karte the",
+    "band kar diya",
+    "बंद कर दिया",
+    "था",
+    "थे",
+    "थी",
+    "ఆపేశాము",
+    "వాడేవాళ్ళం",
+)
+"""Words that mark a clause as a description of what the buyer *used* to do.
+
+Found by the same negative sweep that validated the requirement evidence: *"We stopped
+using WhatsApp for orders"* recorded ``whatsapp`` as a request and warmed the lead to the
+point of approving a deck. Present state was guarded; past state was not, and the two fail
+identically - the buyer named the feature to explain their history, not to order it.
+
+The Hindi and romanised entries are the past **auxiliary**, not a phrase. They were first
+written as ``पहले करते थे`` and ``pehle use karte the``, and measurement showed both were
+dead on arrival: *"हम पहले ऑनलाइन कैटलॉग रखते थे"* uses a different verb, and
+*"Hum pehle online catalogue use karte the"* puts two words between ``pehle`` and the rest,
+so neither contiguous phrase ever matched. ``था``/``थे``/``थी`` is what actually marks the
+past in Hindi and cannot collide with anything, and ``karte the`` is the romanised form
+that does. Bare romanised ``the`` is deliberately absent: Hinglish turns are full of
+English words and it would suppress almost every clause.
+
+Checked in the same conditional branch as :data:`_PRESENT_STATE_CUES` rather than the
+unconditional refusal branch, and for the same reason: *"we stopped using WhatsApp and we
+want it properly on the site"* is one clause and is a request. A cue about the past only
+disqualifies a clause that asks for nothing.
+
+One measured loss, accepted: *"We used to have a catalogue **but** now we need a proper
+one online"* drops ``catalog``. ``but`` is a clause boundary, the feature word is in the
+discarded half, and the half that asks says only "a proper one". Resolving that pronoun is
+anaphora, which this layer does not do and which :data:`_PRESENT_STATE_CUES` already fails
+the same way. It is the safe direction - a missed feature makes the agent ask again, a
+false one puts something the buyer never asked for into a deck - and the next turn recovers
+it. Twelve sentences that name a feature without asking for it are all clean; do not narrow
+these cues to buy back that one without re-measuring both directions.
+"""
+
 _REFUSAL_CUES: Final[tuple[str, ...]] = (
     "don't want",
     "dont want",
@@ -1512,6 +1712,8 @@ _REFUSAL_CUES: Final[tuple[str, ...]] = (
     "no need",
     "not interested",
     "not looking for",
+    "not ready",
+    "no budget",
     "we don't need",
     "we do not need",
     "instead of",
@@ -1542,6 +1744,8 @@ _THIRD_PARTY_CUES: Final[tuple[str, ...]] = (
     "my nephew",
     "my cousin",
     "my friend",
+    "a friend",
+    "a relative",
     "my brother",
     "my son",
     "our competitor",
@@ -1600,10 +1804,10 @@ def _requesting_clauses(text: str) -> tuple[str, ...]:
     WhatsApp, we want a proper catalog on the site"* has to lose ``whatsapp`` and keep
     ``catalog``, and any rule that judges the whole turn must get one of them wrong.
 
-    Three ways a clause can name a feature without asking for it, in the order they were
-    found: it describes today, it refuses the thing, or it is about somebody else. Only the
-    first was guarded, and only in English - measured over fifteen such sentences, ten were
-    recorded as requests.
+    Four ways a clause can name a feature without asking for it, in the order they were
+    found: it describes today, it refuses the thing, it is about somebody else, or it
+    describes what the buyer used to do. Only the first was guarded, and only in English -
+    measured over fifteen such sentences, ten were recorded as requests.
     """
 
     clauses = []
@@ -1616,17 +1820,101 @@ def _requesting_clauses(text: str) -> tuple[str, ...]:
         # needs a catalogue" contains "need" - in both the buyer is still not ordering.
         if _contains_any(clause, _REFUSAL_CUES) or _contains_any(clause, _THIRD_PARTY_CUES):
             continue
-        if _contains_any(clause, _PRESENT_STATE_CUES) and not _contains_any(clause, _REQUEST_CUES):
+        # Describing today or describing the past both name a feature without ordering it.
+        # Either yields only when the same clause also asks for something.
+        if (
+            _contains_any(clause, _PRESENT_STATE_CUES) or _contains_any(clause, _PAST_STATE_CUES)
+        ) and not _contains_any(clause, _REQUEST_CUES):
+            continue
+        clauses.append(clause)
+    return tuple(clauses)
+
+
+def _committing_clauses(text: str) -> tuple[str, ...]:
+    """The clauses of a turn that could be the buyer committing to something.
+
+    Evidence matching used to read the whole turn, and features were the only thing that
+    was clause-scoped. Measured over twelve sentences that contain an evidence phrase while
+    committing nothing, **eleven scored a commitment** and every one of them warmed the lead
+    far enough to be approved for a deck: *"We have no budget for this"* scored ``budget``,
+    *"We are not ready to start yet"* scored ``decision``, *"I do not want a demo right
+    now"* scored ``next-step``. A negation read as the thing it negates - the same failure
+    that was fixed for feature requests, one layer down and with more at stake, because
+    this is what the authorization policy consults.
+
+    Three disqualifiers, and they are **unconditional** here where the request version makes
+    two of them conditional. There is no equivalent of a request cue to rescue a clause: a
+    refusal, a third party or a past tense simply is not this buyer committing now.
+
+    Present state is deliberately *not* a disqualifier. *"Right now our budget is 2 lakh"*
+    describes today and is still a budget; that cue exists to stop a feature word being read
+    as an order, which is not the failure here.
+
+    Twelve such sentences went from one clean to nine, with all ten real commitments kept.
+    **The three that remain are one class and are not reachable from a phrase list:** *"Our
+    stock is running low this month"*, *"We had a terrible month, sales are down"* and *"My
+    accountant is away this week"* all score ``timeline``, because the evidence list carries
+    the bare unit stems (`month`, `week`) so that *"in 3 months"* counts. The time word is
+    real; it is simply attached to something other than the project, and telling those apart
+    needs the verb, not another cue. Removing the stems would lose *"in 3 months"*, which is
+    the more expensive mistake. Left measured and open rather than papered over.
+    """
+
+    clauses = []
+    for raw in _CLAUSE_BOUNDARY.split(text):
+        clause = normalize_text(raw)
+        if not clause:
+            continue
+        if (
+            _contains_any(clause, _REFUSAL_CUES)
+            or _contains_any(clause, _THIRD_PARTY_CUES)
+            or _contains_any(clause, _PAST_STATE_CUES)
+        ):
             continue
         clauses.append(clause)
     return tuple(clauses)
 
 
 def _extract_evidence(
-    lead_id: UUID, normalized: str, source_span_id: UUID
+    lead_id: UUID,
+    text: str,
+    source_span_id: UUID,
+    *,
+    requirement_recorded: bool = False,
 ) -> tuple[IntentEvidence, ...]:
     evidence: list[IntentEvidence] = []
-    for dimension, weight, phrases in (*_POSITIVE_EVIDENCE, *_NEGATIVE_EVIDENCE):
+    if requirement_recorded:
+        evidence.append(
+            IntentEvidence(
+                lead_id=lead_id,
+                dimension="requirement",
+                weight=_REQUIREMENT_WEIGHT,
+                reason="Buyer explicitly asked for a feature the catalogue offers.",
+                source_span_ids=(source_span_id,),
+            )
+        )
+    clauses = _committing_clauses(text)
+    normalized = normalize_text(text)
+    for dimension, weight, phrases in _POSITIVE_EVIDENCE:
+        if any(_contains_any(clause, phrases) for clause in clauses):
+            evidence.append(
+                IntentEvidence(
+                    lead_id=lead_id,
+                    dimension=dimension,
+                    weight=weight,
+                    reason=f"Buyer explicitly expressed {dimension} information.",
+                    source_span_ids=(source_span_id,),
+                )
+            )
+    # Counter-evidence reads the whole turn, and must. `_REFUSAL_CUES` and
+    # `_NEGATIVE_EVIDENCE` describe the same sentences - "not interested", "do not need" -
+    # so running negative evidence through a guard that discards refusal clauses would
+    # delete every rejection the product can detect. A buyer saying no would produce no
+    # evidence at all and classify REVIEW_NEEDED rather than COLD: the exact mutation that
+    # survived the suite before `test_a_buyer_who_says_no_is_cold_and_not_merely_
+    # unclassified` existed. The asymmetry is the point - the guard asks "is this buyer
+    # committing?", and a refusal is not a commitment but is still information.
+    for dimension, weight, phrases in _NEGATIVE_EVIDENCE:
         if _contains_any(normalized, phrases):
             evidence.append(
                 IntentEvidence(

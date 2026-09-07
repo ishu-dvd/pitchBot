@@ -2727,3 +2727,153 @@ defects, and measuring the extraction it feeds found the largest gap in the prod
   number survived the whole suite - a simulator wired to the live client would have started
   messaging strangers with CI green. Now asserted through the destination gate over 25 lead
   ids, because the property is "no real handset can be reached at this".
+
+## Authorization evidence: the buyer said what they wanted and was sent for review
+
+The gap was deferred three times and was the top-ranked candidate each time. Measured end
+to end - twelve realistic call shapes driven through the engine and the real
+`ActionPolicy`, because the failure is invisible from either side alone.
+
+- **Four of the ten calls that should have been actionable were refused every action**, all
+  failing identically. `_POSITIVE_EVIDENCE` scored budget, timeline, decision and
+  next-step; a buyer who named their vertical and listed exact features produced `ev=[]`,
+  classified `REVIEW_NEEDED`, and was blocked with `CLASSIFICATION_REVIEW`.
+- **The evidence is emitted from the recorded fact, not from a phrase list.** That is the
+  safety argument. The fact only exists after `_requesting_clauses` has discarded refusals,
+  third parties and descriptions of today, so those guards are inherited rather than
+  rewritten - a phrase list in `_extract_evidence` matches whole turns with no clause
+  scoping and would have warmed every sentence in the negative sweep.
+- **Weight 0.15, and deliberately not 0.10.** The base score is 0.35 and the WARM line is
+  0.45, and `0.35 + 0.10` is `0.44999999999999996`. A tenth would have classified COLD and
+  looked like a decision.
+- **Two false positives and one vocabulary gap fell out of the same sweep.** "A friend
+  asked me about online payments" had no third-party cue; "We stopped using WhatsApp for
+  orders" had no past-state guard at all; "stock tracking" was unreachable by inflecting
+  `stock track`, because derivational endings are dropped so `booking` cannot read as the
+  *books* business. Measured over six gerund phrasings it was the only miss.
+- **The guessed native-script cues were dead on arrival.** `पहले करते थे` and
+  `pehle use karte the` were written from intuition in the same edit and matched nothing:
+  real sentences use a different verb, or put two words in between. Replaced with the past
+  auxiliary `था`/`थे`/`थी` and `karte the`. Bare romanised `the` is excluded - Hinglish
+  turns are full of English words and it would suppress almost every clause.
+- **Result:** qualified calls refused 4/10 -> 0/10; feature phrasings 5/6 -> 6/6; sentences
+  that name a feature without asking for one 8/10 -> 12/12, and 4/4 across languages. No
+  regression on the existing matrix (20/20) or natural phrasings (10/11).
+- **One loss accepted and documented.** "We used to have a catalogue **but** now we need a
+  proper one online" drops `catalog`: `but` is a clause boundary, the feature word is in
+  the discarded half, and "a proper one" is anaphora this layer does not resolve. The safe
+  direction, and the next turn recovers it.
+
+### The mutation sweep that actually taught something
+
+Batch 1 targeted the cues and scored 23/23 - a confirming sweep, since every case had just
+been pinned by a parametrised test. Batch 2 targeted the classifier this change now
+interacts with and scored **4/12**.
+
+- **Deleting `_NEGATIVE_EVIDENCE` entirely survived the suite.** "We are not interested"
+  then yields no evidence rather than counter-evidence. Both COLD and `REVIEW_NEEDED` are
+  blocked, so the action outcome was identical and nothing noticed - but one means the
+  buyer told us and the other means nobody knows, and only one should survive a later
+  change that makes review-needed leads actionable.
+- **Lowering the HOT line, raising the base score, zeroing confidence's dependence on the
+  evidence count, and removing the fact dedup all survived.** None of the classifier's
+  thresholds were pinned by anything.
+- **My own restatement test could not have caught its mutation.** It asserted on
+  `snapshot.facts`, which is `facts_by_key.values()` - a dict keyed by fact key, incapable
+  of holding a duplicate whatever the extractor does. The rephrase is only visible in the
+  per-turn result. Same anti-pattern as asserting against the table the code reads.
+- **Two survivors are equivalent mutants and are documented as such** rather than pinned by
+  a contrived test: evidence is deduped by dimension before classification, which makes the
+  HOT dimension count unreachable under the current weights, and a raw score at or below
+  the cold floor already falls through to the same COLD. Both now carry the proof in a
+  comment so a future reader does not delete them as dead.
+- Batch 2 closed to **10/12**; tests 1,536 -> 1,568.
+
+## Evidence was never clause-scoped, and it is the layer the policy reads
+
+Found while measuring the authorization gate: "Our stock is running low this month"
+classified WARM and was approved for a deck. `probe_evidence_scoping.py` measured whether
+that was one unlucky sentence or a class.
+
+- **It was a class: 1 of 12 clean.** Eleven sentences that contain an evidence phrase while
+  committing nothing scored a commitment, and every one warmed the lead far enough to be
+  approved for a deck. "We have no budget for this" scored `budget`. "We are not ready to
+  start yet" scored `decision`. "I do not want a demo right now" scored `next-step`.
+- **The same defect already fixed one layer up.** Feature extraction runs through
+  `_requesting_clauses`; `_extract_evidence` matched the whole normalised turn. Negations
+  scored the thing they negated - and this is the layer `ActionPolicy` consults.
+- **Positive evidence is now clause-scoped; counter-evidence deliberately is not.** That
+  asymmetry is the load-bearing part. `_REFUSAL_CUES` and `_NEGATIVE_EVIDENCE` describe the
+  same sentences, so running rejection through the commitment guard deletes every refusal
+  the product can detect - a buyer who said no becomes REVIEW_NEEDED rather than COLD, and
+  since the policy blocks both, nothing downstream notices. Pinned by its own test.
+- **The guard's disqualifiers are unconditional here** where the request version makes two
+  of them conditional: there is no request cue that can rescue a clause, because a refusal,
+  a third party or a past tense is not this buyer committing now. Present state is
+  deliberately excluded - "Right now our budget is 2 lakh" is still a budget.
+- **Result: 1/12 -> 9/12 clean, 10/10 real commitments kept.** Mutation 12/12.
+- **Three remain, and they are one class, left measured and open.** "Our stock is running
+  low this month", "We had a terrible month" and "My accountant is away this week" all
+  score `timeline`, because the evidence list carries the bare unit stems (`month`, `week`)
+  so that "in 3 months" counts. The time word is real; it is attached to something other
+  than the project. Telling those apart needs the verb, not another cue, and dropping the
+  stems would lose the deadline that matters. Documented in `_committing_clauses`.
+
+### Mutation batch 3
+
+12 cases on the new guard, initially 10/12. Both survivors were real:
+
+- **Adding present state to the commitment guard survived**, meaning my own docstring's
+  claim that it is deliberately excluded was untested. Three cases now pin it.
+- **`last month` was never exercised** - a speculative addition beside the measured
+  `last year`. Measured rather than removed: "We redesigned the site last month" scores
+  `timeline` without it. Now pinned, and the batch closes at 12/12.
+
+Tests 1,568 -> 1,592.
+
+## Abuse: seven of twenty-four, and self-deprecation counted as an insult
+
+`_ABUSE_TERMS` was eleven entries - four English, two Devanagari, two romanised, three
+Telugu. Exactly the shape the opt-out list had before it was measured. Nothing had ever
+driven it as a concept-by-language matrix.
+
+- **7/24 heard.** Only "direct insult" and "told to be quiet" worked at all, and both had
+  holes: `चुप रह` was Devanagari-only so romanised "chup raho" missed, and `మూర్ఖుడు` never
+  matched the ordinary second-person `మూర్ఖుడివి`.
+- **The negative direction cost a call, not a label.** The engine redirects on the first
+  abuse signal and STOPS the conversation on the second. "I feel stupid asking this", "we
+  made a stupid mistake with our old site" and "हमने बेवकूफी की थी" were all abuse - a
+  non-technical buyer apologising before their most useful question was two sentences from
+  being hung up on.
+- **The four languages disagreed, and three got the harsher treatment.** `bakwas` was a bare
+  abuse term and `rubbish` was not, so "our old catalogue was rubbish" was flagged in Hindi,
+  Telugu and Hinglish and clean in English.
+- **Fix:** words that insult a person but criticise a thing now require a second-person
+  target via a template. `useless`, `rubbish`, `stupid`, `बेकार`, `बकवास`, `बेवकूफ`,
+  `చెత్త`, `మూర్ఖ` moved out of the bare list. Directed imperatives ("get lost",
+  "दफा हो", "పోరా", "bakwas mat") stay bare because they are directed by construction.
+- **Telugu was absent from `_SECOND_PERSON` entirely**, so every template built on it had
+  been English-and-Hindi-only.
+- **Result:** 7/24 -> 24/24 heard, 14/15 -> 19/19 clean, 8/8 identical across languages.
+
+### The switch that looked right and did nothing
+
+`reject_first_person=True` was the obvious way to stop self-deprecation. It is a no-op here:
+it means "the buyer is quoting their own earlier words" and requires a self-reporting verb
+(`I said`, `I told`), so it never fires on "I am an idiot". Removing it changed no behaviour,
+which is exactly how the mutation sweep surfaced it.
+
+What decides the reading is **which pronoun the insult sits beside**:
+
+| turn | distance | verdict |
+|---|---|---|
+| "I think **you** are an **idiot**" | 3 | abuse |
+| "**You** know I am an **idiot** with computers" | 5 | clean |
+| "आप जानते हैं मैं बेवकूफ हूँ" | 4 | clean |
+
+`max_gaps` is a distance, not a count of words between, so 3 is the copula-plus-article
+case and is exactly the boundary. `ordered=True` matters independently: unordered,
+"मैं बेवकूफ हूँ आप जानते हैं" is flagged while its English equivalents are not - the same
+cross-language asymmetry, reintroduced by one missing keyword.
+
+Mutation batch 4: 20/20. Tests 1,592 -> 1,647.

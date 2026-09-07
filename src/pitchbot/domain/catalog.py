@@ -129,6 +129,12 @@ FEATURES: Final[Mapping[str, tuple[str, ...]]] = {
         "track stock",
         "track our stock",
         "stock track",
+        # Not reachable by inflecting "stock track": `_VOCABULARY_SUFFIXES` drops the
+        # derivational endings on purpose, so that `booking` cannot read as the *books*
+        # business. That guard is right and stays - measured over six gerund phrasings this
+        # was the only miss, because "product listing", "payment processing" and "WhatsApp
+        # ordering" are all already listed in the form people say them.
+        "stock tracking",
         "manage stock",
         "in stock",
         "out of stock",
