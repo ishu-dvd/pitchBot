@@ -792,3 +792,139 @@ def test_managing_your_own_catalogue_is_not_asking_to_be_left_alone(
     """
 
     assert detect_safety_signals(text) == (), (language, text)
+
+
+def _features_heard(text: str, language: LanguageCode) -> set[str]:
+    """What a single buyer turn causes the product to record as a requested feature."""
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=language)
+    for fact in result.facts:
+        if fact.key == "requested_features":
+            return set(fact.value.split(","))
+    return set()
+
+
+@pytest.mark.parametrize(
+    ("feature", "language", "text"),
+    [
+        ("catalog", LanguageCode.ENGLISH, "We need an online catalogue of our products"),
+        ("catalog", LanguageCode.HINDI, "हमें अपने उत्पादों का ऑनलाइन कैटलॉग चाहिए"),
+        ("catalog", LanguageCode.TELUGU, "మాకు ఉత్పత్తుల ఆన్‌లైన్ కేటలాగ్ కావాలి"),
+        ("catalog", LanguageCode.MIXED, "Humein products ka online catalogue chahiye"),
+        ("online-payments", LanguageCode.ENGLISH, "I want customers to pay online with UPI"),
+        ("online-payments", LanguageCode.HINDI, "ग्राहक ऑनलाइन भुगतान कर सकें"),
+        ("online-payments", LanguageCode.TELUGU, "కస్టమర్లు ఆన్‌లైన్ చెల్లింపు చేయాలి"),
+        ("online-payments", LanguageCode.MIXED, "Customers online payment kar sakein"),
+        ("inventory", LanguageCode.ENGLISH, "We need to track our stock levels"),
+        ("inventory", LanguageCode.HINDI, "हमें अपना स्टॉक ट्रैक करना है"),
+        ("inventory", LanguageCode.TELUGU, "మా స్టాక్ ట్రాక్ చేయాలి"),
+        ("inventory", LanguageCode.MIXED, "Humein stock track karna hai"),
+        ("whatsapp", LanguageCode.ENGLISH, "Orders should come to us on WhatsApp"),
+        ("whatsapp", LanguageCode.HINDI, "ऑर्डर व्हाट्सऐप पर आने चाहिए"),
+        ("whatsapp", LanguageCode.TELUGU, "ఆర్డర్లు వాట్సాప్‌లో రావాలి"),
+        ("whatsapp", LanguageCode.MIXED, "Orders WhatsApp par aane chahiye"),
+        ("multilingual", LanguageCode.ENGLISH, "The site should be in Hindi and English"),
+        ("multilingual", LanguageCode.HINDI, "साइट हिंदी और अंग्रेजी दोनों में हो"),
+        ("multilingual", LanguageCode.TELUGU, "సైట్ తెలుగు మరియు ఇంగ్లీష్ రెండింటిలో ఉండాలి"),
+        ("multilingual", LanguageCode.MIXED, "Site Hindi aur English dono mein honi chahiye"),
+    ],
+)
+def test_every_feature_can_be_asked_for_in_every_language(
+    feature: str, language: LanguageCode, text: str
+) -> None:
+    """Each capability, requested the ordinary way, in each language the product sells in.
+
+    Written as a concept-by-language matrix because a flat list of phrases hides exactly
+    this: measured this way, `inventory` was undetectable in **all four** languages - its
+    only non-obvious phrase was ``stock management``, which no shopkeeper says - and
+    `multilingual` was unreachable in Telugu and Hinglish. Fourteen of twenty cells passed,
+    and every test in the suite passed with them.
+    """
+
+    assert feature in _features_heard(text, language)
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "must_not_hear", "why"),
+    [
+        ("Right now everything is on WhatsApp", LanguageCode.ENGLISH, "whatsapp", "present state"),
+        ("We already have a printed catalogue", LanguageCode.ENGLISH, "catalog", "already has it"),
+        ("Our stock is running low this month", LanguageCode.ENGLISH, "inventory", "business fact"),
+        ("अभी हम नकद भुगतान लेते हैं", LanguageCode.HINDI, "online-payments", "present, Hindi"),
+        ("ఇప్పుడు అంతా వాట్సాప్‌లో ఉంది", LanguageCode.TELUGU, "whatsapp", "present, Telugu"),
+        (
+            "ఇప్పుడు మేము నగదు చెల్లింపు తీసుకుంటాం",
+            LanguageCode.TELUGU,
+            "online-payments",
+            "present, Telugu",
+        ),
+        (
+            "We do not want online payments, cash only",
+            LanguageCode.ENGLISH,
+            "online-payments",
+            "refused outright",
+        ),
+        (
+            "No need for a catalogue, we sell one product",
+            LanguageCode.ENGLISH,
+            "catalog",
+            "refused outright",
+        ),
+        (
+            "My nephew built a site in Hindi and English for his shop",
+            LanguageCode.ENGLISH,
+            "multilingual",
+            "about a third party",
+        ),
+        (
+            "Our competitor has an inventory system",
+            LanguageCode.ENGLISH,
+            "inventory",
+            "about a third party",
+        ),
+        (
+            "I saw a catalogue on their website",
+            LanguageCode.ENGLISH,
+            "catalog",
+            "reported observation",
+        ),
+    ],
+)
+def test_naming_a_feature_is_not_the_same_as_asking_for_one(
+    text: str, language: LanguageCode, must_not_hear: str, why: str
+) -> None:
+    """Three ways to say a feature word without ordering it, in four languages.
+
+    This direction was worse than the missing vocabulary and far more damaging. *"We do not
+    want online payments, cash only"* was recorded as a request for online payments, so the
+    deck proposed to the buyer the exact thing they had just refused - a fabricated
+    requirement in their own words. Ten of these fifteen sentences were read as requests.
+
+    Only the present-state guard existed, and only in English: its native-script entries
+    were the compounds ``अभी सब`` and ``ఇప్పటివరకు``, so the ordinary *"अभी हम..."* and
+    *"ఇప్పుడు..."* matched nothing and two of four languages were unguarded.
+    """
+
+    assert must_not_hear not in _features_heard(text, language), why
+
+
+def test_asking_to_be_spoken_to_in_a_language_is_not_a_website_requirement() -> None:
+    """The one gap left open on purpose, with the reason it stays open.
+
+    *"Can it be in Telugu as well?"* is a genuine multilingual request that goes unheard.
+    Catching it needs ``in telugu`` / ``in hindi`` as feature phrases, and measured against
+    ordinary language-switch turns those fire on four of five - so a buyer asking to be
+    *spoken to* in Hindi would be recorded as ordering a bilingual website. One recall
+    point is not worth four fabricated requirements, and this test pins the trade rather
+    than leaving it as a comment someone deletes.
+    """
+
+    for turn in (
+        "Can we talk in Hindi?",
+        "Please continue in Telugu",
+        "I am more comfortable in Hindi",
+        "Explain it in Telugu please",
+    ):
+        assert "multilingual" not in _features_heard(turn, LanguageCode.ENGLISH), turn

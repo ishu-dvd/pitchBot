@@ -1474,13 +1474,17 @@ _PRESENT_STATE_CUES: Final[tuple[str, ...]] = (
     "we take orders",
     "everything is on",
     "already on",
+    "already",
+    "pehle se",
     "abhi sab",
     "abhi tak",
     "filhaal",
-    "अभी सब",
-    "अभी तक",
+    "अभी",
+    "पहले से",
     "फिलहाल",
     "फ़िलहाल",
+    "ఇప్పుడు",
+    "ఇప్పటికే",
     "ఇప్పటివరకు",
     "ప్రస్తుతం",
 )
@@ -1491,6 +1495,79 @@ naming a **pain**, not ordering a WhatsApp integration - but ``whatsapp`` is a f
 keyword, so the shipped extractor recorded it as a request and the agent answered "noted on
 what the site needs to do". Measured on a labelled corpus, five of eleven turns were read
 this way.
+
+The native-script entries used to be the compounds ``अभी सब`` / ``अभी तक`` and
+``ఇప్పటివరకు`` / ``ప్రస్తుతం``, which is narrower than it looks: *"अभी हम नकद भुगतान लेते हैं"*
+and *"ఇప్పుడు అంతా వాట్సాప్‌లో ఉంది"* are the ordinary ways to say this and matched none of
+them, so the guard was effectively English-only in two of the four languages. The bare
+adverbs cover both, and they cannot over-suppress on their own because a clause is still
+kept when it asks for something.
+"""
+
+_REFUSAL_CUES: Final[tuple[str, ...]] = (
+    "don't want",
+    "dont want",
+    "do not want",
+    "not want",
+    "no need",
+    "not interested",
+    "not looking for",
+    "we don't need",
+    "we do not need",
+    "instead of",
+    "nahi chahiye",
+    "nahin chahiye",
+    "zaroorat nahi",
+    "zarurat nahi",
+    "नहीं चाहिए",
+    "नही चाहिए",
+    "जरूरत नहीं",
+    "ज़रूरत नहीं",
+    "వద్దు",
+    "అవసరం లేదు",
+    "అక్కర్లేదు",
+)
+"""Words that mean the buyer named the feature in order to turn it down.
+
+Nothing guarded this before, so *"We do not want online payments, cash only"* was recorded
+as a request for online payments - the deck then proposed to the buyer the exact thing they
+had just refused. That is the worst failure this extractor can have: not a missing feature,
+but a fabricated one, in the buyer's own words.
+
+Judged per clause, so *"I don't want a catalogue, I want a product page"* still keeps the
+second half.
+"""
+
+_THIRD_PARTY_CUES: Final[tuple[str, ...]] = (
+    "my nephew",
+    "my cousin",
+    "my friend",
+    "my brother",
+    "my son",
+    "our competitor",
+    "competitor",
+    "another company",
+    "someone else",
+    "i saw",
+    "we saw",
+    "i have seen",
+    "their website",
+    "their site",
+    "mere dost",
+    "mere bhai",
+    "मेरे दोस्त",
+    "मेरे भाई",
+    "प्रतियोगी",
+    "మా పోటీదారు",
+    "నా స్నేహితుడు",
+)
+"""Words that mean the sentence is about somebody who is not the buyer.
+
+*"My nephew built a site in Hindi and English for his shop"* and *"Our competitor has an
+inventory system"* both name a feature and neither asks for one. Kept deliberately narrow -
+subject markers and reported observation only. In particular ``they have`` is **not** here:
+*"they have to be able to pay online"* is a request, and a cue that cannot tell those apart
+would cost more than it saves.
 """
 
 _REQUEST_CUES: Final[tuple[str, ...]] = (
@@ -1522,12 +1599,22 @@ def _requesting_clauses(text: str) -> tuple[str, ...]:
     Clause-scoped rather than turn-scoped on purpose: *"Right now everything is on
     WhatsApp, we want a proper catalog on the site"* has to lose ``whatsapp`` and keep
     ``catalog``, and any rule that judges the whole turn must get one of them wrong.
+
+    Three ways a clause can name a feature without asking for it, in the order they were
+    found: it describes today, it refuses the thing, or it is about somebody else. Only the
+    first was guarded, and only in English - measured over fifteen such sentences, ten were
+    recorded as requests.
     """
 
     clauses = []
     for raw in _CLAUSE_BOUNDARY.split(text):
         clause = normalize_text(raw)
         if not clause:
+            continue
+        # A refusal or a third party is disqualifying on its own. A request cue cannot
+        # rescue either: "we do not want online payments" contains "want", and "my nephew
+        # needs a catalogue" contains "need" - in both the buyer is still not ordering.
+        if _contains_any(clause, _REFUSAL_CUES) or _contains_any(clause, _THIRD_PARTY_CUES):
             continue
         if _contains_any(clause, _PRESENT_STATE_CUES) and not _contains_any(clause, _REQUEST_CUES):
             continue
