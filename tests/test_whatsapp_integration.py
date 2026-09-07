@@ -556,3 +556,61 @@ def test_the_india_rate_card_is_dated_because_meta_changes_it_quarterly() -> Non
     assert india_rate(MessageCategory.UTILITY) == 0.1150
     assert RATES_CURRENCY == "INR"
     assert RATES_READ_ON and RATES_EFFECTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("omitted", ["messaging_product", "recipient_type", "to", "type"])
+async def test_the_fake_rejects_a_request_the_real_api_would_reject(omitted: str) -> None:
+    """The fake's whole value is that it enforces the published contract.
+
+    Every other test here asserts the *client* satisfies the contract. Without this, the
+    fake could quietly stop requiring a field and nothing would notice - and then the fake
+    would agree with whatever the client sent, which is precisely the failure a fake exists
+    to prevent. Found by mutation testing: removing `recipient_type` from the fake's
+    required set left every other test passing.
+    """
+
+    fake = FakeGraphApi()
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": NUMBER,
+        "type": "text",
+        "text": {"body": "hello"},
+    }
+    payload.pop(omitted)
+
+    transport = httpx.ASGITransport(app=fake.app())
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await client.post(
+            f"http://fake.invalid/{fake.api_version}/{fake.phone_number_id}/messages",
+            headers={"Authorization": f"Bearer {fake.expected_token}"},
+            json=payload,
+        )
+
+    assert response.status_code == 400, omitted
+    assert omitted in response.json()["error"]["message"], omitted
+    assert fake.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_fake_rejects_an_invalid_recipient_type() -> None:
+    """ "individual" or "group" - the spec allows nothing else."""
+
+    fake = FakeGraphApi()
+    transport = httpx.ASGITransport(app=fake.app())
+    async with httpx.AsyncClient(transport=transport) as client:
+        response = await client.post(
+            f"http://fake.invalid/{fake.api_version}/{fake.phone_number_id}/messages",
+            headers={"Authorization": f"Bearer {fake.expected_token}"},
+            json={
+                "messaging_product": "whatsapp",
+                "recipient_type": "broadcast",
+                "to": NUMBER,
+                "type": "text",
+                "text": {"body": "hello"},
+            },
+        )
+
+    assert response.status_code == 400
+    assert fake.sent == []
