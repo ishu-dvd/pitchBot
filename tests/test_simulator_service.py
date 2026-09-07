@@ -1552,3 +1552,89 @@ async def test_a_deck_requested_mid_call_carries_the_facts_of_that_call() -> Non
     assert "150000" in rendered
     assert "3 months" in rendered
     assert "Sample Business" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "turns", "figure"),
+    [
+        (
+            LanguageCode.ENGLISH,
+            (
+                "We run a clothing store and want to sell online.",
+                "We need a catalog and online payment.",
+                "We can spend up to ten lakh and want it live in 3 months.",
+            ),
+            "ten lakh",
+        ),
+        (
+            LanguageCode.HINDI,
+            (
+                "हम कपड़े की दुकान चलाते हैं और ऑनलाइन बेचना चाहते हैं।",
+                "हमें कैटलॉग और ऑनलाइन भुगतान चाहिए।",
+                "हमारा बजट दो लाख है और तीन महीने में चालू करना है।",
+            ),
+            "दो लाख",
+        ),
+        (
+            LanguageCode.TELUGU,
+            (
+                "మేము దుస్తుల దుకాణం నడుపుతున్నాము, ఆన్‌లైన్‌లో అమ్మాలని ఉంది.",
+                "మాకు కేటలాగ్ మరియు ఆన్‌లైన్ చెల్లింపు కావాలి.",
+                "మా బడ్జెట్ రెండు లక్షలు, మూడు నెలల్లో సిద్ధం కావాలి.",
+            ),
+            "రెండు లక్షలు",
+        ),
+    ],
+)
+async def test_a_qualified_buyer_receives_a_deck_carrying_what_they_said(
+    language: LanguageCode, turns: tuple[str, ...], figure: str
+) -> None:
+    """The whole chain, because every layer of it passed its own tests while broken.
+
+    Extraction, classification, authorization, minimisation and rendering each have to
+    agree about what a stated budget looks like, and each held its own copy of the
+    vocabulary. A buyer who stated a budget without the word "budget" produced no evidence,
+    classified REVIEW_NEEDED and was refused the deck outright; a buyer who stated one in
+    Telugu had it dropped by the minimiser; a buyer who stated one in Hindi had it
+    truncated at the first vowel sign.
+
+    Asserting the buyer's own figure appears on the slide is the only check that spans all
+    five, which is why it is here rather than split across five unit tests.
+    """
+
+    service = SimulatorService()
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref=f"qualified-{language.value}",
+            language=language,
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    for text in turns:
+        await service.process_turn(
+            session.session_id,
+            TurnRequest(operation_id=uuid4(), text=text, language=language),
+        )
+
+    result = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            operation_id=uuid4(),
+            text="Send the deck.",
+            language=language,
+            preview_action=PreviewAction.ARTIFACT,
+        ),
+    )
+
+    assert result.preview is not None
+    assert result.preview.decision.status.value == "approved", result.preview.decision.reasons
+    assert result.preview.deck is not None
+    heard = result.preview.deck.slides[0]
+    assert any(figure in bullet for bullet in heard.bullets), heard.bullets

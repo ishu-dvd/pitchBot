@@ -1455,7 +1455,7 @@ def test_every_deck_language_covers_the_whole_catalogue() -> None:
     catches a language added to the enum without deck copy.
     """
 
-    from pitchbot.actions.deck_content import deck_languages, phrases_for
+    from pitchbot.actions.deck_content import TIMELINE_UNITS, deck_languages, phrases_for
     from pitchbot.domain import business_types
     from pitchbot.domain import features as catalog_features
 
@@ -1464,6 +1464,78 @@ def test_every_deck_language_covers_the_whole_catalogue() -> None:
         phrases = phrases_for(language)
         assert set(phrases.industry_bullets) == set(business_types())
         assert set(phrases.feature_label) == set(catalog_features())
+        # Every shape the timeline matcher can emit must be renderable, or a stated
+        # deadline reaches the buyer as the canonical English the matcher normalised to.
+        assert set(phrases.timeline_units) == TIMELINE_UNITS
 
     # UNKNOWN falls back rather than raising, matching the planner.
     assert phrases_for(LanguageCode.UNKNOWN) is phrases_for(LanguageCode.ENGLISH)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (LanguageCode.ENGLISH, "3 months"),
+        (LanguageCode.HINDI, "3 महीने"),
+        (LanguageCode.TELUGU, "3 నెలలు"),
+        (LanguageCode.MIXED, "3 mahine"),
+    ],
+)
+async def test_a_deck_states_the_deadline_in_the_buyers_language(
+    language: LanguageCode, expected: str
+) -> None:
+    """The one line on the deck that was still English in every language.
+
+    ``conversation.rules`` normalises every stated deadline onto English units so the
+    outbound allowlist can stay a short closed list. Nothing translated it back, so a
+    Telugu buyer who said "మూడు నెలల్లో" was handed a slide reading "సమయం: 3 months".
+    """
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    preview = await service.create(
+        DeckRequest(
+            lead_id=uuid4(),
+            deck_id=f"deck-timeline-{language.value}",
+            industry=DeckIndustry.APPAREL,
+            language=language,
+            requested_features=("catalog",),
+            timeline_summary="3 months",
+            idempotency_key=f"deck-timeline-{language.value}-1",
+        )
+    )
+
+    heard = preview.slides[0]
+    assert any(expected in bullet for bullet in heard.bullets), heard.bullets
+
+
+@pytest.mark.asyncio
+async def test_a_deck_leaves_an_unrecognised_deadline_alone() -> None:
+    """An unexpected canonical form is a bug worth seeing, not worth hiding.
+
+    Dropping it would report a stated deadline as never discussed, which is the exact
+    failure the localisation was added to fix.
+    """
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    preview = await service.create(
+        DeckRequest(
+            lead_id=uuid4(),
+            deck_id="deck-timeline-odd",
+            industry=DeckIndustry.APPAREL,
+            language=LanguageCode.HINDI,
+            requested_features=("catalog",),
+            timeline_summary="3 fortnights",
+            idempotency_key="deck-timeline-odd-1",
+        )
+    )
+
+    assert any("3 fortnights" in bullet for bullet in preview.slides[0].bullets)

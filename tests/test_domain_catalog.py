@@ -17,7 +17,9 @@ import pytest
 
 from pitchbot.actions import decks, policy
 from pitchbot.conversation.planning import _PHRASES, supported_languages
+from pitchbot.conversation.rules import _BUDGET_PATTERN
 from pitchbot.domain import (
+    BUDGET_CUES,
     BUSINESS_TYPES,
     FEATURES,
     INTENT_PHRASES,
@@ -34,6 +36,53 @@ def test_the_action_policy_allowlists_exactly_the_catalogue() -> None:
 
     assert policy._BUSINESS_TYPES == business_types()  # noqa: SLF001
     assert policy._FEATURES == features()  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("stated", "figure"),
+    [
+        ("Our budget is 150000.", "150000"),
+        ("हमारा बजट दो लाख है।", "दो लाख"),
+        ("మా బడ్జెట్ రెండు లక్షలు.", "రెండు లక్షలు"),
+        ("Budget pachas hazaar hai.", "pachas hazaar"),
+    ],
+)
+def test_a_budget_the_agent_hears_is_a_budget_the_deck_receives(stated: str, figure: str) -> None:
+    """The extractor and the outbound minimiser must agree in every language.
+
+    They did not. The minimiser re-declared the cue list without `బడ్జెట్`, so a Telugu
+    buyer who stated a budget was handed a deck reading "budget: not yet discussed"; and
+    its character class relied on ``\\w``, which excludes the combining marks that spell
+    the vowels in these scripts, so ``बजट दो लाख`` was truncated to ``बजट द``.
+
+    Both were invisible to every existing test, because every existing budget test was
+    written in English and put a digit before the first vowel sign.
+    """
+
+    heard = _BUDGET_PATTERN.search(stated)
+    assert heard is not None, f"extractor did not hear a budget in {stated!r}"
+    assert figure in heard.group(0)
+
+    carried = policy._BUDGET.search(heard.group(0))  # noqa: SLF001
+    assert carried is not None, f"minimiser discarded {heard.group(0)!r}"
+    assert figure in carried.group(0), f"minimiser truncated to {carried.group(0)!r}"
+
+
+def test_every_budget_cue_reaches_both_the_extractor_and_the_minimiser() -> None:
+    """Adding a language to the catalogue must not require remembering two more places."""
+
+    for cue in BUDGET_CUES:
+        stated = f"{cue} 150000"
+        assert _BUDGET_PATTERN.search(stated) is not None, cue
+        assert policy._BUDGET.search(stated) is not None, cue  # noqa: SLF001
+
+
+def test_the_deck_strips_every_budget_cue_it_could_be_handed() -> None:
+    """A slide already labelled "Budget" must not repeat the word in any language."""
+
+    for cue in BUDGET_CUES:
+        assert decks._stated(f"{cue} is 150000") == "150000"  # noqa: SLF001
+        assert decks._stated(f"{cue} 150000") == "150000"  # noqa: SLF001
 
 
 def test_the_deck_builder_allowlists_exactly_the_catalogue() -> None:
@@ -218,3 +267,128 @@ def test_widening_the_vocabulary_did_not_reopen_the_booking_form() -> None:
     said = normalize_text("a booking form for furniture")
 
     assert _match_named_value(said, BUSINESS_TYPES) is None
+
+
+@pytest.mark.parametrize(
+    ("said", "figure"),
+    [
+        # English, in words
+        ("Our budget is two lakh.", "two lakh"),
+        ("We have a budget of five lakhs for this.", "five lakhs"),
+        ("Budget is around fifty thousand rupees.", "fifty thousand"),
+        ("Budget is one crore.", "one crore"),
+        ("We can spend up to ten lakh.", "ten lakh"),
+        # Hinglish
+        ("Budget do lakh hai.", "do lakh"),
+        ("Hamara budget paanch lakh ke aas paas hai.", "paanch lakh"),
+        ("Budget pachas hazaar hai.", "pachas hazaar"),
+        # Hindi and Telugu, in their own scripts
+        ("हमारा बजट दो लाख है।", "दो लाख"),
+        ("बजट पचास हज़ार के आसपास है।", "पचास हज़ार"),
+        ("మా బడ్జెట్ రెండు లక్షలు.", "రెండు లక్షలు"),
+        ("బడ్జెట్ యాభై వేలు.", "యాభై వేలు"),
+        # Digits, which already worked and must keep working
+        ("Our budget is 150000.", "150000"),
+        ("Budget is 5 lakh.", "5 lakh"),
+    ],
+)
+def test_a_budget_can_be_said_in_words(said: str, figure: str) -> None:
+    """People say "two lakh" on a sales call far more often than they say "200000".
+
+    Measured on seventeen phrasings a buyer would actually use: five were heard. Every
+    miss was a figure written as a word, which is every figure spoken in Hindi, Telugu or
+    Hinglish and most of them spoken in Indian English.
+    """
+
+    match = _BUDGET_PATTERN.search(said)
+
+    assert match is not None, f"no budget heard in {said!r}"
+    assert figure in match.group(0)
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # No cue: a quantity in a sentence about something else.
+        "We sold five lakh units last year.",
+        "We have three stores.",
+        # A cue with no figure. "one" alone is not a budget, so requiring the scale word
+        # keeps "budget is one of our concerns" from becoming a budget of one.
+        "Budget is not decided yet.",
+        "Budget is one of our concerns.",
+        # Bare "spend" is what the company already pays someone else, not what they will
+        # pay us. Only the modal forms are budget cues.
+        "We spend five lakh on ads every year.",
+    ],
+)
+def test_a_quantity_that_is_not_a_budget_stays_unheard(said: str) -> None:
+    """A wrong figure is quoted back to the buyer and prices a proposal.
+
+    Missing a budget costs one more question. Inventing one costs the deal, so every
+    widening here is anchored to an explicit cue rather than to the shape of a number.
+    """
+
+    assert _BUDGET_PATTERN.search(said) is None
+
+
+def test_the_deck_can_render_every_deadline_the_matcher_can_emit() -> None:
+    """A unit added to the extractor without deck copy reaches the buyer untranslated.
+
+    The two live in different layers and cannot import each other, so the only thing that
+    keeps them aligned is this assertion. Adding "years" to the matcher without adding it
+    to the deck tables fails here rather than on a customer's slide.
+    """
+
+    from pitchbot.actions.deck_content import TIMELINE_UNITS
+    from pitchbot.conversation.rules import _TIMELINE_UNIT_STEMS
+
+    emitted = set(_TIMELINE_UNIT_STEMS.values()) | {"near-term"}
+
+    assert emitted == TIMELINE_UNITS
+
+
+def test_a_stated_budget_is_evidence_however_it_is_stated() -> None:
+    """Extraction and classification must learn a new phrasing together.
+
+    They did not. The extractor learned "we can spend up to ten lakh"; the classifier's
+    own copy of the budget vocabulary did not, so the turn produced no evidence at all.
+    With no evidence the lead classifies REVIEW_NEEDED and `ActionPolicy` blocks every
+    action - measured end to end, a call that filled business type, features, budget and
+    timeline was refused its deck. A fourth copy of the same vocabulary, in a fourth
+    module, with the loudest possible symptom and no error anywhere.
+    """
+
+    from pitchbot.conversation.rules import _POSITIVE_EVIDENCE, _contains_any, normalize_text
+    from pitchbot.domain import BUDGET_CUES, BUDGET_INTENT_CUES
+
+    budget_phrases = next(
+        phrases for dimension, _, phrases in _POSITIVE_EVIDENCE if dimension == "budget"
+    )
+    for cue in (*BUDGET_CUES, *BUDGET_INTENT_CUES):
+        assert cue in budget_phrases, f"{cue} states a budget but is not evidence of one"
+
+    assert _contains_any(normalize_text("We can spend up to ten lakh."), budget_phrases)
+
+
+def test_a_stated_deadline_is_evidence_however_it_is_stated() -> None:
+    """Every unit the timeline matcher accepts must also count as timeline evidence.
+
+    The evidence list stopped at "weeks", so "in 3 months" filled the `timeline` slot and
+    contributed nothing to the classification that decides whether the buyer may be sent
+    anything.
+    """
+
+    from pitchbot.conversation.rules import (
+        _POSITIVE_EVIDENCE,
+        _TIMELINE_UNIT_STEMS,
+        _contains_any,
+        normalize_text,
+    )
+
+    timeline_phrases = next(
+        phrases for dimension, _, phrases in _POSITIVE_EVIDENCE if dimension == "timeline"
+    )
+    for stem in _TIMELINE_UNIT_STEMS:
+        assert stem in timeline_phrases, f"{stem} is a deadline the classifier cannot see"
+
+    assert _contains_any(normalize_text("we want it live in 3 months"), timeline_phrases)
