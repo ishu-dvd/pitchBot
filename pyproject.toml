@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 pitchbot-bench = "pitchbot.benchmarks.cli:main"
 pitchbot-talk = "pitchbot.cli.talk:main"
+pitchbot-whatsapp = "pitchbot.whatsapp.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -38,6 +39,12 @@ dev = [
 # ~19 KiB CPU-only extension with no model weights, so installing it downloads nothing at
 # import, construction, or detection time.
 webrtc-vad = ["webrtcvad-wheels>=2.0.14,<3"]
+# Optional outbound WhatsApp. Never a runtime requirement: pitchbot imports, and the whole
+# test suite passes, with this absent, because the local fake is driven through httpx's
+# in-process ASGI transport that the dev extra already provides. Only reaching Meta's Graph
+# API needs this installed deliberately - which is the point, since that is the only path
+# on which a message can be billed.
+whatsapp = ["httpx>=0.27.2"]
 # Optional text-to-speech provider. Never a runtime requirement: pitchbot imports, and the
 # whole test suite passes, with this absent.
 #
