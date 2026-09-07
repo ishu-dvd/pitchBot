@@ -1,10 +1,16 @@
-"""What a deck says, in each language PitchBot sells in.
+"""What PitchBot says to a buyer, in each language it sells in.
 
-Kept beside the deck rather than borrowed from :mod:`pitchbot.conversation.planning` for
-two reasons. The layering one: ``actions`` imports ``domain`` and ``adapters`` and never
-``conversation``. The editorial one: a spoken pitch is a sentence with a *because* in it,
-and a slide bullet is a noun phrase. Reusing the spoken lines would produce a deck that
-reads like a transcript.
+Kept beside the artefacts rather than borrowed from :mod:`pitchbot.conversation.planning`
+for two reasons. The layering one: ``actions`` imports ``domain`` and ``adapters`` and
+never ``conversation``. The editorial one: a spoken pitch is a sentence with a *because*
+in it, and a slide bullet is a noun phrase. Reusing the spoken lines would produce a deck
+that reads like a transcript.
+
+Named for the deck because that is what it was built for, this table now backs both
+buyer-facing artefacts. The WhatsApp follow-up is handed the same minimised summary the
+deck is, and rendered its own English-only copy against raw catalogue keys - so a Telugu
+buyer received ``Business: apparel`` and the word ``months``. One table means a language
+cannot be half-supported.
 
 Every language with a table answers in itself. ``UNKNOWN`` gets English, matching
 :func:`pitchbot.conversation.planning._table` - guessing an Indic language for a buyer
@@ -35,7 +41,7 @@ properties - one canonical form to validate, and a deck the buyer can read.
 
 @dataclass(frozen=True, slots=True)
 class DeckPhrases:
-    """One language's deck copy.
+    """One language's buyer-facing copy.
 
     Validated on construction so a language cannot ship a deck with a missing industry or
     feature. A deck is handed to a buyer, so a ``KeyError`` at render time would be a
@@ -47,10 +53,12 @@ class DeckPhrases:
     opportunity_title: str
     scope_title: str
     next_step_title: str
+    follow_up_intro: str
     business_label: str
     features_label: str
     budget_label: str
     timeline_label: str
+    next_label: str
     unstated: str
     industry_name: Mapping[str, str]
     industry_bullets: Mapping[str, tuple[str, ...]]
@@ -80,10 +88,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         opportunity_title="Where the sales come from",
         scope_title="What we would build",
         next_step_title="What it takes to start",
+        follow_up_intro="Here is what we covered on the call",
         business_label="Business",
         features_label="Asked for",
         budget_label="Budget",
         timeline_label="Timeline",
+        next_label="Next",
         unstated="not discussed yet",
         industry_name={
             "apparel": "Clothing store",
@@ -150,10 +160,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         opportunity_title="बिक्री कहाँ से आती है",
         scope_title="हम क्या बनाएँगे",
         next_step_title="शुरू करने के लिए क्या चाहिए",
+        follow_up_intro="बातचीत में जो तय हुआ",
         business_label="व्यवसाय",
         features_label="आपकी ज़रूरत",
         budget_label="बजट",
         timeline_label="समय",
+        next_label="आगे",
         unstated="अभी बात नहीं हुई",
         industry_name={
             "apparel": "कपड़ों की दुकान",
@@ -220,10 +232,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         opportunity_title="అమ్మకాలు ఎక్కడి నుంచి వస్తాయి",
         scope_title="మేము ఏమి నిర్మిస్తాము",
         next_step_title="ప్రారంభించడానికి ఏమి కావాలి",
+        follow_up_intro="మన మాట్లాడుకున్నది ఇదీ",
         business_label="వ్యాపారం",
         features_label="మీకు కావలసినవి",
         budget_label="బడ్జెట్",
         timeline_label="సమయం",
+        next_label="తరువాత",
         unstated="ఇంకా చర్చించలేదు",
         industry_name={
             "apparel": "దుస్తుల దుకాణం",
@@ -290,10 +304,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         opportunity_title="Sales kahan se aati hai",
         scope_title="Hum kya banayenge",
         next_step_title="Shuru karne ke liye kya chahiye",
+        follow_up_intro="Call mein jo baat hui",
         business_label="Business",
         features_label="Aapki zaroorat",
         budget_label="Budget",
         timeline_label="Timeline",
+        next_label="Aage",
         unstated="abhi baat nahi hui",
         industry_name={
             "apparel": "Kapdon ki dukaan",

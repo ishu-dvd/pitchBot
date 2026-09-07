@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from pitchbot.actions.callbacks import CallbackService
+from pitchbot.actions.deck_content import phrases_for
 from pitchbot.actions.decks import DeckService
 from pitchbot.actions.models import (
     ActionAuthorizationContext,
@@ -17,6 +18,7 @@ from pitchbot.actions.models import (
     FollowUpSummary,
 )
 from pitchbot.actions.policy import ActionPolicy
+from pitchbot.actions.summary_text import localised_timeline, stated_budget
 from pitchbot.adapters import Clock, EphemeralOperationStore, WhatsAppAdapter
 from pitchbot.domain import ActionType, LanguageCode
 
@@ -156,13 +158,38 @@ class ActionWorkflowService:
 
     @staticmethod
     def _render_follow_up(follow_up: FollowUpSummary) -> str:
-        parts = ["Synthetic PitchBot follow-up"]
+        """The message a buyer receives after the call, in the language they spoke.
+
+        This branch and :meth:`preview_deck` are handed the identical minimised summary,
+        and until now only the deck used it properly. The message was assembled from raw
+        catalogue keys in hardcoded English, and dropped the budget entirely - so a Telugu
+        buyer who said *"మా బడ్జెట్ రెండు లక్షలు, మూడు నెలల్లో"* was sent
+        ``Business: apparel | Timeline: 3 months`` with no budget in it at all.
+
+        Rendering from the same phrase table the deck uses means adding a language cannot
+        leave one artefact behind. A line is omitted when the fact was never stated: a
+        slide has a fixed layout and fills the row with ``unstated``, a message is a list
+        of what is known.
+        """
+
+        phrases = phrases_for(follow_up.language)
+        parts = [phrases.follow_up_intro]
         if follow_up.business_type:
-            parts.append(f"Business: {follow_up.business_type}")
+            business = phrases.industry_name.get(follow_up.business_type, follow_up.business_type)
+            parts.append(f"{phrases.business_label}: {business}")
         if follow_up.requested_features:
-            parts.append(f"Features: {', '.join(follow_up.requested_features)}")
-        if follow_up.timeline_summary:
-            parts.append(f"Timeline: {follow_up.timeline_summary}")
+            labels = ", ".join(
+                phrases.feature_label.get(item, item) for item in follow_up.requested_features
+            )
+            parts.append(f"{phrases.features_label}: {labels}")
+        budget = stated_budget(follow_up.budget_summary)
+        if budget:
+            parts.append(f"{phrases.budget_label}: {budget}")
+        timeline = localised_timeline(follow_up.timeline_summary, phrases)
+        if timeline:
+            parts.append(f"{phrases.timeline_label}: {timeline}")
         if follow_up.next_steps:
-            parts.append(f"Next: {', '.join(follow_up.next_steps)}")
+            # The buyer's own next steps are allowlisted English identifiers, so the
+            # localised copy is shown instead - exactly as the deck's closing slide does.
+            parts.append(f"{phrases.next_label}: {', '.join(phrases.next_steps)}")
         return " | ".join(parts)

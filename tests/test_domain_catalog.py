@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from pitchbot.actions import decks, policy
+from pitchbot.actions.summary_text import stated_budget
 from pitchbot.conversation.planning import _PHRASES, supported_languages
 from pitchbot.conversation.rules import _BUDGET_PATTERN
 from pitchbot.domain import (
@@ -78,11 +79,14 @@ def test_every_budget_cue_reaches_both_the_extractor_and_the_minimiser() -> None
 
 
 def test_the_deck_strips_every_budget_cue_it_could_be_handed() -> None:
-    """A slide already labelled "Budget" must not repeat the word in any language."""
+    """Text already labelled "Budget" must not repeat the word in any language.
+
+    Shared by the deck and the WhatsApp follow-up, so one assertion covers both.
+    """
 
     for cue in BUDGET_CUES:
-        assert decks._stated(f"{cue} is 150000") == "150000"  # noqa: SLF001
-        assert decks._stated(f"{cue} 150000") == "150000"  # noqa: SLF001
+        assert stated_budget(f"{cue} is 150000") == "150000"
+        assert stated_budget(f"{cue} 150000") == "150000"
 
 
 def test_the_deck_builder_allowlists_exactly_the_catalogue() -> None:
