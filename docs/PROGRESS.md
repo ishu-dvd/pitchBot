@@ -2788,3 +2788,45 @@ interacts with and scored **4/12**.
   the cold floor already falls through to the same COLD. Both now carry the proof in a
   comment so a future reader does not delete them as dead.
 - Batch 2 closed to **10/12**; tests 1,536 -> 1,568.
+
+## Evidence was never clause-scoped, and it is the layer the policy reads
+
+Found while measuring the authorization gate: "Our stock is running low this month"
+classified WARM and was approved for a deck. `probe_evidence_scoping.py` measured whether
+that was one unlucky sentence or a class.
+
+- **It was a class: 1 of 12 clean.** Eleven sentences that contain an evidence phrase while
+  committing nothing scored a commitment, and every one warmed the lead far enough to be
+  approved for a deck. "We have no budget for this" scored `budget`. "We are not ready to
+  start yet" scored `decision`. "I do not want a demo right now" scored `next-step`.
+- **The same defect already fixed one layer up.** Feature extraction runs through
+  `_requesting_clauses`; `_extract_evidence` matched the whole normalised turn. Negations
+  scored the thing they negated - and this is the layer `ActionPolicy` consults.
+- **Positive evidence is now clause-scoped; counter-evidence deliberately is not.** That
+  asymmetry is the load-bearing part. `_REFUSAL_CUES` and `_NEGATIVE_EVIDENCE` describe the
+  same sentences, so running rejection through the commitment guard deletes every refusal
+  the product can detect - a buyer who said no becomes REVIEW_NEEDED rather than COLD, and
+  since the policy blocks both, nothing downstream notices. Pinned by its own test.
+- **The guard's disqualifiers are unconditional here** where the request version makes two
+  of them conditional: there is no request cue that can rescue a clause, because a refusal,
+  a third party or a past tense is not this buyer committing now. Present state is
+  deliberately excluded - "Right now our budget is 2 lakh" is still a budget.
+- **Result: 1/12 -> 9/12 clean, 10/10 real commitments kept.** Mutation 12/12.
+- **Three remain, and they are one class, left measured and open.** "Our stock is running
+  low this month", "We had a terrible month" and "My accountant is away this week" all
+  score `timeline`, because the evidence list carries the bare unit stems (`month`, `week`)
+  so that "in 3 months" counts. The time word is real; it is attached to something other
+  than the project. Telling those apart needs the verb, not another cue, and dropping the
+  stems would lose the deadline that matters. Documented in `_committing_clauses`.
+
+### Mutation batch 3
+
+12 cases on the new guard, initially 10/12. Both survivors were real:
+
+- **Adding present state to the commitment guard survived**, meaning my own docstring's
+  claim that it is deliberately excluded was untested. Three cases now pin it.
+- **`last month` was never exercised** - a speculative addition beside the measured
+  `last year`. Measured rather than removed: "We redesigned the site last month" scores
+  `timeline` without it. Now pinned, and the batch closes at 12/12.
+
+Tests 1,568 -> 1,592.
