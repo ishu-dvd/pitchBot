@@ -802,7 +802,7 @@ def _features_heard(text: str, language: LanguageCode) -> set[str]:
     result = engine.process_turn(session_id, text=text, language=language)
     for fact in result.facts:
         if fact.key == "requested_features":
-            return set(fact.value.split(","))
+            return set(str(fact.value).split(","))
     return set()
 
 
@@ -928,3 +928,32 @@ def test_asking_to_be_spoken_to_in_a_language_is_not_a_website_requirement() -> 
         "Explain it in Telugu please",
     ):
         assert "multilingual" not in _features_heard(turn, LanguageCode.ENGLISH), turn
+
+
+@pytest.mark.parametrize(
+    ("feature", "text"),
+    [
+        ("catalog", "We want to list all our products on the site"),
+        ("catalog", "I need a product page for each item"),
+        ("online-payments", "Can buyers pay by card on the website?"),
+        ("online-payments", "We want to accept UPI"),
+        ("online-payments", "I need a payment gateway"),
+        ("inventory", "We need to know what is in stock"),
+        ("inventory", "Show me how many units are left"),
+        ("multilingual", "We need the site in two languages"),
+        ("multilingual", "The site should support regional languages"),
+        ("whatsapp", "Send the order to my WhatsApp number"),
+    ],
+)
+def test_a_feature_is_heard_however_the_buyer_happens_to_phrase_it(feature: str, text: str) -> None:
+    """The same requests as the matrix, worded the way people actually word them.
+
+    The matrix uses one canonical phrasing per feature, which is the phrasing the
+    vocabulary was written from - so it measures translation coverage and not much else.
+    These are the alternatives an adult reaches for instead, and nine of eleven registered
+    nothing at all. That is where the real loss was: not a buyer who used an unusual word,
+    but a buyer who said "we want to accept UPI" and was followed up as though they had
+    named no requirement.
+    """
+
+    assert feature in _features_heard(text, LanguageCode.ENGLISH)

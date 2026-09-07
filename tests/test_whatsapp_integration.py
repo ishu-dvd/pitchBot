@@ -801,3 +801,51 @@ async def test_a_rewritten_recipient_is_reported_rather_than_hidden() -> None:
     assert result.status == "sent"
     assert "delivered to 5219876543210" in result.detail
     assert "not 919876543210" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_the_default_destination_cannot_be_a_real_handset() -> None:
+    """The safety property, asserted against the default rather than an injected value.
+
+    Every other test here supplies its own resolver, so all of them would keep passing if
+    the default started producing a plausible phone number - and a simulator wired to the
+    live client would begin messaging strangers whose numbers happen to collide with lead
+    ids. Mutating the default to `+9199<digits>` survived the entire suite, which is
+    exactly the failure this asserts against.
+
+    Checked through the gate rather than by inspecting the string, because the property
+    that matters is "no real handset can be reached at this", not "it starts with a
+    particular prefix".
+    """
+
+    fake = FakeGraphApi()
+    adapter = _adapter(fake)
+    service = ActionWorkflowService(
+        policy=ActionPolicy(clock=_FrozenClock(datetime(2026, 9, 7, 12, tzinfo=UTC))),
+        callbacks=CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=ActionPolicy(clock=_FrozenClock(datetime(2026, 9, 7, 12, tzinfo=UTC))),
+            clock=_FrozenClock(datetime(2026, 9, 7, 12, tzinfo=UTC)),
+        ),
+        decks=DeckService(
+            artifact_adapter=MockArtifactAdapter(),
+            clock=_FrozenClock(datetime(2026, 9, 7, 12, tzinfo=UTC)),
+        ),
+        whatsapp=adapter,
+        clock=_FrozenClock(datetime(2026, 9, 7, 12, tzinfo=UTC)),
+        # No contact_resolver: this is the default every deployment gets.
+    )
+
+    for _ in range(25):
+        lead_id = uuid4()
+        preview = await service.preview_whatsapp(
+            session_id=uuid4(),
+            follow_up=FollowUpSummary(lead_id=lead_id, language=LanguageCode.ENGLISH),
+            context=eligible_context(),
+            operation_id=uuid4(),
+        )
+        assert preview.executed is False
+        assert "not a full international number" in preview.label
+
+    assert fake.sent == []
