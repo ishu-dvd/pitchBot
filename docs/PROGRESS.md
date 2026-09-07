@@ -2545,3 +2545,53 @@ clean. 4/4 mutations caught. Live server before and after.
   to matter. The deck still shows Arabic digits in every language, which is correct.
 - **Rollback:** Revert PR 55. No migration, no persistent state, no external side effect.
   It only widens what is recognised and localises what is displayed.
+
+## PR 56 - The message a buyer receives, and a deck that does not invent a request
+
+- **Branch:** `feat/industries-and-preview`
+- **Status:** Open.
+- **Why now:** PR 54 taught the deck to carry a budget and PR 55 taught it to speak the
+  buyer's language. The WhatsApp follow-up is handed the *identical* `FollowUpSummary` and
+  got neither. Two open questions from the PR 55 handoff were measured before any code was
+  written: whether industries other than apparel work end to end, and what the WhatsApp
+  branch actually prints in a non-English call.
+- **Measured first:**
+  - **Industries: refuted.** All six verticals driven end to end reach a deck carrying
+    their own bullets and their own localised title. 0 failures. The concern was unfounded
+    and is recorded as such rather than "fixed".
+  - **WhatsApp preview: identical in all four languages, and wrong five ways.** English
+    header, English labels, raw catalogue keys (`Business: apparel`,
+    `Features: catalog, online-payments`), the canonical English deadline unit, and no
+    budget line at all.
+- **Defects fixed:**
+  1. `_render_follow_up` never read `follow_up.language`, though the summary has always
+     carried it. Hardcoded English for every buyer.
+  2. It referenced `budget_summary` nowhere, so the figure PR 54 put on a slide was
+     dropped from the message the buyer is actually sent.
+  3. It emitted internal dictionary keys where the deck looks up a readable label.
+  4. It rendered the canonical timeline verbatim - the same defect PR 55 fixed in the deck.
+  5. Found by the new test asserting the two artefacts agree: a buyer who named no features
+     was shown a slide titled "What you told us" reading "Asked for: Structured product
+     catalogue, Content in more than one language". A proposal default was applied before
+     that slide was built, so the deck put a request in the buyer's mouth on the one slide
+     whose job is to prove they were listened to.
+- **Why it survived:** eleven existing tests drive the WhatsApp branch. Every one asserts
+  the authorization decision; **none asserts the message**. The content handed to the buyer
+  was untested, which is exactly why two PRs fixing these defects in the deck left the
+  sibling branch alone.
+- **What changed:** `actions/summary_text.py` now owns `stated_budget` and
+  `localised_timeline`, consumed by both artefacts. `DeckPhrases` gains `follow_up_intro`
+  and `next_label` in all four languages. `_render_follow_up` renders from
+  `phrases_for(follow_up.language)`. `decks._create` separates `stated_features` from
+  `proposed_features`, so the default reaches only the proposal slide.
+- **Judgement calls:** the two artefacts deliberately differ on a *missing* value - a slide
+  has a fixed layout and fills the row with `unstated`, a message lists what is known and
+  omits the line, because writing "Budget: not discussed yet" into a chat reports an
+  absence as a fact. Next steps come from the localised deck copy rather than the
+  allowlisted English identifiers, matching what the deck's closing slide already did.
+  The Hinglish feature labels stay English (`Structured product catalogue`) because that is
+  the register a Hinglish buyer uses for product terms, and it matches the deck.
+- **Deferred:** the `MIXED` industry/feature copy is still a mix by design, not by
+  omission. Native-speaker review of the added Hindi/Telugu/Hinglish copy is still
+  outstanding, as with every language string in this project.
+- **Rollback:** Revert PR 56. No migration, no persistent state, no external side effect.

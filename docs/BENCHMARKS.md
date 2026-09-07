@@ -3036,3 +3036,75 @@ contributed nothing to the classification. Both now build from the shared vocabu
 
 Teaching the extractor a new phrasing is half a fix. The classifier decides whether the
 buyer receives anything at all.
+
+## The other artefact the buyer receives (PR 56)
+
+Two questions the suite had never asked, both answered by driving the product.
+
+### Every industry, end to end
+
+Only apparel had ever been driven through a real call. One qualifying English call per
+vertical, identical apart from the opening sentence:
+
+| Industry | Deck | Title | Own bullets |
+| --- | --- | --- | --- |
+| apparel | yes | Clothing store: proposed website scope | yes |
+| toys | yes | Toy store: proposed website scope | yes |
+| books | yes | Bookshop: proposed website scope | yes |
+| food | yes | Food business: proposed website scope | yes |
+| import-export | yes | Import-export business: proposed website scope | yes |
+| plastics | yes | Plastics manufacturing: proposed website scope | yes |
+
+**0 failures.** The concern is refuted. Recorded because a refutation is as useful as a
+fix - it removes an item from the backlog on evidence rather than on hope.
+
+### The WhatsApp follow-up, per language
+
+The deck and the WhatsApp message are handed the **same** `FollowUpSummary`. Printing what
+the buyer receives, after four qualifying calls in four languages:
+
+| Language | Summary carried | Message sent |
+| --- | --- | --- |
+| en | budget `budget is 200000`, timeline `3 months` | `Business: apparel \| Features: catalog, online-payments \| Timeline: 3 months` |
+| hi | budget `बजट दो लाख`, timeline `3 months` | *byte-identical to English* |
+| te | budget `బడ్జెట్ రెండు లక్షలు`, timeline `3 months` | *byte-identical to English* |
+| mixed | budget `budget do lakh`, timeline `3 months` | *byte-identical to English* |
+
+Four different buyers, four different languages, four different budgets - and one message,
+in English, with the budget missing and the internal catalogue keys on display.
+
+Five defects in one printout: the language was never read, the budget was never
+referenced, the labels were hardcoded, the keys were never looked up, and the deadline was
+never localised.
+
+After:
+
+```
+मन:  बातचीत में जो तय हुआ | व्यवसाय: कपड़ों की दुकान | बजट: दो लाख | समय: 3 महीने
+తె:  మన మాట్లాడుకున్నది ఇదీ | వ్యాపారం: దుస్తుల దుకాణం | బడ్జెట్: రెండు లక్షలు | సమయం: 3 నెలలు
+```
+
+### What the coverage looked like
+
+Eleven tests already drove `PreviewAction.WHATSAPP`. Every one of them asserted the
+authorization decision. **None asserted the message.** The content the buyer actually
+receives had no test at all, which is precisely why two consecutive PRs fixed these exact
+defects in the deck and left its sibling untouched.
+
+### The defect the agreement test found
+
+Asserting that the deck and the message report the *same* facts failed immediately - and
+the disagreement was the deck's. A buyer who named no features:
+
+```
+What you told us
+   Business: Clothing store
+   Asked for: Structured product catalogue, Content in more than one language
+   Budget: not discussed yet
+   Timeline: not discussed yet
+```
+
+They asked for neither. The proposal default was applied before the slide was built, so it
+reached the one slide whose entire purpose is to prove the buyer was listened to - while
+budget and timeline on the same slide correctly reported an absence. The default now
+appears only under "What we would build".

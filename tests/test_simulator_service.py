@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from signals import reached
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -661,7 +662,7 @@ async def test_canceled_action_turn_rolls_back_before_retry() -> None:
     )
 
     pending = asyncio.create_task(simulator.process_turn(session.session_id, request))
-    await whatsapp.started.wait()
+    await reached(whatsapp.started)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -705,7 +706,7 @@ async def test_turn_queued_during_session_cleanup_fails_closed() -> None:
     session = simulator.create_session(CreateSessionRequest(lead_ref="closing-race"))
 
     closing = asyncio.create_task(simulator.close_session(session.session_id))
-    await workflows.cleanup_started.wait()
+    await reached(workflows.cleanup_started)
     with pytest.raises(LookupError, match="Unknown session"):
         await simulator.process_turn(
             session.session_id,
@@ -1259,7 +1260,7 @@ async def test_action_cleanup_cannot_be_interleaved_with_a_resume(
     request = ResumeSessionRequest(lead_ref="cleanup-resume-race")
 
     closing = asyncio.create_task(simulator.close_session(session.session_id))
-    await workflows.cleanup_started.wait()
+    await reached(workflows.cleanup_started)
     with pytest.raises(SessionAdmissionConflictError, match="already being resumed"):
         simulator.resume_session(session.session_id, request)
     workflows.release_cleanup.set()

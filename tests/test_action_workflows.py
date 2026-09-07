@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from signals import reached
 
 from pitchbot.actions import (
     ActionAuthorizationContext,
@@ -375,7 +376,7 @@ async def test_canceled_schedule_retry_reconciles_original_request_after_due_tim
     )
 
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -688,7 +689,7 @@ async def test_concurrent_callback_admission_cannot_exceed_capacity() -> None:
         )
 
     first = asyncio.create_task(service.schedule(request("first"), eligible_context()))
-    await scheduler.started.wait()
+    await reached(scheduler.started)
     second = asyncio.create_task(service.schedule(request("second"), eligible_context()))
     await asyncio.sleep(0)
     assert scheduler.schedule_calls == 1
@@ -767,7 +768,7 @@ async def test_dispatching_due_callbacks_does_not_block_an_unrelated_session() -
     clock.advance(timedelta(minutes=1))
 
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
-    await telephony.dialing.wait()
+    await reached(telephony.dialing)
 
     # The batch is mid-dial. A different session arriving now is not part of it.
     newcomer = await asyncio.wait_for(
@@ -822,7 +823,7 @@ async def test_a_callback_canceled_mid_batch_is_not_dispatched_anyway() -> None:
 
     # Both are due, and the batch dials them in callback-id order.
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
-    await telephony.dialing.wait()
+    await reached(telephony.dialing)
 
     canceled = await service.cancel("zzz-second", idempotency_key="cancel-mid-batch")
     assert canceled.status is CallbackStatus.CANCELED
@@ -857,7 +858,7 @@ async def test_cancel_claim_prevents_concurrent_due_dispatch() -> None:
     cancellation = asyncio.create_task(
         service.cancel(request.callback_id, idempotency_key="cancel-race-operation")
     )
-    await scheduler.cancel_started.wait()
+    await reached(scheduler.cancel_started)
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
     await asyncio.sleep(0)
     assert not telephony.actions
@@ -977,7 +978,7 @@ async def test_concurrent_deck_admission_cannot_exceed_capacity() -> None:
         )
 
     first = asyncio.create_task(service.create(request("first")))
-    await adapter.started.wait()
+    await reached(adapter.started, task=first)
     second = asyncio.create_task(service.create(request("second")))
     await asyncio.sleep(0)
     assert adapter.create_calls == 1
@@ -1148,7 +1149,7 @@ async def test_pending_schedule_cleanup_advances_only_after_permanent_failure() 
         idempotency_key="pending-cleanup-operation",
     )
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -1295,7 +1296,7 @@ async def test_pending_schedule_cancellation_tombstone_is_reclaimed_with_the_cal
         idempotency_key="pending-tombstone-operation",
     )
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -1738,4 +1739,68 @@ async def test_a_deck_does_not_invent_a_request_the_buyer_never_made() -> None:
     # The proposal still has to propose something - the default moved, it did not vanish.
     assert preview.slides[2].bullets == tuple(
         phrases.feature_label[item] for item in ("catalog", "multilingual")
+    )
+
+
+@pytest.mark.parametrize(
+    "language", [LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED]
+)
+def test_a_follow_up_message_opens_in_the_buyers_language(language: LanguageCode) -> None:
+    """Every line of the message is localised, including the one nobody reads closely.
+
+    The header used to read "Synthetic PitchBot follow-up" - internal wording, in every
+    language, at the top of the first thing the buyer receives after the call.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(lead_id=uuid4(), language=language, facts={"business_type": "apparel"})
+    )
+
+    assert message.startswith(phrases_for(language).follow_up_intro), message
+
+
+@pytest.mark.parametrize("language", [LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED])
+def test_a_follow_up_message_localises_the_next_steps(language: LanguageCode) -> None:
+    """The allowlisted next steps are English identifiers, not copy to show a buyer.
+
+    ``_NEXT_STEPS`` exists so a conversation cannot emit an arbitrary string; the deck has
+    always rendered its own localised closing slide instead. The message printed the
+    identifiers verbatim, so a Hindi buyer's last line read "Review the synthetic preview".
+    """
+
+    phrases = phrases_for(language)
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=language,
+            facts={"business_type": "apparel"},
+            next_steps=("Review the synthetic preview",),
+        )
+    )
+
+    assert "Review the synthetic preview" not in message, message
+    assert phrases.next_steps[0] in message, message
+
+
+@pytest.mark.parametrize(
+    "language", [LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED]
+)
+def test_a_deadline_with_no_number_is_localised_too(language: LanguageCode) -> None:
+    """ "near-term" is a canonical timeline with no count in front of it.
+
+    Every other unit the matcher emits arrives as "<digits> <unit>", so a localiser that
+    only handled that shape would still pass every test while leaving the one bare form in
+    English. Both artefacts are checked, because both render it.
+    """
+
+    phrases = phrases_for(language)
+    follow_up = build_follow_up(
+        lead_id=uuid4(),
+        language=language,
+        facts={"business_type": "apparel", "timeline": "near-term"},
+    )
+
+    assert follow_up.timeline_summary == "near-term"
+    assert phrases.timeline_units["near-term"] in ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        follow_up
     )
