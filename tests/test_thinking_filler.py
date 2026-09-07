@@ -23,7 +23,8 @@ bounded, because the caller is the receive loop and the answer outranks the cour
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 
 import pytest
 
@@ -39,6 +40,20 @@ from pitchbot.simulator.speech_output import (
 from pitchbot.speech.backchannel import Backchannel
 
 RATE = 22_050
+
+
+async def _until(predicate: Callable[[], bool], timeout_s: float = 2.0) -> None:
+    """Wait for a background task to reach a state, rather than guessing how long it takes.
+
+    A fixed ``asyncio.sleep`` before asserting on another task's state is a race: it passes
+    on an idle machine and fails under a loaded one. This file had one, and it failed
+    exactly once in a full-suite run while passing five times in isolation - the worst kind,
+    because the natural reaction is to re-run and move on.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        await asyncio.sleep(0.005)
 
 
 def chunk(size: int = 64) -> SynthesizedAudioChunk:
@@ -268,7 +283,7 @@ async def test_settle_lets_the_filler_finish_instead_of_cutting_it_off() -> None
     socket, sender, filler, _ = build(synthesizer=synthesizer, first_after_ms=1)
 
     filler.start()
-    await asyncio.sleep(0.02)
+    await _until(lambda: sender.streaming)
     assert sender.streaming, "the filler must still be speaking for this test to mean anything"
     await filler.settle()
     assert not sender.streaming, "settle must wait for the filler, not abandon it"

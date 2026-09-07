@@ -2868,3 +2868,73 @@ One ordering detail worth recording, because a mutation caught it: the engine in
 Reading it after the increment makes every first ask render as a re-ask.
 
 The recorded call now contains no repeated sentence anywhere.
+
+
+## The Hindi call was not the English call (2026-09-07)
+
+Every end-to-end probe so far had been English, on a product whose stated premise is
+selling in the buyer's language. `probe_languages.py` runs the same three-turn call in
+Hindi, Telugu and Hinglish and reports which slots the conversation managed to fill.
+
+| language | filled | missing |
+|---|---|---|
+| English | business, features, budget, timeline | - |
+| Hindi | business, features, budget | **timeline** |
+| Telugu | features, budget | **business, timeline** |
+| Hinglish | business, features, budget | **timeline** |
+
+### A deadline could only be stated in English
+
+`_TIMELINE_PATTERN` required the English words *in*/*within* **and** digits. Measured on
+ten phrasings, eight failed - every non-English one, including those written with digits:
+
+| said | before |
+|---|---|
+| "in 3 months" | 3 months |
+| "तीन महीने में" | miss |
+| "3 महीने में" | miss |
+| "మూడు నెలల్లో" | miss |
+| "teen mahine mein" | miss |
+
+The agent then asked for the timeline a second time, hit `MAX_ASKS_PER_SLOT`, moved on, and
+the deck reported the deadline as never discussed - for a buyer who had stated it plainly.
+
+Two design points. Telugu writes the case ending onto the unit itself, so `నెలల్లో` is
+`నెల` + "in" as **one token**: a pattern demanding a word boundary after the unit cannot
+match it, which is why units are matched as stems. And the reading normalises to canonical
+English units - "3 months" whatever was said - because the value reaches a slide and
+`pitchbot.actions.policy._TIMELINE` is the allowlist bounding it. Emitting one fixed shape
+keeps that allowlist tight rather than widening it to accept arbitrary Devanagari and
+Telugu, which is the safer of the two directions.
+
+After: **10 / 10**.
+
+### Telugu could not name its own vertical
+
+A Telugu speaker names a shop with the genitive - *"దుస్తుల దుకాణం"* - and the catalogue
+held only the nominative `దుస్తులు`, so the match failed, the buyer got no pitch, and the
+agent asked what their business sells immediately after they had said it. Hindi had the
+same gap in the other direction: `कपड़े` was listed, `कपड़ों` was not, and *"कपड़ों की दुकान"*
+is the wording this product's **own deck** uses for a clothes shop.
+
+| said | before |
+|---|---|
+| "हम कपड़े की दुकान चलाते हैं" | apparel |
+| "हम कपड़ों की दुकान चलाते हैं" | miss |
+| "kapdon ki dukaan" | miss |
+| "దుస్తుల దుకాణం" | miss |
+| "బట్టల షాప్" | miss |
+| "బొమ్మల దుకాణం" | miss |
+| "పుస్తకాల షాప్" | miss |
+| "खिलौनों की दुकान" | miss |
+
+Six of eleven. The fix is not new machinery: `_VOCABULARY_SUFFIXES` already permits the
+number and case endings, so listing the **stem** covers every form at once - `कपड़` matches
+कपड़े and कपड़ों, `దుస్తుల` matches దుస్తుల and దుస్తులు.
+
+Widening vocabulary is exactly how the *"a booking form"* → **books** defect happened
+originally, so that case is asserted alongside: stems are still matched as whole terms with
+only case and number endings allowed, and "a booking form for furniture" still resolves to
+nothing.
+
+After: **11 / 11**, and all four languages fill all four slots.

@@ -712,6 +712,16 @@ All notable changes to PitchBot are documented here.
   now rephrases and lowers the bar - *"even a rough range helps me scope this"* - in all
   four languages. `MAX_ASKS_PER_SLOT` still stops at two attempts, so this changes the
   wording, not how long the agent pushes. The recorded call now repeats no sentence at all.
+- **A buyer can state a deadline, and name their shop, in their own language.** Running the
+  same call in Hindi, Telugu and Hinglish left `timeline` empty in all three: the extractor
+  required the English words *in*/*within* plus digits, so *"तीन महीने में"*,
+  *"మూడు నెలల్లో"* and *"teen mahine mein"* all failed - eight of ten phrasings. Telugu
+  also could not name its own vertical, because a Telugu speaker says *"దుస్తుల దుకాణం"*
+  (genitive) and only the nominative was listed; Hindi missed *"कपड़ों की दुकान"*, which is
+  the wording this product's own deck uses for a clothes shop. Six of eleven natural
+  phrasings missed. Indic entries are now stems, and a deadline is normalised to canonical
+  English units so `policy._TIMELINE` stays a tight allowlist instead of being widened to
+  accept arbitrary Devanagari and Telugu. All four languages now fill all four slots.
 
 ### Deferred (PR 54)
 

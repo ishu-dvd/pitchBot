@@ -2482,6 +2482,12 @@ clean. 4/4 mutations caught. Live server before and after.
      `conversation/engine.py`).** `LanguagePhrases.ask_again` for every slot in every
      language, selected from the `asked_slot_counts` the planner already received.
      `MAX_ASKS_PER_SLOT` is unchanged, so the agent pushes no longer than before.
+  8. **Extraction speaks the languages the product sells in (`domain/catalog.py`,
+     `conversation/rules.py`).** `_match_timeline` reads a deadline in Hindi, Telugu and
+     Hinglish - words or digits - and normalises to canonical English units; English is
+     tried first and unchanged, so nothing that worked can regress. Indic business-type
+     entries became stems, since `_VOCABULARY_SUFFIXES` already allows the case endings.
+     Timeline 2/10 -> 10/10, business type 5/11 -> 11/11.
 - **Safety decisions:** No new data may leave a conversation. The deck reads the same
   allowlisted business type and pattern-matched budget/timing that `build_follow_up`
   already released to WhatsApp, and `DeckRequest` bounds them again so a hand-assembled
