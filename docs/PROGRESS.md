@@ -2595,3 +2595,14 @@ clean. 4/4 mutations caught. Live server before and after.
   omission. Native-speaker review of the added Hindi/Telugu/Hinglish copy is still
   outstanding, as with every language string in this project.
 - **Rollback:** Revert PR 56. No migration, no persistent state, no external side effect.
+- **Found by mutation testing, not by the change:** a mutation made a deck raise before it
+  reached its artifact adapter, and `test_concurrent_deck_admission_cannot_exceed_capacity`
+  hung for forty minutes rather than failing. Eleven tests shared that unbounded
+  `await adapter.started.wait()`; all now use `tests/signals.py::reached`, and the same
+  mutation fails in two seconds naming the `ValidationError`. Separately, the last
+  surviving mutation restored the internal header wording and every test passed - a test
+  that reads the same table the renderer reads checks wiring, not content. The invariant
+  that actually holds is that buyer-facing copy must not name the product or the mechanism,
+  which then also caught "Review a synthetic prototype" in English and Hinglish where Hindi
+  and Telugu already said "sample".
+- **Mutation score:** 13/13.

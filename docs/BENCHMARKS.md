@@ -3108,3 +3108,40 @@ They asked for neither. The proposal default was applied before the slide was bu
 reached the one slide whose entire purpose is to prove the buyer was listened to - while
 budget and timeline on the same slide correctly reported an absence. The default now
 appears only under "What we would build".
+
+### Found by mutation-testing the fix (PR 56)
+
+Two defects the change itself did not contain, both more valuable than the mutation that
+exposed them.
+
+**A test that hung for forty minutes instead of failing in two seconds.** A mutation made
+a deck raise a validation error before it reached its artifact adapter.
+`test_concurrent_deck_admission_cannot_exceed_capacity` waited on a bare
+`await adapter.started.wait()` for a signal that could no longer arrive:
+
+| | Before | After |
+| --- | --- | --- |
+| Outcome | hang | fail |
+| Elapsed | 40 min (killed) | **2 s** |
+| Diagnostic | none | `ValidationError: DeckSlide bullets ... too_short` |
+
+Eleven tests across two files had the same unbounded wait - every one a concurrency test
+that drives a service until it blocks inside a fake adapter, then asserts what it did on
+the way in. All now go through `tests/signals.py::reached`.
+
+**Buyer-facing copy that named the product.** The last surviving mutation swapped the
+English header back to `Synthetic PitchBot follow-up` and every test still passed:
+asserting a phrase equals a literal only re-reads the table the renderer reads, so it
+checks the wiring and not the content. Scanning every buyer-facing string in every
+language for internal vocabulary instead:
+
+| Language | `next_steps` | Leak |
+| --- | --- | --- |
+| en | "Review a synthetic prototype" | yes |
+| mixed | "Ek synthetic prototype dekhna" | yes |
+| hi | "एक नमूना प्रोटोटाइप देखना" (*sample*) | no |
+| te | "ఒక నమూనా ప్రోటోటైప్ చూడటం" (*sample*) | no |
+
+The two languages that got it right are what correct looks like. All four now agree.
+
+Mutation score: **13/13**, harness runtime 35 s.
