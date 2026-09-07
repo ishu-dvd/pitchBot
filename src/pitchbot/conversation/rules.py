@@ -80,17 +80,41 @@ _OPT_OUT_PHRASES = (
     "నా నంబర్ తీసివేయండి",
 )
 _ABUSE_TERMS = (
-    "idiot",
-    "stupid",
-    "moron",
     "shut up",
-    "बेवकूफ",
     "चुप रह",
-    "bakwas",
-    "bewakoof",
-    "మూర్ఖుడు",
     "వెధవ",
     "నోరు మూసుకో",
+    # Scripts and inflections of concepts this list already accepts. Measured as a
+    # concept-by-language matrix, seven of twenty-four cells were heard: `चुप रह` was
+    # listed only in Devanagari so romanised "chup raho" missed.
+    "चुप रहो",
+    "chup raho",
+    "chup kar",
+    # Directed dismissals. Unambiguous imperatives aimed at the person, which is what
+    # this signal is for - the redirect says "I want to keep this respectful", and a
+    # second one ends the call.
+    "get lost",
+    "go away",
+    "दफा हो",
+    "भाग जाओ",
+    "nikal yahan",
+    "bhaag ja",
+    "పోరా",
+    "వెళ్ళిపో",
+    # Second-person insults whose inflected form the stem cannot reach, and the
+    # *directed* forms of the rubbish family - telling the agent to stop talking
+    # nonsense, as opposed to calling a website rubbish. `మూర్ఖుడివి` carries the Telugu
+    # second-person ending `-డివి`, so it is directed by construction; the bare stem
+    # `మూర్ఖ` is not, and lives with the other ambiguous adjectives.
+    "మూర్ఖుడివి",
+    "పిచ్చి మాటలు",
+    "faltu baat",
+    "बकवास मत",
+    "बकवास बंद",
+    "bakwas mat",
+    "bakwas band",
+    "talking rubbish",
+    "talking nonsense",
 )
 _INTERNAL_INFO_PHRASES = (
     "api key",
@@ -876,8 +900,94 @@ _SECOND_PERSON = frozenset(
         "आप",
         "आपके",
         "तुम",
+        # Telugu was absent entirely, so every template built on second person was
+        # English-and-Hindi-only - the same shape that left the opt-out guard unusable
+        # in two of four languages.
+        "నువ్వు",
+        "నీవు",
+        "మీరు",
+        "నీ",
     }
 )
+_INSULT_ADJECTIVES = frozenset(
+    {
+        "useless",
+        "worthless",
+        "rubbish",
+        "nonsense",
+        "pathetic",
+        "idiot",
+        "idiotic",
+        "stupid",
+        "stupidity",
+        "moron",
+        "moronic",
+        "fool",
+        "foolish",
+        "बेकार",
+        "बकवास",
+        "नालायक",
+        "बेवकूफ",
+        "बेवकूफी",
+        "bekaar",
+        "bekar",
+        "faltu",
+        "nalayak",
+        "bewakoof",
+        "bewakoofi",
+        "పనికిరాని",
+        "పనికిరానివాడివి",
+        "చెత్త",
+        "పిచ్చి",
+        "మూర్ఖ",
+        "మూర్ఖుడు",
+    }
+)
+"""Words that insult when aimed at a person and merely criticise when aimed at a thing.
+
+Inflected surface forms are enumerated rather than stemmed, because templates match exact
+tokens from the tokenizer - the same reason :data:`_REMOVAL_VERBS` lists its imperatives.
+``idiotic``, ``bewakoofi`` and ``మూర్ఖుడు`` are each a real turn from the existing suite.
+
+These are deliberately **not** in :data:`_ABUSE_TERMS`. Measured, *"That feature is useless
+for us"*, *"यह फीचर बेकार है"* and *"The old website was rubbish"* are all ordinary product
+criticism from a buyer worth selling to, and listing the bare adjective would have flagged
+every one of them. The cost of getting that wrong is not a stray label: the engine redirects
+on the first abuse signal and **ends the call on the second**, so two frank opinions about a
+feature would hang up on a live buyer.
+
+``stupid``, ``बेवकूफ``, ``idiot`` and ``moron`` were bare terms and moved here, because the
+same word is how a buyer talks about *themselves*: **"I feel stupid asking this"**, *"we
+made a stupid mistake with our old site"*, *"that was a stupid decision on our part"* and
+*"हमने बेवकूफी की थी"* were all read as abuse. A non-technical buyer apologising for a
+question is the last person who should be redirected, and two such sentences ended the call.
+
+What separates the two readings is who the word is aimed at, so it is expressed as a
+template against :data:`_SECOND_PERSON` rather than as a phrase - which also survives the
+word orders these languages actually use, where the pronoun and the adjective are separated
+by a copula that differs per language (*"you are useless"*, *"तुम बेकार हो"*,
+*"నువ్వు పనికిరానివాడివి"*).
+"""
+
+_ABUSE_TEMPLATES = (
+    _IntentTemplate((_SECOND_PERSON, _INSULT_ADJECTIVES), ordered=True, max_gaps=(3,)),
+)
+"""An insult counts when it lands on *you*, and a pronoun alone does not decide that.
+
+``reject_first_person`` looked like the right switch and is a no-op here: it means "the
+buyer is quoting their own earlier words", so it needs a self-reporting verb (*"I said"*,
+*"I told"*) and never fires on *"I am an idiot"*. Removing it changed no behaviour at all,
+which is how the mutation sweep found it.
+
+What actually separates the readings is which pronoun the insult sits next to.
+*"I think **you** are an idiot"* is three tokens apart; *"**You** know I am an idiot with
+computers"* is five, because the insult belongs to the *I*. The gap is a distance rather
+than a count of the words between, so three is the copula-plus-article case (*"you are an
+idiot"*) and is exactly the boundary: it accepts every directed insult measured across the
+four languages - where the pronoun and the adjective are adjacent or separated only by a
+copula - and rejects the self-deprecating ones that happen to carry a second-person token,
+including the Hindi *"आप जानते हैं मैं बेवकूफ हूँ"* at four.
+"""
 _REPORTED_DIRECTIVE = frozenset(
     {"told", "instructed", "given", "programmed", "trained", "configured", "taught"}
 )
@@ -1352,7 +1462,9 @@ def detect_safety_signals(text: str) -> tuple[SafetySignal, ...]:
         for tokens, seen in zip(variants, present, strict=True)
     ):
         signals.append(SafetySignal.OPT_OUT)
-    if _contains_any_form(variants, present, compact, _ABUSE_INDEX, _ABUSE_COMPACT):
+    if _contains_any_form(
+        variants, present, compact, _ABUSE_INDEX, _ABUSE_COMPACT
+    ) or _matches_any_template(variants, present, _ABUSE_TEMPLATES):
         signals.append(SafetySignal.ABUSE)
     if _contains_any_form(
         variants, present, compact, _INTERNAL_INFO_INDEX, _INTERNAL_INFO_COMPACT

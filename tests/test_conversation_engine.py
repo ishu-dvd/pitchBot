@@ -1371,3 +1371,154 @@ def test_a_refusal_beside_a_commitment_only_removes_the_refused_half() -> None:
     dimensions = {item.dimension for item in result.evidence}
     assert "next-step" not in dimensions
     assert {"budget", "decision"} <= dimensions
+
+
+@pytest.mark.parametrize(
+    ("concept", "language", "text"),
+    [
+        ("direct insult", LanguageCode.ENGLISH, "You are an idiot"),
+        ("direct insult", LanguageCode.HINDI, "तुम बेवकूफ हो"),
+        ("direct insult", LanguageCode.TELUGU, "నువ్వు మూర్ఖుడివి"),
+        ("direct insult", LanguageCode.MIXED, "Tum bewakoof ho"),
+        ("told to be quiet", LanguageCode.ENGLISH, "Just shut up"),
+        ("told to be quiet", LanguageCode.HINDI, "चुप रहो"),
+        ("told to be quiet", LanguageCode.TELUGU, "నోరు మూసుకో"),
+        ("told to be quiet", LanguageCode.MIXED, "Chup raho yaar"),
+        ("stop talking nonsense", LanguageCode.ENGLISH, "Stop talking rubbish"),
+        ("stop talking nonsense", LanguageCode.HINDI, "बकवास मत करो"),
+        ("stop talking nonsense", LanguageCode.TELUGU, "పిచ్చి మాటలు"),
+        ("stop talking nonsense", LanguageCode.MIXED, "Bakwas mat karo"),
+        ("called useless", LanguageCode.ENGLISH, "You are useless"),
+        ("called useless", LanguageCode.HINDI, "तुम बेकार हो"),
+        ("called useless", LanguageCode.TELUGU, "నువ్వు పనికిరానివాడివి"),
+        ("called useless", LanguageCode.MIXED, "Tum bekaar ho"),
+        ("told to get lost", LanguageCode.ENGLISH, "Get lost"),
+        ("told to get lost", LanguageCode.HINDI, "दफा हो जाओ"),
+        ("told to get lost", LanguageCode.TELUGU, "పోరా"),
+        ("told to get lost", LanguageCode.MIXED, "Nikal yahan se"),
+        ("nonsense talk", LanguageCode.ENGLISH, "You are talking nonsense"),
+        ("nonsense talk", LanguageCode.HINDI, "तुम बकवास कर रहे हो"),
+        ("nonsense talk", LanguageCode.TELUGU, "నువ్వు పిచ్చి మాట్లాడుతున్నావు"),
+        ("nonsense talk", LanguageCode.MIXED, "Faltu baat mat karo"),
+    ],
+)
+def test_an_angry_buyer_is_heard_in_every_language(
+    concept: str, language: LanguageCode, text: str
+) -> None:
+    """Abuse as a concept-by-language matrix, which nothing had measured.
+
+    `_ABUSE_TERMS` was eleven entries - four English, two Devanagari, two romanised, three
+    Telugu - the same shape the opt-out list had before it was measured and found to be
+    missing half its concepts. Driven as six concepts across four languages, **seven of
+    twenty-four cells were heard**. Only "direct insult" and "told to be quiet" worked at
+    all, and both had holes: romanised "chup raho" missed because the cue was listed only
+    in Devanagari, and `మూర్ఖుడు` did not match `మూర్ఖుడివి` because Telugu inflects.
+    """
+
+    del concept
+    del language
+    assert SafetySignal.ABUSE in detect_safety_signals(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I am busy right now, call me later",
+        "This is not what I asked for",
+        "You are not understanding me",
+        "No thanks, not interested",
+        "मैं व्यस्त हूँ, बाद में बात करते हैं",
+        "आप समझ नहीं रहे हैं",
+        "నేను బిజీగా ఉన్నాను",
+        "That feature is useless for us",
+        "यह फीचर बेकार है",
+        "We sell stupid-proof packaging",
+        "We need to get our stock listed",
+    ],
+)
+def test_frustration_and_criticism_are_not_abuse(text: str) -> None:
+    """The cost of a false positive here is the call, not a label.
+
+    The engine redirects on the first abuse signal and **stops the conversation on the
+    second**. Frustration is explicitly not intent evidence in the threat model, and
+    disliking a feature is not disrespecting a person.
+    """
+
+    assert SafetySignal.ABUSE not in detect_safety_signals(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We made a stupid mistake with our old site",
+        "That was a stupid decision on our part",
+        "I feel stupid asking this",
+        "हमने बेवकूफी की थी",
+        # Self-deprecation that *contains* a second-person token, which is the case a
+        # pronoun check alone cannot decide. The insult belongs to the "I".
+        "You know I am an idiot with computers",
+        "आप जानते हैं मैं बेवकूफ हूँ",
+        # The insult comes *before* the pronoun here, which is why the template is
+        # ordered: unordered, this Hindi sentence is flagged while its English
+        # equivalents are not.
+        "मैं बेवकूफ हूँ आप जानते हैं",
+    ],
+)
+def test_a_buyer_being_hard_on_themselves_is_not_abusing_anyone(text: str) -> None:
+    """Self-deprecation was read as abuse, and it is not a rare way to talk.
+
+    `stupid` and `बेवकूफ` were bare abuse terms, so the same word a buyer uses about their
+    own past decisions flagged them. "I feel stupid asking this" is what a non-technical
+    buyer says before their most useful question, and two such sentences ended the call.
+    They now require a second-person target, and the template additionally rejects a
+    first-person window.
+    """
+
+    assert SafetySignal.ABUSE not in detect_safety_signals(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "This is rubbish",
+        "The old website was rubbish",
+        "यह बकवास है",
+        "हमारा पुराना कैटलॉग बकवास था",
+        "ఇది చెత్త",
+        "మా పాత సైట్ చెత్త",
+        "Ye bakwas hai",
+        "Purana website bakwas tha",
+    ],
+)
+def test_calling_a_thing_rubbish_is_treated_the_same_in_every_language(text: str) -> None:
+    """The four languages disagreed, and the harsher treatment fell on three of them.
+
+    `bakwas` was a bare abuse term and `rubbish` was not, so *"our old catalogue was
+    rubbish"* - a normal thing to say while explaining why you need a new one - was
+    flagged in Hindi, Telugu and Hinglish and clean in English. Two of those and the call
+    ends. Blunt criticism of a *thing* is now not abuse in any of them; telling the agent
+    to stop talking rubbish still is, in all of them.
+    """
+
+    assert SafetySignal.ABUSE not in detect_safety_signals(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "You are an idiot",
+        "I think you are an idiot",
+        "I told you, you are useless",
+        "Honestly I find you pathetic",
+        "मुझे लगता है तुम बेकार हो",
+    ],
+)
+def test_an_insult_aimed_at_us_still_counts_when_the_buyer_says_i_first(text: str) -> None:
+    """The other side of the proximity rule, so it cannot be satisfied by refusing everything.
+
+    A first-person token does not make a sentence self-deprecating - people preface insults
+    with "I think" and "I told you". What decides it is which pronoun the insult sits beside,
+    and these all put it beside the second person.
+    """
+
+    assert SafetySignal.ABUSE in detect_safety_signals(text)
