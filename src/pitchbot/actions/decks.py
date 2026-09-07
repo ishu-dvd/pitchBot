@@ -3,22 +3,21 @@ from __future__ import annotations
 import asyncio
 from typing import Final
 
-from pitchbot.actions.deck_content import DeckPhrases, phrases_for
+from pitchbot.actions.deck_content import phrases_for
 from pitchbot.actions.models import DeckPreview, DeckRequest, DeckSlide
+from pitchbot.actions.summary_text import localised_timeline, stated_budget
 from pitchbot.adapters import ArtifactAdapter, Clock, EphemeralOperationStore, SystemClock
-from pitchbot.domain import BUDGET_CUES
 from pitchbot.domain import features as catalog_features
 
 _ALLOWED_FEATURES = catalog_features()
 
-# Leading cue words the budget extractor keeps because it matches from the cue onwards, so
-# a captured "budget is 150000" would otherwise reach a slide reading "Budget: budget is
-# 150000". Stripped for display only; the stored fact is untouched. Built from the shared
-# catalogue so a language added there is stripped here too, longest form first.
-_BUDGET_CUES: Final[tuple[str, ...]] = (
-    *(f"{cue} is" for cue in BUDGET_CUES),
-    *BUDGET_CUES,
-)
+_DEFAULT_SCOPE: Final[tuple[str, str]] = ("catalog", "multilingual")
+"""What to propose to a buyer who named nothing.
+
+Both are things every business in this catalogue needs, and a proposal slide reading
+"we would build nothing" helps no one. This is a proposal, so it appears only under
+"what we would build" - never under "what you told us".
+"""
 
 
 class DeckService:
@@ -56,13 +55,24 @@ class DeckService:
 
         phrases = phrases_for(request.language)
         industry = request.industry.value
-        features = tuple(
+        stated_features = tuple(
             feature for feature in request.requested_features if feature in _ALLOWED_FEATURES
         )
-        if not features:
-            features = ("catalog", "multilingual")
-        budget = _stated(request.budget_summary) or phrases.unstated
-        timeline = _localised_timeline(request.timeline_summary, phrases) or phrases.unstated
+        # A proposal cannot be empty, so an unstated scope falls back to the two things
+        # every one of these businesses needs. That default belongs on the proposal slide
+        # and nowhere else: it used to be applied before the "what you told us" slide was
+        # built, so a buyer who had asked for nothing was shown a slide with their name on
+        # it reading "Asked for: Structured product catalogue, Content in more than one
+        # language". Putting a request in the buyer's mouth on the one slide whose whole
+        # job is to prove they were listened to is worse than proposing nothing.
+        proposed_features = stated_features or _DEFAULT_SCOPE
+        asked_for = (
+            ", ".join(phrases.feature_label[item] for item in stated_features)
+            if stated_features
+            else phrases.unstated
+        )
+        budget = stated_budget(request.budget_summary) or phrases.unstated
+        timeline = localised_timeline(request.timeline_summary, phrases) or phrases.unstated
         preview = DeckPreview(
             deck_id=request.deck_id,
             industry=request.industry,
@@ -77,8 +87,7 @@ class DeckService:
                     title=phrases.heard_title,
                     bullets=(
                         f"{phrases.business_label}: {phrases.industry_name[industry]}",
-                        f"{phrases.features_label}: "
-                        + ", ".join(phrases.feature_label[item] for item in features),
+                        f"{phrases.features_label}: {asked_for}",
                         f"{phrases.budget_label}: {budget}",
                         f"{phrases.timeline_label}: {timeline}",
                     ),
@@ -89,7 +98,7 @@ class DeckService:
                 ),
                 DeckSlide(
                     title=phrases.scope_title,
-                    bullets=tuple(phrases.feature_label[item] for item in features),
+                    bullets=tuple(phrases.feature_label[item] for item in proposed_features),
                 ),
                 DeckSlide(
                     title=phrases.next_step_title,
@@ -134,46 +143,3 @@ class DeckService:
                 self._previews.pop(deck_id, None)
             if isinstance(self._artifact_adapter, EphemeralOperationStore):
                 self._artifact_adapter.clear_operations(operation_key_prefix)
-
-
-def _localised_timeline(summary: str | None, phrases: DeckPhrases) -> str | None:
-    """A deadline the buyer can read, from a deadline the allowlist can check.
-
-    ``conversation.rules`` normalises every language onto English units so the outbound
-    allowlist stays a short closed list. Rendering that canonical form verbatim handed a
-    Telugu buyer a slide reading "3 months", so the unit is translated back on the way out
-    while the digits, which every reader here uses, stay as they are.
-
-    Anything that is not a recognised canonical form is returned unchanged rather than
-    dropped: an unexpected value is a bug worth seeing, not worth hiding from the buyer.
-    """
-
-    text = _stated(summary)
-    if text is None:
-        return None
-    lowered = text.lower().strip()
-    if lowered in phrases.timeline_units:
-        return phrases.timeline_units[lowered]
-    count, _, unit = lowered.partition(" ")
-    if count.isdigit() and unit in phrases.timeline_units:
-        return f"{count} {phrases.timeline_units[unit]}"
-    return text
-
-
-def _stated(summary: str | None) -> str | None:
-    """Present a captured commercial fact without its extraction artefacts.
-
-    The budget extractor matches from the cue word onwards, so the stored fact reads
-    "budget is 150000". A slide already labelled "Budget" must not repeat the word, and a
-    buyer reading their own figure back should see the figure.
-    """
-
-    if summary is None:
-        return None
-    text = summary.strip()
-    lowered = text.lower()
-    for cue in _BUDGET_CUES:
-        if lowered.startswith(cue.lower()):
-            text = text[len(cue) :].lstrip(" :=-")
-            break
-    return text or None

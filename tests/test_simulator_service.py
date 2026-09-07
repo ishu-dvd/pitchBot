@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from signals import reached
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -245,7 +246,7 @@ async def test_turn_language_preview_and_history_are_explicit(
     )
 
     assert result.preview is not None
-    assert result.preview.label == "Mock WhatsApp preview prepared; nothing was sent."
+    assert result.preview.label == "WhatsApp follow-up prepared; nothing was sent."
     assert result.preview.decision.status.value == "approved"
     assert result.events[-1].metadata["executed"] is False
     assert result.temperature == "warm"
@@ -661,7 +662,7 @@ async def test_canceled_action_turn_rolls_back_before_retry() -> None:
     )
 
     pending = asyncio.create_task(simulator.process_turn(session.session_id, request))
-    await whatsapp.started.wait()
+    await reached(whatsapp.started)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -705,7 +706,7 @@ async def test_turn_queued_during_session_cleanup_fails_closed() -> None:
     session = simulator.create_session(CreateSessionRequest(lead_ref="closing-race"))
 
     closing = asyncio.create_task(simulator.close_session(session.session_id))
-    await workflows.cleanup_started.wait()
+    await reached(workflows.cleanup_started)
     with pytest.raises(LookupError, match="Unknown session"):
         await simulator.process_turn(
             session.session_id,
@@ -1259,7 +1260,7 @@ async def test_action_cleanup_cannot_be_interleaved_with_a_resume(
     request = ResumeSessionRequest(lead_ref="cleanup-resume-race")
 
     closing = asyncio.create_task(simulator.close_session(session.session_id))
-    await workflows.cleanup_started.wait()
+    await reached(workflows.cleanup_started)
     with pytest.raises(SessionAdmissionConflictError, match="already being resumed"):
         simulator.resume_session(session.session_id, request)
     workflows.release_cleanup.set()
@@ -1638,3 +1639,81 @@ async def test_a_qualified_buyer_receives_a_deck_carrying_what_they_said(
     assert result.preview.deck is not None
     heard = result.preview.deck.slides[0]
     assert any(figure in bullet for bullet in heard.bullets), heard.bullets
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("turns", "expected"),
+    [
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "Can you show me a demo?",
+            ),
+            "website-discovery",
+        ),
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "We need a catalog and online payment.",
+                "Can you show me a demo?",
+            ),
+            "requirements-review",
+        ),
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "We need a catalog and online payment.",
+                "Our budget is 200000 and we want it live in 3 months.",
+            ),
+            "proposal-review",
+        ),
+    ],
+)
+async def test_a_callback_promises_the_conversation_the_buyer_is_ready_for(
+    turns: tuple[str, ...], expected: str
+) -> None:
+    """Three real calls of increasing depth, which used to produce one identical callback.
+
+    The unit test pins the mapping; this pins that the mapping is *reachable*. Two of the
+    three agendas appeared nowhere outside their own enum definition, so "the mapping is
+    correct" and "a real conversation can produce it" are separate claims and both were
+    false.
+    """
+
+    service = SimulatorService()
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref=f"agenda-{expected}",
+            language=LanguageCode.ENGLISH,
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    for text in turns:
+        await service.process_turn(
+            session.session_id,
+            TurnRequest(operation_id=uuid4(), text=text, language=LanguageCode.ENGLISH),
+        )
+
+    result = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            operation_id=uuid4(),
+            text="Call me later please.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.CALLBACK,
+            callback_delay_minutes=30,
+        ),
+    )
+
+    assert result.preview is not None
+    assert result.preview.decision.status.value == "approved", result.preview.decision.reasons
+    assert result.preview.callback is not None
+    assert result.preview.callback.request.agenda.value == expected
+    assert result.preview.callback.request.timezone == "Asia/Kolkata"

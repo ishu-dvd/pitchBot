@@ -3036,3 +3036,291 @@ contributed nothing to the classification. Both now build from the shared vocabu
 
 Teaching the extractor a new phrasing is half a fix. The classifier decides whether the
 buyer receives anything at all.
+
+## The other artefact the buyer receives (PR 56)
+
+Two questions the suite had never asked, both answered by driving the product.
+
+### Every industry, end to end
+
+Only apparel had ever been driven through a real call. One qualifying English call per
+vertical, identical apart from the opening sentence:
+
+| Industry | Deck | Title | Own bullets |
+| --- | --- | --- | --- |
+| apparel | yes | Clothing store: proposed website scope | yes |
+| toys | yes | Toy store: proposed website scope | yes |
+| books | yes | Bookshop: proposed website scope | yes |
+| food | yes | Food business: proposed website scope | yes |
+| import-export | yes | Import-export business: proposed website scope | yes |
+| plastics | yes | Plastics manufacturing: proposed website scope | yes |
+
+**0 failures.** The concern is refuted. Recorded because a refutation is as useful as a
+fix - it removes an item from the backlog on evidence rather than on hope.
+
+### The WhatsApp follow-up, per language
+
+The deck and the WhatsApp message are handed the **same** `FollowUpSummary`. Printing what
+the buyer receives, after four qualifying calls in four languages:
+
+| Language | Summary carried | Message sent |
+| --- | --- | --- |
+| en | budget `budget is 200000`, timeline `3 months` | `Business: apparel \| Features: catalog, online-payments \| Timeline: 3 months` |
+| hi | budget `बजट दो लाख`, timeline `3 months` | *byte-identical to English* |
+| te | budget `బడ్జెట్ రెండు లక్షలు`, timeline `3 months` | *byte-identical to English* |
+| mixed | budget `budget do lakh`, timeline `3 months` | *byte-identical to English* |
+
+Four different buyers, four different languages, four different budgets - and one message,
+in English, with the budget missing and the internal catalogue keys on display.
+
+Five defects in one printout: the language was never read, the budget was never
+referenced, the labels were hardcoded, the keys were never looked up, and the deadline was
+never localised.
+
+After:
+
+```
+मन:  बातचीत में जो तय हुआ | व्यवसाय: कपड़ों की दुकान | बजट: दो लाख | समय: 3 महीने
+తె:  మన మాట్లాడుకున్నది ఇదీ | వ్యాపారం: దుస్తుల దుకాణం | బడ్జెట్: రెండు లక్షలు | సమయం: 3 నెలలు
+```
+
+### What the coverage looked like
+
+Eleven tests already drove `PreviewAction.WHATSAPP`. Every one of them asserted the
+authorization decision. **None asserted the message.** The content the buyer actually
+receives had no test at all, which is precisely why two consecutive PRs fixed these exact
+defects in the deck and left its sibling untouched.
+
+### The defect the agreement test found
+
+Asserting that the deck and the message report the *same* facts failed immediately - and
+the disagreement was the deck's. A buyer who named no features:
+
+```
+What you told us
+   Business: Clothing store
+   Asked for: Structured product catalogue, Content in more than one language
+   Budget: not discussed yet
+   Timeline: not discussed yet
+```
+
+They asked for neither. The proposal default was applied before the slide was built, so it
+reached the one slide whose entire purpose is to prove the buyer was listened to - while
+budget and timeline on the same slide correctly reported an absence. The default now
+appears only under "What we would build".
+
+### Found by mutation-testing the fix (PR 56)
+
+Two defects the change itself did not contain, both more valuable than the mutation that
+exposed them.
+
+**A test that hung for forty minutes instead of failing in two seconds.** A mutation made
+a deck raise a validation error before it reached its artifact adapter.
+`test_concurrent_deck_admission_cannot_exceed_capacity` waited on a bare
+`await adapter.started.wait()` for a signal that could no longer arrive:
+
+| | Before | After |
+| --- | --- | --- |
+| Outcome | hang | fail |
+| Elapsed | 40 min (killed) | **2 s** |
+| Diagnostic | none | `ValidationError: DeckSlide bullets ... too_short` |
+
+Eleven tests across two files had the same unbounded wait - every one a concurrency test
+that drives a service until it blocks inside a fake adapter, then asserts what it did on
+the way in. All now go through `tests/signals.py::reached`.
+
+**Buyer-facing copy that named the product.** The last surviving mutation swapped the
+English header back to `Synthetic PitchBot follow-up` and every test still passed:
+asserting a phrase equals a literal only re-reads the table the renderer reads, so it
+checks the wiring and not the content. Scanning every buyer-facing string in every
+language for internal vocabulary instead:
+
+| Language | `next_steps` | Leak |
+| --- | --- | --- |
+| en | "Review a synthetic prototype" | yes |
+| mixed | "Ek synthetic prototype dekhna" | yes |
+| hi | "एक नमूना प्रोटोटाइप देखना" (*sample*) | no |
+| te | "ఒక నమూనా ప్రోటోటైప్ చూడటం" (*sample*) | no |
+
+The two languages that got it right are what correct looks like. All four now agree.
+
+Mutation score: **13/13**, harness runtime 35 s.
+
+## The third preview action (PR 56)
+
+`ARTIFACT` and `WHATSAPP` were both found to be handed the conversation's own facts and to
+ignore most of them. `CALLBACK` was the branch left. It takes no conversation input at all
+beyond a delay, so three calls of very different depth produced one identical callback:
+
+| Call | Before | After |
+| --- | --- | --- |
+| business type + demo ask | `website-discovery` / `UTC` | `website-discovery` / `Asia/Kolkata` |
+| + feature list | `website-discovery` / `UTC` | **`requirements-review`** / `Asia/Kolkata` |
+| + budget and deadline | `website-discovery` / `UTC` | **`proposal-review`** / `Asia/Kolkata` |
+
+**Two of the three agendas were dead.** `REQUIREMENTS_REVIEW` and `PROPOSAL_REVIEW` appear
+nowhere in `src/` or `tests/` outside their own enum definition. A buyer who had stated
+their vertical, feature list, budget and deadline was told the next call was to discover
+what they need.
+
+**The timezone was declared and never read.** `Settings.timezone = "Asia/Kolkata"` has
+always existed; `grep` finds no reader. `workflows.py` hardcoded `timezone="UTC"` and
+`callbacks.py:198` passes `request.timezone` verbatim into the scheduler payload — so
+every callback reached the scheduler 5h30m from the buyer, for a product whose copy is
+Hindi, Telugu and Hinglish.
+
+### Measured and deliberately left alone
+
+A buyer who states their vertical *and* their exact feature list is classified
+`REVIEW_NEEDED` and refused every action:
+
+```
+"We run a clothing store and want to sell online."
+"We need a catalog and online payment."
+   -> blocked: ['classification-review']
+```
+
+`_POSITIVE_EVIDENCE` has four signals - budget (0.25), timeline (0.25), decision (0.30),
+next-step (0.20). **Knowing exactly what someone wants to buy is not evidence of anything.**
+Adding a demo request ("Can you show me a demo?") supplies next-step evidence and the same
+call is approved, which is how the two revived agendas become reachable.
+
+That is an authorization gate with compliance implications, so it is recorded here with
+evidence rather than changed in a PR about buyer-facing artefacts. It is the top candidate
+for the next one.
+
+Mutation score for the callback change: **8/8** (21/21 across the whole PR).
+
+## The turn that ends the relationship (PR 56)
+
+An opt-out is the one signal this product calls terminal and unrecoverable. It had never
+been driven end to end in a non-English language.
+
+Six ways an adult actually asks not to be contacted, in four languages:
+
+| concept | en | hi | te | mixed |
+| --- | --- | --- | --- | --- |
+| do not call | yes | yes | yes | yes |
+| do not phone (`फ़ोन`, nuqta) | yes | **NO** | yes | yes |
+| do not contact | yes | **NO** | yes | **NO** |
+| stop contacting | **NO** | **NO** | **NO** | **NO** |
+| remove my number | yes | **NO** | yes | **NO** |
+| remove me from your list | yes | **NO** | **NO** | **NO** |
+| **unheard** | 1/6 | **5/6** | 2/6 | 4/6 |
+
+**12 of 24 unheard.** A Hindi speaker could express exactly one of the six concepts.
+
+### Three causes
+
+**One codepoint.** `फ़ोन` (nuqta, U+095E) was absent while `फोन` was present. Both are
+standard spellings of "phone"; which one a person typed decided whether their refusal was
+heard.
+
+**One hole in the cross product.** `stop calling` listed, `do not contact` listed,
+`stop contacting` not - unheard in every language at once.
+
+**One piece of reasoning applied to a template but not its sibling.** The removal template
+required `ordered=True`. The message template three lines below already says Hindi and
+Hinglish are verb-final so *"order cannot be required"*. Token analysis:
+
+```
+en remove-list         MATCHES  verb=['remove'] self=['me']    record=['list']
+hi remove-from-list    no       verb=[]         self=['मुझे']   record=['सूची']
+mixed remove-list      no       verb=[]         self=['mujhe'] record=['list']
+te remove-from-list    no       verb=[]         self=[]        record=[]
+
+telugu tokens in the three sets:
+  REMOVAL_VERBS    []
+  SELF_REFERENCE   []
+  CONTACT_RECORDS  []
+```
+
+Telugu had **no token in any group** - the template could never fire in Telugu whatever the
+buyer said. Hindi and Hinglish were missing only the bare-stem verb (`हटा` / `hata`, the
+polite form an adult uses) on top of the ordering problem.
+
+### The other direction, which was already wrong
+
+Widening a terminal signal is only safe if ordinary talk stays ordinary. In a product that
+builds catalogues, a removal verb + a self-reference + a record noun is what a buyer says
+about their own data all day:
+
+| sentence | before | after |
+| --- | --- | --- |
+| "Remove my old product list from the homepage." | **STOPPED** | ok |
+| "Can you delete my duplicate product records?" | **STOPPED** | ok |
+| "Does it let me remove contacts from the list?" | ok | ok |
+| "मेरी लिस्ट से यह प्रोडक्ट हटा दीजिए।" | ok | ok |
+
+Two ended the relationship permanently before this change. What separates the readings is
+*whose* list - theirs to publish, or ours to contact them from - so the template now
+refuses any window carrying a product, catalogue or page word, and any match preceded by a
+capability marker (`does it let me...` is a question about the software). `can` is
+deliberately **not** a capability marker: "can you remove me from your list" is a real
+opt-out, and the politest one.
+
+### Result
+
+| | before | after |
+| --- | --- | --- |
+| refusals heard | 12/24 | **24/24** |
+| false opt-outs | 2/15 | **0/15** |
+
+Mutation score for the opt-out change: **12/12** (33/33 across the whole PR).
+
+## WhatsApp: what is actually free (PR 56)
+
+Read from Meta's documentation 2026-09-07. Meta may change pricing "only on the 1st day of
+each quarter", so every figure is dated.
+
+### Free
+
+| Free | Rule |
+| --- | --- |
+| Non-template message inside an open 24h window | "All non-template messages are free... can only be sent within an open customer service window" |
+| **Utility** template inside that window | "Utility templates delivered within an open customer service window are free" |
+| **Any** message inside a 72h Free Entry Point window | "FEP windows remain open for 72 hours. While open, you can send any type of message to the user at no charge" |
+| Every user-initiated call | "All user-initiated calls are free" |
+| Service messages, uncapped | "Effective November 1, 2024 - Service conversations are now free for all businesses" |
+
+Two of these were wrong in the first draft of `pricing.py`. "Every template costs money" is
+false, and the 72h FEP window did not exist in the model at all.
+
+### Charged, India (INR, effective 2026-07-01)
+
+| Category | Rate |
+| --- | --- |
+| Marketing | 0.8631 |
+| Utility | 0.1150 |
+| Authentication | 0.1150 |
+| Authentication-International | 2.4971 |
+| Service | free |
+| Business-initiated call | 0.3885 / minute, six-second pulses rounded up |
+
+### Calling
+
+| | Free? |
+| --- | --- |
+| User calls you | yes, always, no payment method |
+| You call the user | no - per minute, payment method mandatory, and gated behind a 2,000 recipient/day messaging limit that a new portfolio (250) cannot reach |
+
+A call also opens or refreshes the free messaging window, so an inbound call is a zero-cost
+way to buy 24 hours of free messaging.
+
+### Zero-cost development path
+
+| Phase | What | Cost |
+| --- | --- | --- |
+| 0 | Local fake + webhook receiver, in-process | free, indefinite |
+| 1 | Real Meta app + test number + Render/Cloudflare webhook, Dashboard "Test" button | free |
+| 2 | Real messages to your own phone inside the window | free |
+| 3 | Inbound calling on the test number | free |
+
+Skip: 360dialog (EUR 49/mo), Wati, AiSensy (INR 50 credit is not a sandbox), Embedded
+Signup sandbox ("cannot send or receive messages"), Calling sandbox ("only available to
+Tech Partners"). Twilio's sandbox is the only genuinely free BSP one, with a 3-day rejoin
+and only 3 pre-approved templates.
+
+**Never** automate the WhatsApp Business app or WhatsApp Web: Business Terms Sec.5(g) bans
+"applications that interact with our Business Services without our prior written consent".
+That is the number-ban vector.

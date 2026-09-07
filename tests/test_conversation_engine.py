@@ -690,3 +690,270 @@ def test_a_closed_conversation_says_something_new_each_turn() -> None:
     ]
 
     assert len(set(spoken)) == len(spoken), spoken
+
+
+# Six ways a person asks to be left alone, in the four languages this product sells in.
+# Flattened into one parametrised list so a language that can only express some of them
+# fails loudly, by name, instead of quietly refusing to hear the others.
+_OPT_OUT_MATRIX = [
+    ("do not call", "en", "Do not call me again."),
+    ("do not call", "hi", "दोबारा कॉल मत कीजिए।"),
+    ("do not call", "te", "మళ్ళీ కాల్ చేయవద్దు."),
+    ("do not call", "mixed", "Dobara call mat kijiye."),
+    ("do not phone", "en", "Do not phone me."),
+    # `फ़ोन` with the nuqta, the spelling the list did not have.
+    ("do not phone", "hi", "मुझे फ़ोन मत कीजिए।"),
+    ("do not phone", "te", "నాకు ఫోన్ చేయవద్దు."),
+    ("do not phone", "mixed", "Mujhe phone mat kijiye."),
+    ("do not contact", "en", "Do not contact me."),
+    ("do not contact", "hi", "मुझसे संपर्क मत कीजिए।"),
+    ("do not contact", "te", "నన్ను సంప్రదించవద్దు."),
+    ("do not contact", "mixed", "Mujhse contact mat kijiye."),
+    ("stop contacting", "en", "Stop contacting me."),
+    ("stop contacting", "hi", "मुझसे संपर्क करना बंद कीजिए।"),
+    ("stop contacting", "te", "నన్ను సంప్రదించడం ఆపండి."),
+    ("stop contacting", "mixed", "Mujhse contact karna band kijiye."),
+    ("remove my number", "en", "Remove my number."),
+    ("remove my number", "hi", "मेरा नंबर हटा दीजिए।"),
+    ("remove my number", "te", "నా నంబర్ తీసివేయండి."),
+    ("remove my number", "mixed", "Mera number hata dijiye."),
+    ("remove me from your list", "en", "Remove me from your list."),
+    ("remove me from your list", "hi", "मुझे अपनी सूची से हटा दीजिए।"),
+    ("remove me from your list", "te", "నన్ను మీ జాబితా నుండి తొలగించండి."),
+    ("remove me from your list", "mixed", "Mujhe apni list se hata dijiye."),
+]
+
+
+@pytest.mark.parametrize(
+    ("concept", "language", "text"),
+    _OPT_OUT_MATRIX,
+    ids=[f"{concept}-{language}" for concept, language, _ in _OPT_OUT_MATRIX],
+)
+def test_a_refusal_is_heard_in_every_language_it_can_be_said_in(
+    concept: str, language: str, text: str
+) -> None:
+    """The language a person speaks must not decide whether their opt-out is heard.
+
+    Measured before this test existed: **12 of these 24 were unheard**. Hindi could express
+    one of the six concepts; Hinglish two; Telugu four. A Hindi speaker asking to be
+    removed from the list was answered with the next qualifying question.
+
+    Three separate causes, each invisible because the phrase list is one flat tuple with
+    nothing making the languages cover the same ground:
+
+    * ``फ़ोन`` with the nuqta was absent while ``फोन`` was present - one codepoint decided
+      whether a refusal was heard.
+    * "stop calling" and "do not contact" were both listed and "stop contacting" was not,
+      so the phrasing that crosses them was unheard in *every* language at once.
+    * The removal template required ``ordered=True``, but Hindi, Hinglish and Telugu are
+      verb-final - the reasoning the message template beside it already documented and this
+      one did not. Telugu additionally had **no token at all** in any of the three groups
+      the template matches on, so it could never fire in Telugu whatever was said.
+    """
+
+    assert SafetySignal.OPT_OUT in detect_safety_signals(text), (concept, language, text)
+
+
+# What a buyer of a catalogue-building product says about their own data. Every one of
+# these carries a removal verb, a self-reference and a record noun - the exact shape of a
+# real opt-out - and an opt-out is unrecoverable.
+_BENIGN_REMOVALS = [
+    ("en", "Remove my old product list from the homepage."),
+    ("en", "Can you delete my duplicate product records?"),
+    ("en", "Please remove the size list from my product page."),
+    ("en", "Does it let me remove contacts from the list?"),
+    ("hi", "मेरी लिस्ट से यह प्रोडक्ट हटा दीजिए।"),
+    ("hi", "मेरा पुराना कैटलॉग हटा दीजिए।"),
+    ("te", "నా పాత ప్రొడక్ట్ జాబితా తొలగించండి."),
+    ("te", "నా కేటలాగ్ నుండి ఈ వస్తువు తీసివేయండి."),
+    ("mixed", "Meri product list se yeh item hata dijiye."),
+    ("mixed", "Mera purana catalog hata dijiye."),
+]
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    _BENIGN_REMOVALS,
+    ids=[f"{language}-{index}" for index, (language, _) in enumerate(_BENIGN_REMOVALS)],
+)
+def test_managing_your_own_catalogue_is_not_asking_to_be_left_alone(
+    language: str, text: str
+) -> None:
+    """The other half of widening opt-out, and the half that cannot be got wrong.
+
+    "Remove my product list" is the single most ordinary sentence a buyer of this product
+    can say, and it has the identical token shape to "remove me from your list". What
+    separates them is *whose* list - theirs to publish, or ours to contact them from - so
+    the template refuses any window carrying a product, catalogue or page word.
+
+    Measured: two of these ended the conversation permanently **before** this change, in
+    English, with `ordered=True`. Widening the detector was only allowed to happen because
+    it also closed those.
+    """
+
+    assert detect_safety_signals(text) == (), (language, text)
+
+
+def _features_heard(text: str, language: LanguageCode) -> set[str]:
+    """What a single buyer turn causes the product to record as a requested feature."""
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=language)
+    for fact in result.facts:
+        if fact.key == "requested_features":
+            return set(str(fact.value).split(","))
+    return set()
+
+
+@pytest.mark.parametrize(
+    ("feature", "language", "text"),
+    [
+        ("catalog", LanguageCode.ENGLISH, "We need an online catalogue of our products"),
+        ("catalog", LanguageCode.HINDI, "हमें अपने उत्पादों का ऑनलाइन कैटलॉग चाहिए"),
+        ("catalog", LanguageCode.TELUGU, "మాకు ఉత్పత్తుల ఆన్‌లైన్ కేటలాగ్ కావాలి"),
+        ("catalog", LanguageCode.MIXED, "Humein products ka online catalogue chahiye"),
+        ("online-payments", LanguageCode.ENGLISH, "I want customers to pay online with UPI"),
+        ("online-payments", LanguageCode.HINDI, "ग्राहक ऑनलाइन भुगतान कर सकें"),
+        ("online-payments", LanguageCode.TELUGU, "కస్టమర్లు ఆన్‌లైన్ చెల్లింపు చేయాలి"),
+        ("online-payments", LanguageCode.MIXED, "Customers online payment kar sakein"),
+        ("inventory", LanguageCode.ENGLISH, "We need to track our stock levels"),
+        ("inventory", LanguageCode.HINDI, "हमें अपना स्टॉक ट्रैक करना है"),
+        ("inventory", LanguageCode.TELUGU, "మా స్టాక్ ట్రాక్ చేయాలి"),
+        ("inventory", LanguageCode.MIXED, "Humein stock track karna hai"),
+        ("whatsapp", LanguageCode.ENGLISH, "Orders should come to us on WhatsApp"),
+        ("whatsapp", LanguageCode.HINDI, "ऑर्डर व्हाट्सऐप पर आने चाहिए"),
+        ("whatsapp", LanguageCode.TELUGU, "ఆర్డర్లు వాట్సాప్‌లో రావాలి"),
+        ("whatsapp", LanguageCode.MIXED, "Orders WhatsApp par aane chahiye"),
+        ("multilingual", LanguageCode.ENGLISH, "The site should be in Hindi and English"),
+        ("multilingual", LanguageCode.HINDI, "साइट हिंदी और अंग्रेजी दोनों में हो"),
+        ("multilingual", LanguageCode.TELUGU, "సైట్ తెలుగు మరియు ఇంగ్లీష్ రెండింటిలో ఉండాలి"),
+        ("multilingual", LanguageCode.MIXED, "Site Hindi aur English dono mein honi chahiye"),
+    ],
+)
+def test_every_feature_can_be_asked_for_in_every_language(
+    feature: str, language: LanguageCode, text: str
+) -> None:
+    """Each capability, requested the ordinary way, in each language the product sells in.
+
+    Written as a concept-by-language matrix because a flat list of phrases hides exactly
+    this: measured this way, `inventory` was undetectable in **all four** languages - its
+    only non-obvious phrase was ``stock management``, which no shopkeeper says - and
+    `multilingual` was unreachable in Telugu and Hinglish. Fourteen of twenty cells passed,
+    and every test in the suite passed with them.
+    """
+
+    assert feature in _features_heard(text, language)
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "must_not_hear", "why"),
+    [
+        ("Right now everything is on WhatsApp", LanguageCode.ENGLISH, "whatsapp", "present state"),
+        ("We already have a printed catalogue", LanguageCode.ENGLISH, "catalog", "already has it"),
+        ("Our stock is running low this month", LanguageCode.ENGLISH, "inventory", "business fact"),
+        ("अभी हम नकद भुगतान लेते हैं", LanguageCode.HINDI, "online-payments", "present, Hindi"),
+        ("ఇప్పుడు అంతా వాట్సాప్‌లో ఉంది", LanguageCode.TELUGU, "whatsapp", "present, Telugu"),
+        (
+            "ఇప్పుడు మేము నగదు చెల్లింపు తీసుకుంటాం",
+            LanguageCode.TELUGU,
+            "online-payments",
+            "present, Telugu",
+        ),
+        (
+            "We do not want online payments, cash only",
+            LanguageCode.ENGLISH,
+            "online-payments",
+            "refused outright",
+        ),
+        (
+            "No need for a catalogue, we sell one product",
+            LanguageCode.ENGLISH,
+            "catalog",
+            "refused outright",
+        ),
+        (
+            "My nephew built a site in Hindi and English for his shop",
+            LanguageCode.ENGLISH,
+            "multilingual",
+            "about a third party",
+        ),
+        (
+            "Our competitor has an inventory system",
+            LanguageCode.ENGLISH,
+            "inventory",
+            "about a third party",
+        ),
+        (
+            "I saw a catalogue on their website",
+            LanguageCode.ENGLISH,
+            "catalog",
+            "reported observation",
+        ),
+    ],
+)
+def test_naming_a_feature_is_not_the_same_as_asking_for_one(
+    text: str, language: LanguageCode, must_not_hear: str, why: str
+) -> None:
+    """Three ways to say a feature word without ordering it, in four languages.
+
+    This direction was worse than the missing vocabulary and far more damaging. *"We do not
+    want online payments, cash only"* was recorded as a request for online payments, so the
+    deck proposed to the buyer the exact thing they had just refused - a fabricated
+    requirement in their own words. Ten of these fifteen sentences were read as requests.
+
+    Only the present-state guard existed, and only in English: its native-script entries
+    were the compounds ``अभी सब`` and ``ఇప్పటివరకు``, so the ordinary *"अभी हम..."* and
+    *"ఇప్పుడు..."* matched nothing and two of four languages were unguarded.
+    """
+
+    assert must_not_hear not in _features_heard(text, language), why
+
+
+def test_asking_to_be_spoken_to_in_a_language_is_not_a_website_requirement() -> None:
+    """The one gap left open on purpose, with the reason it stays open.
+
+    *"Can it be in Telugu as well?"* is a genuine multilingual request that goes unheard.
+    Catching it needs ``in telugu`` / ``in hindi`` as feature phrases, and measured against
+    ordinary language-switch turns those fire on four of five - so a buyer asking to be
+    *spoken to* in Hindi would be recorded as ordering a bilingual website. One recall
+    point is not worth four fabricated requirements, and this test pins the trade rather
+    than leaving it as a comment someone deletes.
+    """
+
+    for turn in (
+        "Can we talk in Hindi?",
+        "Please continue in Telugu",
+        "I am more comfortable in Hindi",
+        "Explain it in Telugu please",
+    ):
+        assert "multilingual" not in _features_heard(turn, LanguageCode.ENGLISH), turn
+
+
+@pytest.mark.parametrize(
+    ("feature", "text"),
+    [
+        ("catalog", "We want to list all our products on the site"),
+        ("catalog", "I need a product page for each item"),
+        ("online-payments", "Can buyers pay by card on the website?"),
+        ("online-payments", "We want to accept UPI"),
+        ("online-payments", "I need a payment gateway"),
+        ("inventory", "We need to know what is in stock"),
+        ("inventory", "Show me how many units are left"),
+        ("multilingual", "We need the site in two languages"),
+        ("multilingual", "The site should support regional languages"),
+        ("whatsapp", "Send the order to my WhatsApp number"),
+    ],
+)
+def test_a_feature_is_heard_however_the_buyer_happens_to_phrase_it(feature: str, text: str) -> None:
+    """The same requests as the matrix, worded the way people actually word them.
+
+    The matrix uses one canonical phrasing per feature, which is the phrasing the
+    vocabulary was written from - so it measures translation coverage and not much else.
+    These are the alternatives an adult reaches for instead, and nine of eleven registered
+    nothing at all. That is where the real loss was: not a buyer who used an unusual word,
+    but a buyer who said "we want to accept UPI" and was followed up as though they had
+    named no requirement.
+    """
+
+    assert feature in _features_heard(text, LanguageCode.ENGLISH)

@@ -2545,3 +2545,185 @@ clean. 4/4 mutations caught. Live server before and after.
   to matter. The deck still shows Arabic digits in every language, which is correct.
 - **Rollback:** Revert PR 55. No migration, no persistent state, no external side effect.
   It only widens what is recognised and localises what is displayed.
+
+## PR 56 - The message a buyer receives, and a deck that does not invent a request
+
+- **Branch:** `feat/industries-and-preview`
+- **Status:** Open.
+- **Why now:** PR 54 taught the deck to carry a budget and PR 55 taught it to speak the
+  buyer's language. The WhatsApp follow-up is handed the *identical* `FollowUpSummary` and
+  got neither. Two open questions from the PR 55 handoff were measured before any code was
+  written: whether industries other than apparel work end to end, and what the WhatsApp
+  branch actually prints in a non-English call.
+- **Measured first:**
+  - **Industries: refuted.** All six verticals driven end to end reach a deck carrying
+    their own bullets and their own localised title. 0 failures. The concern was unfounded
+    and is recorded as such rather than "fixed".
+  - **WhatsApp preview: identical in all four languages, and wrong five ways.** English
+    header, English labels, raw catalogue keys (`Business: apparel`,
+    `Features: catalog, online-payments`), the canonical English deadline unit, and no
+    budget line at all.
+- **Defects fixed:**
+  1. `_render_follow_up` never read `follow_up.language`, though the summary has always
+     carried it. Hardcoded English for every buyer.
+  2. It referenced `budget_summary` nowhere, so the figure PR 54 put on a slide was
+     dropped from the message the buyer is actually sent.
+  3. It emitted internal dictionary keys where the deck looks up a readable label.
+  4. It rendered the canonical timeline verbatim - the same defect PR 55 fixed in the deck.
+  5. Found by the new test asserting the two artefacts agree: a buyer who named no features
+     was shown a slide titled "What you told us" reading "Asked for: Structured product
+     catalogue, Content in more than one language". A proposal default was applied before
+     that slide was built, so the deck put a request in the buyer's mouth on the one slide
+     whose job is to prove they were listened to.
+- **Why it survived:** eleven existing tests drive the WhatsApp branch. Every one asserts
+  the authorization decision; **none asserts the message**. The content handed to the buyer
+  was untested, which is exactly why two PRs fixing these defects in the deck left the
+  sibling branch alone.
+- **What changed:** `actions/summary_text.py` now owns `stated_budget` and
+  `localised_timeline`, consumed by both artefacts. `DeckPhrases` gains `follow_up_intro`
+  and `next_label` in all four languages. `_render_follow_up` renders from
+  `phrases_for(follow_up.language)`. `decks._create` separates `stated_features` from
+  `proposed_features`, so the default reaches only the proposal slide.
+- **Judgement calls:** the two artefacts deliberately differ on a *missing* value - a slide
+  has a fixed layout and fills the row with `unstated`, a message lists what is known and
+  omits the line, because writing "Budget: not discussed yet" into a chat reports an
+  absence as a fact. Next steps come from the localised deck copy rather than the
+  allowlisted English identifiers, matching what the deck's closing slide already did.
+  The Hinglish feature labels stay English (`Structured product catalogue`) because that is
+  the register a Hinglish buyer uses for product terms, and it matches the deck.
+- **Deferred:** the `MIXED` industry/feature copy is still a mix by design, not by
+  omission. Native-speaker review of the added Hindi/Telugu/Hinglish copy is still
+  outstanding, as with every language string in this project.
+- **Rollback:** Revert PR 56. No migration, no persistent state, no external side effect.
+- **Found by mutation testing, not by the change:** a mutation made a deck raise before it
+  reached its artifact adapter, and `test_concurrent_deck_admission_cannot_exceed_capacity`
+  hung for forty minutes rather than failing. Eleven tests shared that unbounded
+  `await adapter.started.wait()`; all now use `tests/signals.py::reached`, and the same
+  mutation fails in two seconds naming the `ValidationError`. Separately, the last
+  surviving mutation restored the internal header wording and every test passed - a test
+  that reads the same table the renderer reads checks wiring, not content. The invariant
+  that actually holds is that buyer-facing copy must not name the product or the mechanism,
+  which then also caught "Review a synthetic prototype" in English and Hinglish where Hindi
+  and Telugu already said "sample".
+- **Mutation score:** 13/13.
+
+### PR 56 addendum - the third preview action
+
+- **Measured:** `preview_callback` takes no conversation input beyond a delay. Three calls
+  of very different depth produced one identical callback: `website-discovery` / `UTC`.
+- **Two of three `CallbackAgenda` members were dead** - `REQUIREMENTS_REVIEW` and
+  `PROPOSAL_REVIEW` appear nowhere in `src/` or `tests/` outside their own definition.
+- **`Settings.timezone` was declared and never read.** `workflows.py` hardcoded `"UTC"`
+  and `callbacks.py` passes `request.timezone` straight to the scheduler, so every callback
+  reached the scheduler 5h30m from the buyer. `DEFAULT_TIMEZONE` now lives in `domain` and
+  both the settings default and the action-layer default are built from it; `router.py`
+  forwards `settings.timezone` through `SimulatorService`.
+- **What changed:** `preview_callback` takes the same `FollowUpSummary` its two siblings do,
+  and `agenda_for()` derives the agenda from it. All three agendas are now produced by real
+  calls, asserted end to end as well as at the unit level.
+- **Measured and left alone:** a buyer who states their vertical and their exact feature
+  list is `REVIEW_NEEDED` and refused every action - `_POSITIVE_EVIDENCE` scores only money,
+  urgency, decision language and next-step language. An authorization gate is not something
+  to change inside a PR about buyer-facing artefacts; it is the top candidate for the next.
+- **Mutation score:** 8/8 for the callback change, 21/21 across the PR.
+
+### PR 56 addendum - the turn that ends the relationship
+
+- **Measured:** six ways an adult asks not to be contacted, four languages. **12 of 24
+  unheard.** Hindi could express one of six concepts; Hinglish two; Telugu four.
+- **Three causes:** the nuqta spelling `फ़ोन` absent while `फोन` present; `stop contacting`
+  missing though `stop calling` and `do not contact` were both listed; and the removal
+  template requiring `ordered=True` while the message template beside it already documents
+  that Hindi and Hinglish are verb-final. Telugu had **no token in any** of the three groups
+  the removal template matches on, so it could never fire in Telugu at all.
+- **Measured the other direction too, and it was already wrong:** "Remove my old product
+  list from the homepage" and "delete my duplicate product records" ended the conversation
+  permanently before this change. In a catalogue-building product that token shape is
+  ordinary talk. The template now rejects windows carrying product/catalogue/page words and
+  matches preceded by a capability marker. `can` is deliberately excluded - "can you remove
+  me from your list" is a real opt-out.
+- **Result:** refusals heard 12/24 -> 24/24; false opt-outs 2/15 -> 0/15.
+- **Caught by the existing suite:** the first widening made "Does it let me remove contacts
+  from the list?" an opt-out. That test already existed and did its job.
+- **Mutation score:** 12/12 for the opt-out change, 33/33 across the PR.
+
+### PR 56 addendum 3 - WhatsApp integration framework
+
+- **Why:** the WhatsApp adapter had only ever been a mock. Nothing had exercised the wire
+  protocol, and "can this be done for free" had never been answered from a source.
+- **The framework:** `pitchbot.whatsapp.fake_graph.FakeGraphApi` is a local Graph API
+  stand-in driven in-process through `httpx.ASGITransport`, so the real
+  `WhatsAppCloudAdapter` runs its HTTP layer, auth header, request body and error handling
+  with no account and no network. `pitchbot-whatsapp status | demo | inbound` exposes it.
+- **The inbound half is not optional:** a free-form message is only permitted inside the 24h
+  window after the customer writes, so the webhook is what creates the ability to send
+  anything for free. Implements the verify handshake, HMAC over raw bytes, and
+  deduplication (Meta retries for 7 days; a replay would reopen a closed free window).
+- **Contract discipline:** the fake's required fields come from the published spec, not
+  from the client. `recipient_type` is required by the spec and omitted by nearly every
+  published example - a fake written from those examples would accept what Meta rejects.
+- **Two errors found in my own first draft of the cost model**, both counter-intuitive:
+  a *utility* template inside an open window is free (so "templates cost money" is wrong),
+  and a Free Entry Point window makes every message type free for 72 hours. Tests that had
+  encoded the wrong model failed loudly when it was corrected.
+- **Calling:** user-initiated calls are free with no payment method; business-initiated
+  calling is charged per minute, needs a payment method, and is gated behind a 2,000
+  recipient/day limit a new portfolio (250) cannot reach. Messaging-only can be free;
+  outbound calling cannot.
+- **Mutation score:** 22/22. The one survivor was instructive - nothing asserted the *fake*
+  enforces the contract, only that the client satisfies it, so the fake could silently
+  weaken and agree with whatever it was sent.
+- **Deferred / unverified:** the commonly-cited "5 recipients" test-number limit could not
+  be confirmed in current docs; nor a test-number expiry or a fixed free-message allowance.
+  Recorded as unverified in docs/WHATSAPP.md rather than stated.
+
+### Wiring the WhatsApp client into the product, and hearing what a buyer asks for
+
+The framework existed but nothing used it: `preview_whatsapp` still built a
+`MockWhatsAppAdapter`. Putting the real client where the mock had always been found five
+defects, and measuring the extraction it feeds found the largest gap in the product so far.
+
+- **The label was a claim about the adapter, not about the message.** It returned the
+  constant "Mock WhatsApp preview prepared; nothing was sent." for every outcome. Driven
+  against the fake, that was wrong in both directions: a message that reached the API and
+  came back with a provider reference was still reported unsent, and a send refused for
+  cost produced a byte-identical label - so on the one path where the difference is money,
+  "delivered" and "refused" were indistinguishable. **No test asserted the label at all**,
+  which is why changing it broke exactly one assertion in 1,489 tests.
+  `ActionPreviewResult.executed` was declared, read into the event stream, and never set.
+- **The recipient defect was worse than it looked, and only research showed why.** Meta
+  does not reject a malformed `to`; it prepends the *business's* country calling code and
+  delivers. There is no published regex, no length bound, and "E.164" appears nowhere in
+  the Cloud API docs. So a formatting bug returns 200 and reaches a stranger. The client
+  now gates the destination itself, the fake reproduces the coercion so the hazard is
+  executable, and a rewritten recipient is reported by comparing the returned `wa_id`.
+  **The test fixture itself used the dangerous form** - `919876543210`, no plus sign.
+- **A previously published claim was wrong:** error code 131030 was cited as spec and
+  returns zero hits on Meta's current error-code reference under both the new and legacy
+  URLs. Marked as a recollection, not a citation.
+- **`inventory` was undetectable in all four languages.** Measured as a concept-by-language
+  matrix rather than a phrase list: its only non-obvious phrase was `stock management`,
+  which nobody says. `multilingual` was unreachable in Telugu and Hinglish. Of eleven
+  ordinary English phrasings, **nine registered nothing** - "we want to accept UPI", "can
+  buyers pay by card", "I need a product page". A lost feature degrades three artefacts at
+  once: the deck falls back to a default scope, `agenda_for` drops to `WEBSITE_DISCOVERY`,
+  and the follow-up omits the line.
+- **The opposite direction was worse: 10 of 15 false positives.** "We do not want online
+  payments, cash only" was recorded as a request for online payments - the deck then
+  proposed the exact thing the buyer had refused. Only a present-state guard existed and
+  its native-script entries were the compounds `अभी सब` / `ఇప్పటివరకు`, so the ordinary
+  "अभी हम..." and "ఇప్పుడు..." matched nothing: unguarded in two of four languages.
+- **Result:** 20/20 matrix, 10/11 natural phrasings, 14/15 clean. Mutation 22/22.
+- **One gap left open deliberately, with the evidence.** Catching "Can it be in Telugu as
+  well?" needs `in telugu` as a feature phrase, which fires on four of five ordinary
+  language-switch turns - a buyer asking to be *spoken to* in Hindi would be recorded as
+  ordering a bilingual website. A test pins the trade so it is not silently reversed.
+- **One false positive refuted rather than fixed.** "Stop sending me WhatsApp messages"
+  registers `whatsapp` when `extract_business_signals` is called directly, but the engine
+  returns on opt-out before extraction runs - verified end to end, so it is unreachable in
+  the product. The probe was measuring the function, not the product.
+- **The most serious mutation survivor was the default nobody tests.** Every test injects
+  its own contact resolver, so mutating the *default* to produce a plausible `+9199...`
+  number survived the whole suite - a simulator wired to the live client would have started
+  messaging strangers with CI green. Now asserted through the destination gate over 25 lead
+  ids, because the property is "no real handset can be reached at this".

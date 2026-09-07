@@ -59,7 +59,7 @@ from pitchbot.deliberation import (
     deck_slides,
     site_content,
 )
-from pitchbot.domain import ContactPolicy, LanguageCode
+from pitchbot.domain import DEFAULT_TIMEZONE, ContactPolicy, LanguageCode
 from pitchbot.knowledge import (
     FactClaimStatus,
     LeadKnowledgeBm25Retriever,
@@ -199,6 +199,10 @@ class SimulatorService:
         # `speech_transcribe_timeout_ms`. Enforced exactly like its sibling `max_turns`:
         # the limit refuses the next turn, it does not end the call politely.
         max_call_minutes: int = 12,
+        # Where the buyer is, for the callback the agent arranges. Forwarded to
+        # `ActionWorkflowService`, which used to hardcode UTC while `Settings.timezone`
+        # said Asia/Kolkata and nothing read it.
+        callback_timezone: str = DEFAULT_TIMEZONE,
         conversation_engine: ConversationEngine | None = None,
         conversation_journal: ConversationJournal | None = None,
         action_workflows: ActionWorkflowService | None = None,
@@ -268,6 +272,7 @@ class SimulatorService:
                 ),
                 whatsapp=MockWhatsAppAdapter(),
                 clock=self._clock,
+                callback_timezone=callback_timezone,
             )
         self._actions = action_workflows
         self._recall_top_k = recall_top_k
@@ -549,6 +554,15 @@ class SimulatorService:
                             session_id=session.session_id,
                             lead_id=snapshot.lead_id,
                             delay_minutes=request.callback_delay_minutes,
+                            # The same summary the other two previews are built from, so
+                            # the agenda the buyer is promised reflects how far this call
+                            # actually got instead of always being "website discovery".
+                            follow_up=build_follow_up(
+                                lead_id=snapshot.lead_id,
+                                language=request.language,
+                                facts=facts,
+                                next_steps=("Confirm requirements",),
+                            ),
                             context=context,
                             operation_id=request.operation_id,
                             requested_at=operation.started_at,

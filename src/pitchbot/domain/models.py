@@ -9,6 +9,17 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
+DEFAULT_TIMEZONE = "Asia/Kolkata"
+"""Where this product's buyers are.
+
+Declared here rather than in :mod:`pitchbot.config` because both the settings default and
+the action layer need it and neither may import the other. It used to exist only as a
+settings default that **nothing read**: `ActionWorkflowService.preview_callback` hardcoded
+``timezone="UTC"``, which is the value the scheduler adapter received for every callback
+this product has ever arranged - five and a half hours away from the buyer it was arranged
+with.
+"""
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)

@@ -87,19 +87,101 @@ BUSINESS_TYPES: Final[Mapping[str, tuple[str, ...]]] = {
 """Verticals the product claims to serve, and the words that identify each one."""
 
 FEATURES: Final[Mapping[str, tuple[str, ...]]] = {
-    "catalog": ("catalog", "catalogue", "कैटलॉग", "కేటలాగ్"),
-    "online-payments": ("payment", "checkout", "pay online", "भुगतान", "చెల్లింపు"),
-    "inventory": ("inventory", "stock management", "इन्वेंटरी", "ఇన్వెంటరీ"),
+    "catalog": (
+        "catalog",
+        "catalogue",
+        "product list",
+        "product listing",
+        "product page",
+        "list our products",
+        "list all our products",
+        "कैटलॉग",
+        "उत्पाद सूची",
+        "प्रोडक्ट लिस्ट",
+        "కేటలాగ్",
+        "ఉత్పత్తుల జాబితా",
+        "ప్రొడక్ట్ లిస్ట్",
+    ),
+    "online-payments": (
+        "payment",
+        "checkout",
+        "pay online",
+        "payment gateway",
+        "upi",
+        "pay by card",
+        "card payment",
+        "credit card",
+        "debit card",
+        "net banking",
+        "netbanking",
+        "razorpay",
+        "paytm",
+        "भुगतान",
+        "पेमेंट",
+        "ऑनलाइन पेमेंट",
+        "చెల్లింపు",
+        "ఆన్‌లైన్ చెల్లింపు",
+    ),
+    "inventory": (
+        "inventory",
+        "stock management",
+        "stock level",
+        "track stock",
+        "track our stock",
+        "stock track",
+        "manage stock",
+        "in stock",
+        "out of stock",
+        "how many units",
+        "units left",
+        "इन्वेंटरी",
+        "स्टॉक ट्रैक",
+        "स्टॉक मैनेज",
+        "ఇన్వెంటరీ",
+        "స్టాక్ ట్రాక్",
+        "స్టాక్ నిర్వహణ",
+    ),
     "whatsapp": ("whatsapp", "व्हाट्सऐप", "వాట్సాప్"),
     "multilingual": (
         "multilingual",
         "bilingual",
         "hindi and english",
+        "telugu and english",
+        "hindi aur english",
+        "telugu aur english",
+        "two languages",
+        "multiple languages",
+        "more than one language",
+        "regional language",
         "हिंदी और अंग्रेजी",
+        "दो भाषा",
+        "बहुभाषी",
         "బహుభాషా",
+        "తెలుగు మరియు ఇంగ్లీష్",
+        "రెండు భాషల",
     ),
 }
-"""Capabilities a buyer can ask for, and the words that identify each one."""
+"""Capabilities a buyer can ask for, and the words that identify each one.
+
+Every entry beyond the first of each row was added after measuring, because the original
+lists were written the way a specification is written rather than the way a shopkeeper
+talks. Driven over four languages, ``inventory`` was **undetectable in all four** - the only
+non-obvious phrase was ``stock management``, which nobody says; they say *"track our stock
+levels"*, *"स्टॉक ट्रैक"*, *"what is in stock"*. And of eleven ordinary English ways to ask
+for something in this list, nine registered nothing at all: *"we want to accept UPI"*,
+*"can buyers pay by card"*, *"I need a product page"*, *"the site in two languages"*.
+
+The consequence was never a missing word. It was three artefacts degrading at once: the
+deck's *"What you told us"* slide fell back to a default scope, ``agenda_for`` dropped to
+``WEBSITE_DISCOVERY`` - the agenda for a buyer who has said nothing - and the WhatsApp
+follow-up omitted the line entirely. A buyer who had just listed four requirements was
+followed up as though they had listed none.
+
+Phrases are multi-word wherever the single word is ambiguous. Bare ``stock`` is the clearest
+case: it matches *"our stock is running low"*, which is a buyer describing their business,
+not ordering stock tracking. Matching is whole-term with number and case inflection, so a
+listed phrase does not need its plural.
+"""
 
 
 BUDGET_CUES: Final[tuple[str, ...]] = ("budget", "बजट", "బడ్జెట్")

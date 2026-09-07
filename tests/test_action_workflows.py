@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
+from signals import reached
 
 from pitchbot.actions import (
     ActionAuthorizationContext,
@@ -23,6 +25,8 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
+from pitchbot.actions.deck_content import _PHRASES, phrases_for
+from pitchbot.actions.workflows import agenda_for
 from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock, PermanentAdapterError
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
@@ -30,7 +34,15 @@ from pitchbot.adapters.mocks import (
     MockTelephonyAdapter,
     MockWhatsAppAdapter,
 )
-from pitchbot.domain import ActionType, ContactPolicy, JsonValue, LanguageCode, LeadTemperature
+from pitchbot.config import Settings
+from pitchbot.domain import (
+    DEFAULT_TIMEZONE,
+    ActionType,
+    ContactPolicy,
+    JsonValue,
+    LanguageCode,
+    LeadTemperature,
+)
 
 
 class ConcurrencyProbeScheduleAdapter(MockSchedulerAdapter):
@@ -374,7 +386,7 @@ async def test_canceled_schedule_retry_reconciles_original_request_after_due_tim
     )
 
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -410,6 +422,7 @@ async def test_invalid_callback_time_produces_blocked_preview_decision() -> None
         session_id=uuid4(),
         lead_id=uuid4(),
         delay_minutes=1,
+        follow_up=build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts={}),
         context=eligible_context(),
         operation_id=uuid4(),
         requested_at=clock.now() - timedelta(minutes=2),
@@ -687,7 +700,7 @@ async def test_concurrent_callback_admission_cannot_exceed_capacity() -> None:
         )
 
     first = asyncio.create_task(service.schedule(request("first"), eligible_context()))
-    await scheduler.started.wait()
+    await reached(scheduler.started)
     second = asyncio.create_task(service.schedule(request("second"), eligible_context()))
     await asyncio.sleep(0)
     assert scheduler.schedule_calls == 1
@@ -766,7 +779,7 @@ async def test_dispatching_due_callbacks_does_not_block_an_unrelated_session() -
     clock.advance(timedelta(minutes=1))
 
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
-    await telephony.dialing.wait()
+    await reached(telephony.dialing)
 
     # The batch is mid-dial. A different session arriving now is not part of it.
     newcomer = await asyncio.wait_for(
@@ -821,7 +834,7 @@ async def test_a_callback_canceled_mid_batch_is_not_dispatched_anyway() -> None:
 
     # Both are due, and the batch dials them in callback-id order.
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
-    await telephony.dialing.wait()
+    await reached(telephony.dialing)
 
     canceled = await service.cancel("zzz-second", idempotency_key="cancel-mid-batch")
     assert canceled.status is CallbackStatus.CANCELED
@@ -856,7 +869,7 @@ async def test_cancel_claim_prevents_concurrent_due_dispatch() -> None:
     cancellation = asyncio.create_task(
         service.cancel(request.callback_id, idempotency_key="cancel-race-operation")
     )
-    await scheduler.cancel_started.wait()
+    await reached(scheduler.cancel_started)
     dispatch = asyncio.create_task(service.dispatch_due(lambda _: eligible_context()))
     await asyncio.sleep(0)
     assert not telephony.actions
@@ -976,7 +989,7 @@ async def test_concurrent_deck_admission_cannot_exceed_capacity() -> None:
         )
 
     first = asyncio.create_task(service.create(request("first")))
-    await adapter.started.wait()
+    await reached(adapter.started, task=first)
     second = asyncio.create_task(service.create(request("second")))
     await asyncio.sleep(0)
     assert adapter.create_calls == 1
@@ -1147,7 +1160,7 @@ async def test_pending_schedule_cleanup_advances_only_after_permanent_failure() 
         idempotency_key="pending-cleanup-operation",
     )
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -1294,7 +1307,7 @@ async def test_pending_schedule_cancellation_tombstone_is_reclaimed_with_the_cal
         idempotency_key="pending-tombstone-operation",
     )
     pending = asyncio.create_task(service.schedule(request, eligible_context()))
-    await scheduler.accepted.wait()
+    await reached(scheduler.accepted)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pending
@@ -1539,3 +1552,393 @@ async def test_a_deck_leaves_an_unrecognised_deadline_alone() -> None:
     )
 
     assert any("3 fortnights" in bullet for bullet in preview.slides[0].bullets)
+
+
+@pytest.mark.parametrize(
+    ("language", "own_label", "foreign_label"),
+    [
+        (LanguageCode.HINDI, "बजट", "Budget"),
+        (LanguageCode.TELUGU, "బడ్జెట్", "Budget"),
+        (LanguageCode.ENGLISH, "Budget", "बजट"),
+    ],
+)
+def test_a_follow_up_message_answers_in_the_language_the_buyer_spoke(
+    language: LanguageCode, own_label: str, foreign_label: str
+) -> None:
+    """The deck's sibling branch, handed the identical summary, was English-only.
+
+    ``_render_follow_up`` was a ``staticmethod`` that never looked at ``follow_up.language``
+    even though the summary has carried it all along, so a Telugu buyer received
+    ``Business: apparel | Timeline: 3 months``. Eleven tests already drove this branch;
+    every one of them asserted the authorization decision and none asserted the message,
+    which is why it survived two PRs that localised the deck.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=language,
+            facts={
+                "business_type": "apparel",
+                "requested_features": "catalog",
+                "budget_stated": "budget is 200000",
+                "timeline": "3 months",
+            },
+        )
+    )
+
+    assert own_label in message, message
+    assert foreign_label not in message, message
+
+
+@pytest.mark.parametrize(
+    ("language", "stated", "figure"),
+    [
+        (LanguageCode.ENGLISH, "budget is 200000", "200000"),
+        (LanguageCode.HINDI, "बजट दो लाख", "दो लाख"),
+        (LanguageCode.TELUGU, "బడ్జెట్ రెండు లక్షలు", "రెండు లక్షలు"),
+    ],
+)
+def test_a_follow_up_message_carries_the_budget_the_buyer_stated(
+    language: LanguageCode, stated: str, figure: str
+) -> None:
+    """The message dropped the budget entirely while the deck reported it.
+
+    ``build_follow_up`` is the single minimiser, so a budget in the summary has already
+    passed the privacy gate that decides what may leave a conversation. Rendering it on a
+    slide and omitting it from the message was not a policy decision, it was an omission.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=language,
+            facts={"business_type": "apparel", "budget_stated": stated},
+        )
+    )
+
+    assert figure in message, message
+
+
+def test_a_follow_up_message_never_shows_a_catalogue_key() -> None:
+    """Internal identifiers are how the code refers to a vertical, not how a buyer does.
+
+    The message read ``Business: apparel | Features: catalog, online-payments`` - the
+    literal dictionary keys. The deck has always looked these up; the message never did.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=LanguageCode.ENGLISH,
+            facts={
+                "business_type": "apparel",
+                "requested_features": "catalog,online-payments",
+            },
+        )
+    )
+
+    assert "apparel" not in message, message
+    assert "online-payments" not in message, message
+    assert "Clothing store" in message, message
+
+
+def test_a_follow_up_message_omits_what_was_never_stated() -> None:
+    """A slide fills every row; a message lists what is known.
+
+    The deck substitutes ``unstated`` because its layout is fixed. Writing
+    "Budget: not discussed yet" into a chat message would be reporting an absence as a
+    fact, so the line is left out instead - which is what the branch already did.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=LanguageCode.ENGLISH,
+            facts={"business_type": "apparel"},
+        )
+    )
+
+    assert "Budget" not in message, message
+    assert "not discussed yet" not in message, message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "language", [LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU]
+)
+async def test_the_deck_and_the_message_report_the_same_facts(language: LanguageCode) -> None:
+    """Both artefacts are handed one summary, so they must not disagree about it.
+
+    Every defect fixed here was the deck being taught something the message was not. This
+    is the assertion that fails the next time that happens, whichever branch is the one
+    left behind.
+    """
+
+    follow_up = build_follow_up(
+        lead_id=uuid4(),
+        language=language,
+        facts={
+            "business_type": "apparel",
+            "requested_features": "catalog",
+            "budget_stated": "budget is 200000",
+            "timeline": "3 months",
+        },
+    )
+    deck = await DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    ).create(
+        DeckRequest(
+            lead_id=follow_up.lead_id,
+            deck_id=f"agree-{language.value}",
+            industry=DeckIndustry.APPAREL,
+            language=language,
+            requested_features=follow_up.requested_features,
+            budget_summary=follow_up.budget_summary,
+            timeline_summary=follow_up.timeline_summary,
+            idempotency_key=f"agree-{language.value}-1",
+        )
+    )
+    message = ActionWorkflowService._render_follow_up(follow_up)  # noqa: SLF001
+
+    phrases = phrases_for(language)
+    for value in (
+        phrases.industry_name["apparel"],
+        phrases.feature_label["catalog"],
+        "200000",
+        f"3 {phrases.timeline_units['months']}",
+    ):
+        assert any(value in bullet for bullet in deck.slides[0].bullets), (value, deck.slides[0])
+        assert value in message, (value, message)
+
+
+@pytest.mark.asyncio
+async def test_a_deck_does_not_invent_a_request_the_buyer_never_made() -> None:
+    """The slide is titled "What you told us". It must only contain what they told us.
+
+    A buyer who named no features was shown "Asked for: Structured product catalogue,
+    Content in more than one language" - a default that was applied before the slide was
+    built, so it reached the one slide whose entire purpose is to prove the buyer was
+    listened to. Budget and timeline on that same slide already said "not discussed yet";
+    features silently claimed otherwise.
+
+    Found by asserting the deck and the follow-up message report the same facts: the
+    message correctly said nothing, and the disagreement was the deck's.
+    """
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    preview = await service.create(
+        DeckRequest(
+            lead_id=uuid4(),
+            deck_id="deck-no-features",
+            industry=DeckIndustry.APPAREL,
+            language=LanguageCode.ENGLISH,
+            requested_features=(),
+            idempotency_key="deck-no-features-1",
+        )
+    )
+
+    phrases = phrases_for(LanguageCode.ENGLISH)
+    heard = preview.slides[0].bullets
+    asked = next(b for b in heard if b.startswith(phrases.features_label))
+    assert asked == f"{phrases.features_label}: {phrases.unstated}", heard
+    # The proposal still has to propose something - the default moved, it did not vanish.
+    assert preview.slides[2].bullets == tuple(
+        phrases.feature_label[item] for item in ("catalog", "multilingual")
+    )
+
+
+@pytest.mark.parametrize(
+    "language", [LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED]
+)
+def test_a_follow_up_message_opens_in_the_buyers_language(language: LanguageCode) -> None:
+    """Every line of the message is localised, including the one nobody reads closely.
+
+    The header used to read "Synthetic PitchBot follow-up" - internal wording, in every
+    language, at the top of the first thing the buyer receives after the call.
+    """
+
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(lead_id=uuid4(), language=language, facts={"business_type": "apparel"})
+    )
+
+    assert message.startswith(phrases_for(language).follow_up_intro), message
+
+
+@pytest.mark.parametrize("language", [LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED])
+def test_a_follow_up_message_localises_the_next_steps(language: LanguageCode) -> None:
+    """The allowlisted next steps are English identifiers, not copy to show a buyer.
+
+    ``_NEXT_STEPS`` exists so a conversation cannot emit an arbitrary string; the deck has
+    always rendered its own localised closing slide instead. The message printed the
+    identifiers verbatim, so a Hindi buyer's last line read "Review the synthetic preview".
+    """
+
+    phrases = phrases_for(language)
+    message = ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        build_follow_up(
+            lead_id=uuid4(),
+            language=language,
+            facts={"business_type": "apparel"},
+            next_steps=("Review the synthetic preview",),
+        )
+    )
+
+    assert "Review the synthetic preview" not in message, message
+    assert phrases.next_steps[0] in message, message
+
+
+@pytest.mark.parametrize(
+    "language", [LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU, LanguageCode.MIXED]
+)
+def test_a_deadline_with_no_number_is_localised_too(language: LanguageCode) -> None:
+    """ "near-term" is a canonical timeline with no count in front of it.
+
+    Every other unit the matcher emits arrives as "<digits> <unit>", so a localiser that
+    only handled that shape would still pass every test while leaving the one bare form in
+    English. Both artefacts are checked, because both render it.
+    """
+
+    phrases = phrases_for(language)
+    follow_up = build_follow_up(
+        lead_id=uuid4(),
+        language=language,
+        facts={"business_type": "apparel", "timeline": "near-term"},
+    )
+
+    assert follow_up.timeline_summary == "near-term"
+    assert phrases.timeline_units["near-term"] in ActionWorkflowService._render_follow_up(  # noqa: SLF001
+        follow_up
+    )
+
+
+def test_buyer_facing_copy_never_names_the_product_or_the_mechanism() -> None:
+    """A buyer reads this. They do not know what PitchBot is, or what "synthetic" means.
+
+    The WhatsApp header used to read "Synthetic PitchBot follow-up" - the product name and
+    the internal word for "not really sent", at the top of the first thing the buyer
+    receives after the call. Asserting a phrase equals a literal would only re-read the
+    table the renderer reads, so this asserts the property that made the old header wrong.
+
+    The same scan found the leak was not only in the header: the English and Hinglish
+    closing slides said "Review a synthetic prototype", while Hindi and Telugu already said
+    "sample". The two languages that got it right are what "correct" looks like here.
+    """
+
+    internal = ("pitchbot", "synthetic", "mock", "simulator")
+    for language, phrases in _PHRASES.items():
+        for field in dataclasses.fields(phrases):
+            value = getattr(phrases, field.name)
+            if isinstance(value, Mapping):
+                strings: list[str] = []
+                for item in value.values():
+                    strings.extend(item) if isinstance(item, tuple) else strings.append(item)
+            elif isinstance(value, tuple):
+                strings = list(value)
+            else:
+                strings = [value]
+            for text in strings:
+                lowered = text.lower()
+                for term in internal:
+                    assert term not in lowered, (language.value, field.name, text, term)
+
+
+@pytest.mark.parametrize(
+    ("facts", "expected"),
+    [
+        ({"business_type": "apparel"}, CallbackAgenda.WEBSITE_DISCOVERY),
+        (
+            {"business_type": "apparel", "requested_features": "catalog"},
+            CallbackAgenda.REQUIREMENTS_REVIEW,
+        ),
+        (
+            {"business_type": "apparel", "requested_features": "catalog", "timeline": "3 months"},
+            CallbackAgenda.PROPOSAL_REVIEW,
+        ),
+        (
+            {"business_type": "apparel", "budget_stated": "budget is 200000"},
+            CallbackAgenda.PROPOSAL_REVIEW,
+        ),
+    ],
+)
+def test_the_next_call_is_about_what_this_one_established(
+    facts: dict[str, JsonValue], expected: CallbackAgenda
+) -> None:
+    """A callback carries a promise about what the next conversation covers.
+
+    ``preview_callback`` hardcoded ``WEBSITE_DISCOVERY``, so a buyer who had already given
+    their vertical, their feature list, their budget and their deadline was told the next
+    call was to find out what they need. It reads the same minimised summary the deck and
+    the follow-up message are built from instead.
+    """
+
+    follow_up = build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts=facts)
+
+    assert agenda_for(follow_up) is expected
+
+
+def test_every_callback_agenda_is_reachable() -> None:
+    """Two of the three used to appear nowhere outside their own definition.
+
+    An enum member that no code path can produce is a modelled distinction the product does
+    not actually make. Asserting the mapping covers the enum is what stops a fourth agenda
+    being added and silently never used.
+    """
+
+    produced = {
+        agenda_for(build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts=facts))
+        for facts in (
+            {"business_type": "apparel"},
+            {"business_type": "apparel", "requested_features": "catalog"},
+            {"business_type": "apparel", "budget_stated": "budget is 200000"},
+        )
+    }
+
+    assert produced == set(CallbackAgenda)
+
+
+@pytest.mark.asyncio
+async def test_a_callback_is_arranged_in_the_buyers_timezone() -> None:
+    """`Settings.timezone` said Asia/Kolkata and nothing read it.
+
+    The scheduler adapter receives `request.timezone` verbatim, so every callback this
+    product has ever arranged was handed to the scheduler as UTC - five and a half hours
+    from the buyer it was arranged with. The default now comes from one place that the
+    settings default is also built from, so the two cannot disagree.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    policy = ActionPolicy(clock=clock)
+    workflows = ActionWorkflowService(
+        policy=policy,
+        callbacks=CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=policy,
+            clock=clock,
+        ),
+        decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+        whatsapp=MockWhatsAppAdapter(),
+        clock=clock,
+    )
+
+    preview = await workflows.preview_callback(
+        session_id=uuid4(),
+        lead_id=uuid4(),
+        delay_minutes=30,
+        follow_up=build_follow_up(
+            lead_id=uuid4(), language=LanguageCode.ENGLISH, facts={"business_type": "apparel"}
+        ),
+        context=eligible_context(),
+        operation_id=uuid4(),
+        requested_at=clock.now(),
+    )
+
+    assert preview.callback is not None
+    assert preview.callback.request.timezone == DEFAULT_TIMEZONE
+    assert Settings().timezone == DEFAULT_TIMEZONE

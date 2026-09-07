@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from uuid import UUID
 
 from pitchbot.actions.callbacks import CallbackService
+from pitchbot.actions.deck_content import phrases_for
 from pitchbot.actions.decks import DeckService
 from pitchbot.actions.models import (
     ActionAuthorizationContext,
@@ -17,8 +19,63 @@ from pitchbot.actions.models import (
     FollowUpSummary,
 )
 from pitchbot.actions.policy import ActionPolicy
+from pitchbot.actions.summary_text import localised_timeline, stated_budget
 from pitchbot.adapters import Clock, EphemeralOperationStore, WhatsAppAdapter
-from pitchbot.domain import ActionType, LanguageCode
+from pitchbot.domain import DEFAULT_TIMEZONE, ActionType, LanguageCode
+
+
+def _synthetic_contact(lead_id: UUID) -> str:
+    """The destination a simulated lead has: one no real handset can be reached at.
+
+    Deliberately not a phone number, and deliberately not *nearly* a phone number. The
+    Cloud API does not reject a malformed recipient - it rewrites it and delivers - so the
+    safe synthetic value is one that cannot survive a client-side destination check at all.
+    """
+
+    return f"synthetic:{lead_id}"
+
+
+def _delivery_label(status: str, detail: str) -> str:
+    """Say what the adapter reports happened, rather than what the caller assumes.
+
+    This used to be the constant ``"Mock WhatsApp preview prepared; nothing was sent."``,
+    which is a statement about *which adapter is installed* dressed up as a statement about
+    *what happened*. Driving the real client against the local fake showed the cost: the
+    message reached the API, came back with a provider reference, and the operator was told
+    nothing was sent. In the other direction a send refused for cost produced the identical
+    label, so "delivered" and "refused because it would be billed" were indistinguishable -
+    on the one code path in this product where the difference is money.
+    """
+
+    if status == "sent":
+        return "WhatsApp follow-up sent."
+    if status.startswith("refused"):
+        reason = detail.strip() or "the adapter refused to send it"
+        return f"WhatsApp follow-up not sent: {reason}"[:300]
+    return "WhatsApp follow-up prepared; nothing was sent."
+
+
+def agenda_for(follow_up: FollowUpSummary) -> CallbackAgenda:
+    """What the next call is actually about, given how far this one got.
+
+    ``preview_callback`` hardcoded :attr:`CallbackAgenda.WEBSITE_DISCOVERY`, so every
+    callback this product has ever arranged claimed to be about discovering what the buyer
+    needs - including callbacks with buyers who had already stated their vertical, their
+    feature list, their budget and their deadline. The other two members of the enum
+    appeared **nowhere** outside their own definition: two thirds of a modelled concept,
+    dead.
+
+    The agenda a buyer is told about is the promise the next call has to keep, so it is
+    read from the same minimised summary the deck and the follow-up message are built from
+    rather than guessed.
+    """
+
+    if follow_up.budget_summary or follow_up.timeline_summary:
+        # They have named money or a date. The next conversation is about a number.
+        return CallbackAgenda.PROPOSAL_REVIEW
+    if follow_up.requested_features:
+        return CallbackAgenda.REQUIREMENTS_REVIEW
+    return CallbackAgenda.WEBSITE_DISCOVERY
 
 
 class ActionWorkflowService:
@@ -30,12 +87,26 @@ class ActionWorkflowService:
         decks: DeckService,
         whatsapp: WhatsAppAdapter,
         clock: Clock,
+        callback_timezone: str = DEFAULT_TIMEZONE,
+        contact_resolver: Callable[[UUID], str] | None = None,
     ) -> None:
+        """``contact_resolver`` turns a lead id into a WhatsApp destination.
+
+        It defaults to a ``synthetic:`` reference that no real number can equal, so a
+        simulator wired to the live client refuses to send rather than reaching a stranger.
+        That was already true by accident - the reference has always been synthetic - but
+        nothing enforced it and nothing said so. It is a callback rather than a field on
+        :class:`FollowUpSummary` because that summary is a deliberately minimised set of
+        allowlisted facts, and a phone number does not belong in it.
+        """
+
         self._policy = policy
         self._callbacks = callbacks
         self._decks = decks
         self._whatsapp = whatsapp
         self._clock = clock
+        self._callback_timezone = callback_timezone
+        self._contact_resolver = contact_resolver or _synthetic_contact
 
     async def preview_whatsapp(
         self,
@@ -52,13 +123,14 @@ class ActionWorkflowService:
             )
         message = self._render_follow_up(follow_up)
         result = await self._whatsapp.send_message(
-            f"synthetic:{follow_up.lead_id}",
+            self._contact_resolver(follow_up.lead_id),
             message,
             f"simulator:{session_id}:whatsapp:{operation_id}",
         )
         return ActionPreviewResult(
             decision=decision,
-            label="Mock WhatsApp preview prepared; nothing was sent.",
+            label=_delivery_label(result.status, result.detail),
+            executed=result.status == "sent",
             provider_reference=result.provider_reference,
         )
 
@@ -68,10 +140,20 @@ class ActionWorkflowService:
         session_id: UUID,
         lead_id: UUID,
         delay_minutes: int,
+        follow_up: FollowUpSummary,
         context: ActionAuthorizationContext,
         operation_id: UUID,
         requested_at: datetime,
     ) -> ActionPreviewResult:
+        """Arrange the next call, about what this one actually established.
+
+        Takes the same minimised summary the deck and the WhatsApp follow-up are built
+        from, for the same reason `preview_deck` does: one place decides what a
+        conversation may emit. Before this it took no conversation input at all beyond a
+        delay, so it sent the scheduler a fixed agenda and a fixed timezone for every
+        buyer.
+        """
+
         decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
         if decision.status is AuthorizationStatus.BLOCKED:
             return ActionPreviewResult(
@@ -81,8 +163,8 @@ class ActionWorkflowService:
             lead_id=lead_id,
             callback_id=f"sim-{session_id.hex}-{operation_id.hex}",
             run_at=requested_at + timedelta(minutes=delay_minutes),
-            timezone="UTC",
-            agenda=CallbackAgenda.WEBSITE_DISCOVERY,
+            timezone=self._callback_timezone,
+            agenda=agenda_for(follow_up),
             idempotency_key=f"simulator:{session_id}:callback:{operation_id}",
         )
         callback = await self._callbacks.schedule(request, context)
@@ -156,13 +238,38 @@ class ActionWorkflowService:
 
     @staticmethod
     def _render_follow_up(follow_up: FollowUpSummary) -> str:
-        parts = ["Synthetic PitchBot follow-up"]
+        """The message a buyer receives after the call, in the language they spoke.
+
+        This branch and :meth:`preview_deck` are handed the identical minimised summary,
+        and until now only the deck used it properly. The message was assembled from raw
+        catalogue keys in hardcoded English, and dropped the budget entirely - so a Telugu
+        buyer who said *"మా బడ్జెట్ రెండు లక్షలు, మూడు నెలల్లో"* was sent
+        ``Business: apparel | Timeline: 3 months`` with no budget in it at all.
+
+        Rendering from the same phrase table the deck uses means adding a language cannot
+        leave one artefact behind. A line is omitted when the fact was never stated: a
+        slide has a fixed layout and fills the row with ``unstated``, a message is a list
+        of what is known.
+        """
+
+        phrases = phrases_for(follow_up.language)
+        parts = [phrases.follow_up_intro]
         if follow_up.business_type:
-            parts.append(f"Business: {follow_up.business_type}")
+            business = phrases.industry_name.get(follow_up.business_type, follow_up.business_type)
+            parts.append(f"{phrases.business_label}: {business}")
         if follow_up.requested_features:
-            parts.append(f"Features: {', '.join(follow_up.requested_features)}")
-        if follow_up.timeline_summary:
-            parts.append(f"Timeline: {follow_up.timeline_summary}")
+            labels = ", ".join(
+                phrases.feature_label.get(item, item) for item in follow_up.requested_features
+            )
+            parts.append(f"{phrases.features_label}: {labels}")
+        budget = stated_budget(follow_up.budget_summary)
+        if budget:
+            parts.append(f"{phrases.budget_label}: {budget}")
+        timeline = localised_timeline(follow_up.timeline_summary, phrases)
+        if timeline:
+            parts.append(f"{phrases.timeline_label}: {timeline}")
         if follow_up.next_steps:
-            parts.append(f"Next: {', '.join(follow_up.next_steps)}")
+            # The buyer's own next steps are allowlisted English identifiers, so the
+            # localised copy is shown instead - exactly as the deck's closing slide does.
+            parts.append(f"{phrases.next_label}: {', '.join(phrases.next_steps)}")
         return " | ".join(parts)

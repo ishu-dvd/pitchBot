@@ -183,6 +183,7 @@ def _build_service() -> SimulatorService:
             speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
             turn_taking=turn_taking,
             max_call_minutes=settings.max_call_minutes,
+            callback_timezone=settings.timezone,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -204,6 +205,7 @@ def _build_service() -> SimulatorService:
         speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
         turn_taking=turn_taking,
         max_call_minutes=settings.max_call_minutes,
+        callback_timezone=settings.timezone,
     )
 
 
