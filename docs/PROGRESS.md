@@ -2830,3 +2830,50 @@ that was one unlucky sentence or a class.
   `timeline` without it. Now pinned, and the batch closes at 12/12.
 
 Tests 1,568 -> 1,592.
+
+## Abuse: seven of twenty-four, and self-deprecation counted as an insult
+
+`_ABUSE_TERMS` was eleven entries - four English, two Devanagari, two romanised, three
+Telugu. Exactly the shape the opt-out list had before it was measured. Nothing had ever
+driven it as a concept-by-language matrix.
+
+- **7/24 heard.** Only "direct insult" and "told to be quiet" worked at all, and both had
+  holes: `चुप रह` was Devanagari-only so romanised "chup raho" missed, and `మూర్ఖుడు` never
+  matched the ordinary second-person `మూర్ఖుడివి`.
+- **The negative direction cost a call, not a label.** The engine redirects on the first
+  abuse signal and STOPS the conversation on the second. "I feel stupid asking this", "we
+  made a stupid mistake with our old site" and "हमने बेवकूफी की थी" were all abuse - a
+  non-technical buyer apologising before their most useful question was two sentences from
+  being hung up on.
+- **The four languages disagreed, and three got the harsher treatment.** `bakwas` was a bare
+  abuse term and `rubbish` was not, so "our old catalogue was rubbish" was flagged in Hindi,
+  Telugu and Hinglish and clean in English.
+- **Fix:** words that insult a person but criticise a thing now require a second-person
+  target via a template. `useless`, `rubbish`, `stupid`, `बेकार`, `बकवास`, `बेवकूफ`,
+  `చెత్త`, `మూర్ఖ` moved out of the bare list. Directed imperatives ("get lost",
+  "दफा हो", "పోరా", "bakwas mat") stay bare because they are directed by construction.
+- **Telugu was absent from `_SECOND_PERSON` entirely**, so every template built on it had
+  been English-and-Hindi-only.
+- **Result:** 7/24 -> 24/24 heard, 14/15 -> 19/19 clean, 8/8 identical across languages.
+
+### The switch that looked right and did nothing
+
+`reject_first_person=True` was the obvious way to stop self-deprecation. It is a no-op here:
+it means "the buyer is quoting their own earlier words" and requires a self-reporting verb
+(`I said`, `I told`), so it never fires on "I am an idiot". Removing it changed no behaviour,
+which is exactly how the mutation sweep surfaced it.
+
+What decides the reading is **which pronoun the insult sits beside**:
+
+| turn | distance | verdict |
+|---|---|---|
+| "I think **you** are an **idiot**" | 3 | abuse |
+| "**You** know I am an **idiot** with computers" | 5 | clean |
+| "आप जानते हैं मैं बेवकूफ हूँ" | 4 | clean |
+
+`max_gaps` is a distance, not a count of words between, so 3 is the copula-plus-article
+case and is exactly the boundary. `ordered=True` matters independently: unordered,
+"मैं बेवकूफ हूँ आप जानते हैं" is flagged while its English equivalents are not - the same
+cross-language asymmetry, reintroduced by one missing keyword.
+
+Mutation batch 4: 20/20. Tests 1,592 -> 1,647.
