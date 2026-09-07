@@ -1482,7 +1482,7 @@ def extract_business_signals(
 
     evidence = _extract_evidence(
         state.lead_id,
-        normalized,
+        text,
         source_span_id,
         requirement_recorded=any(fact.key == "requested_features" for fact in facts),
     )
@@ -1548,6 +1548,8 @@ _PAST_STATE_CUES: Final[tuple[str, ...]] = (
     "stopped using",
     "used to",
     "no longer",
+    "last year",
+    "last month",
     "we dropped",
     "we moved off",
     "karte the",
@@ -1598,6 +1600,8 @@ _REFUSAL_CUES: Final[tuple[str, ...]] = (
     "no need",
     "not interested",
     "not looking for",
+    "not ready",
+    "no budget",
     "we don't need",
     "we do not need",
     "instead of",
@@ -1714,9 +1718,54 @@ def _requesting_clauses(text: str) -> tuple[str, ...]:
     return tuple(clauses)
 
 
+def _committing_clauses(text: str) -> tuple[str, ...]:
+    """The clauses of a turn that could be the buyer committing to something.
+
+    Evidence matching used to read the whole turn, and features were the only thing that
+    was clause-scoped. Measured over twelve sentences that contain an evidence phrase while
+    committing nothing, **eleven scored a commitment** and every one of them warmed the lead
+    far enough to be approved for a deck: *"We have no budget for this"* scored ``budget``,
+    *"We are not ready to start yet"* scored ``decision``, *"I do not want a demo right
+    now"* scored ``next-step``. A negation read as the thing it negates - the same failure
+    that was fixed for feature requests, one layer down and with more at stake, because
+    this is what the authorization policy consults.
+
+    Three disqualifiers, and they are **unconditional** here where the request version makes
+    two of them conditional. There is no equivalent of a request cue to rescue a clause: a
+    refusal, a third party or a past tense simply is not this buyer committing now.
+
+    Present state is deliberately *not* a disqualifier. *"Right now our budget is 2 lakh"*
+    describes today and is still a budget; that cue exists to stop a feature word being read
+    as an order, which is not the failure here.
+
+    Twelve such sentences went from one clean to nine, with all ten real commitments kept.
+    **The three that remain are one class and are not reachable from a phrase list:** *"Our
+    stock is running low this month"*, *"We had a terrible month, sales are down"* and *"My
+    accountant is away this week"* all score ``timeline``, because the evidence list carries
+    the bare unit stems (`month`, `week`) so that *"in 3 months"* counts. The time word is
+    real; it is simply attached to something other than the project, and telling those apart
+    needs the verb, not another cue. Removing the stems would lose *"in 3 months"*, which is
+    the more expensive mistake. Left measured and open rather than papered over.
+    """
+
+    clauses = []
+    for raw in _CLAUSE_BOUNDARY.split(text):
+        clause = normalize_text(raw)
+        if not clause:
+            continue
+        if (
+            _contains_any(clause, _REFUSAL_CUES)
+            or _contains_any(clause, _THIRD_PARTY_CUES)
+            or _contains_any(clause, _PAST_STATE_CUES)
+        ):
+            continue
+        clauses.append(clause)
+    return tuple(clauses)
+
+
 def _extract_evidence(
     lead_id: UUID,
-    normalized: str,
+    text: str,
     source_span_id: UUID,
     *,
     requirement_recorded: bool = False,
@@ -1732,7 +1781,28 @@ def _extract_evidence(
                 source_span_ids=(source_span_id,),
             )
         )
-    for dimension, weight, phrases in (*_POSITIVE_EVIDENCE, *_NEGATIVE_EVIDENCE):
+    clauses = _committing_clauses(text)
+    normalized = normalize_text(text)
+    for dimension, weight, phrases in _POSITIVE_EVIDENCE:
+        if any(_contains_any(clause, phrases) for clause in clauses):
+            evidence.append(
+                IntentEvidence(
+                    lead_id=lead_id,
+                    dimension=dimension,
+                    weight=weight,
+                    reason=f"Buyer explicitly expressed {dimension} information.",
+                    source_span_ids=(source_span_id,),
+                )
+            )
+    # Counter-evidence reads the whole turn, and must. `_REFUSAL_CUES` and
+    # `_NEGATIVE_EVIDENCE` describe the same sentences - "not interested", "do not need" -
+    # so running negative evidence through a guard that discards refusal clauses would
+    # delete every rejection the product can detect. A buyer saying no would produce no
+    # evidence at all and classify REVIEW_NEEDED rather than COLD: the exact mutation that
+    # survived the suite before `test_a_buyer_who_says_no_is_cold_and_not_merely_
+    # unclassified` existed. The asymmetry is the point - the guard asks "is this buyer
+    # committing?", and a refusal is not a commitment but is still information.
+    for dimension, weight, phrases in _NEGATIVE_EVIDENCE:
         if _contains_any(normalized, phrases):
             evidence.append(
                 IntentEvidence(

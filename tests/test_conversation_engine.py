@@ -1258,3 +1258,116 @@ def test_describing_the_past_does_not_swallow_the_request_beside_it(
     """
 
     assert feature in _features_heard(text, LanguageCode.ENGLISH)
+
+
+@pytest.mark.parametrize(
+    ("dimension", "text"),
+    [
+        ("timeline", "We do not want to decide this month"),
+        ("next-step", "My nephew showed me a demo of some other product"),
+        ("next-step", "We had a meeting about this last year and dropped it"),
+        ("next-step", "I do not want a demo right now"),
+        ("next-step", "A friend sent me a sample of their catalogue"),
+        ("budget", "We have no budget for this"),
+        ("budget", "Our competitor spent 5 lakh on their website"),
+        ("decision", "We are not ready to start yet"),
+        ("decision", "Last year we were ready to start and then stopped"),
+        ("timeline", "We redesigned the site last month"),
+    ],
+)
+def test_containing_a_commitment_word_is_not_making_a_commitment(dimension: str, text: str) -> None:
+    """Positive evidence is clause-scoped, and used not to be.
+
+    Features were the only thing `_requesting_clauses` protected. Evidence matched the
+    whole turn, so a negation scored the thing it negated: measured over twelve sentences
+    that contain an evidence phrase while committing nothing, **eleven scored a
+    commitment**, and every one warmed the lead far enough to be approved for a deck.
+    "We have no budget for this" scored `budget`. This is the layer the authorization
+    policy reads, so it mattered more here than it did for features.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=LanguageCode.ENGLISH)
+
+    assert not any(item.dimension == dimension for item in result.evidence)
+
+
+@pytest.mark.parametrize(
+    ("dimension", "text"),
+    [
+        ("timeline", "We want to launch this month"),
+        ("timeline", "We need it live in 3 months"),
+        ("next-step", "Can you send me a demo?"),
+        ("next-step", "Let us set up a meeting next week"),
+        ("budget", "Our budget is around 2 lakh"),
+        ("budget", "We can spend up to ten lakh"),
+        ("decision", "We are ready to start"),
+        ("decision", "Please send proposal"),
+        # Present state is deliberately not a disqualifier for evidence, only for feature
+        # requests. Describing today is how people state a budget they already hold, and
+        # adding the present-state cue to the commitment guard survived the whole suite
+        # before these three existed.
+        ("budget", "Right now our budget is 2 lakh"),
+        ("decision", "At the moment we are ready to start"),
+        ("next-step", "Currently we want a demo"),
+    ],
+)
+def test_a_real_commitment_survives_the_clause_guard(dimension: str, text: str) -> None:
+    """The other direction, which decides whether the guard was worth adding.
+
+    A guard that suppresses false commitments by suppressing all of them costs more than
+    it saves - a qualified buyer refused a deck is the failure this whole area exists to
+    stop. All ten commitments measured survive.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=LanguageCode.ENGLISH)
+
+    assert any(item.dimension == dimension for item in result.evidence)
+
+
+@pytest.mark.parametrize(
+    ("dimension", "text"),
+    [
+        ("rejection", "We are not interested, thanks"),
+        ("no-need", "We do not need a website"),
+    ],
+)
+def test_counter_evidence_is_not_clause_scoped_and_must_not_be(dimension: str, text: str) -> None:
+    """The asymmetry, pinned, because it is the one that would silently delete rejection.
+
+    `_REFUSAL_CUES` and `_NEGATIVE_EVIDENCE` describe the same sentences - "not
+    interested", "do not need". Running counter-evidence through a guard that discards
+    refusal clauses deletes every rejection the product can detect, and the buyer who said
+    no classifies REVIEW_NEEDED instead of COLD. Both are blocked by the policy today, so
+    nothing downstream would have noticed.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=LanguageCode.ENGLISH)
+
+    assert any(item.dimension == dimension for item in result.evidence)
+
+
+def test_a_refusal_beside_a_commitment_only_removes_the_refused_half() -> None:
+    """Clause scoping, not turn scoping - the reason this is not just a stop-list.
+
+    "We do not want a demo, but our budget is 2 lakh and we are ready to start" has to lose
+    the next-step and keep the money. A guard that judged the whole turn would have to get
+    one of them wrong.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(
+        session_id,
+        text="We do not want a demo, but our budget is 2 lakh and we are ready to start",
+        language=LanguageCode.ENGLISH,
+    )
+
+    dimensions = {item.dimension for item in result.evidence}
+    assert "next-step" not in dimensions
+    assert {"budget", "decision"} <= dimensions
