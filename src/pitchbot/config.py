@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     lead_recall_failure_budget: int = 3
 
     timezone: str = "Asia/Kolkata"
+    # Both of these are enforced. `max_call_minutes` refuses a new turn once the call has
+    # run this long (0 disables it); `max_turns` caps the conversation's turn count. Until
+    # PR 54 neither reached the running service: the duration cap had no consumer at all,
+    # and the turn cap was only applied when durable history was enabled - so the default
+    # deployment ran on ConversationEngine's own default of 100, not on this number.
     max_call_minutes: int = 12
     max_turns: int = 80
 

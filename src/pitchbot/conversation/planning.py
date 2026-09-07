@@ -181,8 +181,16 @@ ANSWERABLE_OBJECTIONS: Final[tuple[Intent, ...]] = (
     Intent.OBJECTING,
     Intent.COMPARING,
     Intent.STALLING,
+    Intent.SOCIAL_PROOF,
+    Intent.NEXT_STEPS,
 )
 """Stances that deserve a sentence of their own before the conversation moves on.
+
+Not only pushback, despite the name: a direct question is the other thing a person answers
+before continuing. ``SOCIAL_PROOF`` and ``NEXT_STEPS`` were added after a recorded call
+answered *"Who else have you built something like this for?"* and *"What happens next?"*
+with the closing line, because neither matched a stance and the planner had nothing else
+to say.
 
 ``READY`` is missing on purpose: agreement is not a concern to be handled, it is a
 signal to stop qualifying and close. ``EXPLORING`` is missing because it is the ordinary
@@ -280,16 +288,43 @@ class LanguagePhrases:
 
     acknowledge: Mapping[Slot, str]
     ask: Mapping[Slot, str]
+    ask_again: Mapping[Slot, str]
+    """How to ask a second time, when the first attempt did not land.
+
+    Repeating a question word for word is what the closing line used to do, and it reads
+    the same way here: the buyer said something, and the agent replied with the sentence it
+    had just used. Measured on the shipped script, turn 2 of a recorded call answered a
+    statement of pain with a verbatim repeat of turn 1's question.
+
+    A person rephrases and lowers the bar - "even a rough range helps" - rather than saying
+    it again louder. `MAX_ASKS_PER_SLOT` still caps the attempts at two.
+    """
+
     objection: Mapping[Intent, str]
     pitch: Mapping[str, str]
     closing: str
+    closing_again: str
+    """The second close. Asking "demo or proposal?" twice is how a script sounds.
+
+    A person who gets no answer stops asking and offers something concrete instead, which
+    is also the move that keeps a deal alive: it costs the buyer nothing to accept.
+    """
+    closing_final: str
+    """The third close and every one after it, which stops pushing.
+
+    Measured before this existed: the closing question was returned verbatim on three
+    consecutive turns, including as the answer to two direct buyer questions. Past two
+    attempts the pressure itself is the problem, so this one hands control back.
+    """
     confirm: str
     repeated: str
     switched: str
 
     def __post_init__(self) -> None:
         missing = [
-            slot for slot in ASK_ORDER if slot not in self.acknowledge or slot not in self.ask
+            slot
+            for slot in ASK_ORDER
+            if slot not in self.acknowledge or slot not in self.ask or slot not in self.ask_again
         ]
         if missing:
             raise ValueError(f"language phrases missing slots: {[s.value for s in missing]}")
@@ -321,7 +356,23 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.BUDGET: "What budget range are you working with?",
             Slot.TIMELINE: "When would you like this live?",
         },
+        ask_again={
+            Slot.BUSINESS_TYPE: "Let me put it another way - what does the business sell?",
+            Slot.REQUESTED_FEATURES: (
+                "To put it another way, what should a customer be able to do on the site?"
+            ),
+            Slot.BUDGET: "Even a rough range helps me scope this - what are you thinking?",
+            Slot.TIMELINE: "Roughly when would you want this live?",
+        },
         closing=("That covers what I need. Would a short demo or a written proposal help more?"),
+        closing_again=(
+            "Either one works. I will put a short proposal together and send it across, "
+            "and we can talk once you have seen it."
+        ),
+        closing_final=(
+            "Take your time. I will send the details across, "
+            "and you can pick this up whenever it suits you."
+        ),
         confirm=(
             "Good - I will put the proposal together and send it across, "
             "and we can walk through it whenever suits you."
@@ -340,6 +391,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Intent.STALLING: (
                 "No pressure at all. "
                 "I can leave you the details and pick this up whenever it suits you."
+            ),
+            Intent.SOCIAL_PROOF: (
+                "Fair question. Rather than name other customers on a call, "
+                "I will include relevant examples in writing."
+            ),
+            Intent.NEXT_STEPS: (
+                "The process is short: we confirm what you need, you review a sample, "
+                "and nothing gets built until you approve the scope."
             ),
         },
         pitch={
@@ -382,7 +441,17 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.BUDGET: "आपका अनुमानित बजट कितना है?",
             Slot.TIMELINE: "यह वेबसाइट कब तक चालू करनी है?",
         },
+        ask_again={
+            Slot.BUSINESS_TYPE: "थोड़ा और साफ़ कर दीजिए — आपका व्यवसाय बेचता क्या है?",
+            Slot.REQUESTED_FEATURES: "दूसरे शब्दों में — ग्राहक साइट पर क्या कर पाए?",
+            Slot.BUDGET: "मोटा-मोटा अंदाज़ा भी चलेगा — कितना सोच रहे हैं?",
+            Slot.TIMELINE: "लगभग कब तक चालू करना चाहेंगे?",
+        },
         closing="मुझे ज़रूरी जानकारी मिल गई। क्या एक छोटा डेमो ठीक रहेगा या लिखित प्रस्ताव?",
+        closing_again=(
+            "दोनों में से कुछ भी ठीक है। मैं एक छोटा प्रस्ताव तैयार करके भेज देता हूँ, फिर आप देखकर बता दीजिएगा।"
+        ),
+        closing_final=("ठीक है, कोई दबाव नहीं। मैं ब्यौरा भेज देता हूँ — जब आप कहें, तब आगे बढ़ा देंगे।"),
         confirm=("बढ़िया — मैं प्रस्ताव तैयार करके भेज देता हूँ, और जब आपको सुविधा हो तब उस पर बात कर लेंगे।"),
         repeated="यह मैंने दर्ज कर लिया है।",
         switched="बिलकुल, आगे की बात हिंदी में करते हैं।",
@@ -396,6 +465,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             ),
             Intent.STALLING: (
                 "कोई जल्दी नहीं है। मैं जानकारी भेज देता हूँ, जब आपको सही लगे तब आगे बात करते हैं।"
+            ),
+            Intent.SOCIAL_PROOF: (
+                "सही सवाल है। फ़ोन पर दूसरे ग्राहकों के नाम लेना ठीक नहीं होता — "
+                "काम के उदाहरण मैं लिखित में साझा कर दूँगा।"
+            ),
+            Intent.NEXT_STEPS: (
+                "तरीका छोटा है — पहले ज़रूरतें तय होती हैं, फिर आप एक नमूना देखते हैं, "
+                "और दायरा मंज़ूर होने तक कुछ नहीं बनाया जाता।"
             ),
         },
         pitch={
@@ -437,7 +514,15 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.BUDGET: "మీ బడ్జెట్ ఎంత అనుకుంటున్నారు?",
             Slot.TIMELINE: "ఇది ఎప్పటికి సిద్ధంగా ఉండాలి?",
         },
+        ask_again={
+            Slot.BUSINESS_TYPE: "కొంచెం స్పష్టంగా చెప్పండి — మీ వ్యాపారం ఏమి అమ్ముతుంది?",
+            Slot.REQUESTED_FEATURES: "మరో విధంగా అడుగుతాను — సైట్‌లో కస్టమర్ ఏమి చేయగలగాలి?",
+            Slot.BUDGET: "సుమారు అంచనా అయినా చాలు — ఎంత అనుకుంటున్నారు?",
+            Slot.TIMELINE: "సుమారు ఎప్పటికి సిద్ధంగా ఉండాలి?",
+        },
         closing=("నాకు కావలసిన సమాచారం వచ్చింది. ఒక చిన్న డెమో మంచిదా లేక రాతపూర్వక ప్రతిపాదనా?"),
+        closing_again=("రెండూ సరిపోతాయి. నేను ఒక చిన్న ప్రతిపాదన సిద్ధం చేసి పంపుతాను, చూసిన తర్వాత మాట్లాడుకుందాం."),
+        closing_final=("తొందరేమీ లేదు. వివరాలు పంపుతాను — మీకు వీలైనప్పుడు కొనసాగిద్దాం."),
         confirm=("మంచిది — నేను ప్రతిపాదన సిద్ధం చేసి పంపిస్తాను, మీకు వీలైనప్పుడు దాని గురించి మాట్లాడుకుందాం."),
         repeated="అది నేను నమోదు చేసుకున్నాను.",
         switched="తప్పకుండా, ఇక తెలుగులోనే మాట్లాడుకుందాం.",
@@ -447,6 +532,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             ),
             Intent.COMPARING: ("పోల్చి చూడటం మంచిదే. ప్రతి కోట్‌లో ఏమి కలిసి ఉందో చూసిన తర్వాతే ధరను బేరీజు వేయండి."),
             Intent.STALLING: ("తొందరేమీ లేదు. వివరాలు పంపిస్తాను, మీకు వీలైనప్పుడు ముందుకు వెళ్దాం."),
+            Intent.SOCIAL_PROOF: (
+                "సరైన ప్రశ్న. ఫోన్‌లో ఇతర కస్టమర్ల పేర్లు చెప్పను — "
+                "ప్రతిపాదనతో పాటు సంబంధిత ఉదాహరణలు రాతపూర్వకంగా పంపిస్తాను."
+            ),
+            Intent.NEXT_STEPS: (
+                "ప్రక్రియ చిన్నదే — ముందు అవసరాలు ఖరారు చేస్తాం, తర్వాత మీరు ఒక నమూనా చూస్తారు, "
+                "పరిధిని ఆమోదించే వరకు ఏమీ నిర్మించము."
+            ),
         },
         pitch={
             "apparel": (
@@ -495,8 +588,21 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Slot.BUDGET: "Aapka budget kitna soch rahe hain?",
             Slot.TIMELINE: "Yeh website kab tak live karni hai?",
         },
+        ask_again={
+            Slot.BUSINESS_TYPE: "Thoda saaf kar dijiye - aapka business bechta kya hai?",
+            Slot.REQUESTED_FEATURES: "Doosre shabdon mein - customer site par kya kar paaye?",
+            Slot.BUDGET: "Mota-mota andaaza bhi chalega - kitna soch rahe hain?",
+            Slot.TIMELINE: "Lagbhag kab tak live karna chahenge?",
+        },
         closing=(
             "Itni jaankari kaafi hai. Ek chhota demo theek rahega ya likhit proposal bhej doon?"
+        ),
+        closing_again=(
+            "Dono theek hain. Main ek chhota proposal taiyaar karke bhej deta hoon, "
+            "dekh kar bata dijiyega."
+        ),
+        closing_final=(
+            "Koi dabaav nahi. Details bhej deta hoon - jab aap kahein, tab aage badha denge."
         ),
         confirm=(
             "Badhiya - main proposal taiyaar karke bhej deta hoon, "
@@ -516,6 +622,14 @@ _PHRASES: Final[Mapping[LanguageCode, LanguagePhrases]] = {
             Intent.STALLING: (
                 "Koi jaldi nahi hai. "
                 "Main details bhej deta hoon, jab aapko theek lage tab aage badhte hain."
+            ),
+            Intent.SOCIAL_PROOF: (
+                "Sahi sawaal hai. Phone par doosre customers ke naam lena theek nahi hota - "
+                "kaam ke examples main likhit mein share kar dunga."
+            ),
+            Intent.NEXT_STEPS: (
+                "Tarika chhota hai - pehle requirements tay hote hain, phir aap ek sample "
+                "dekhte hain, aur scope approve hone tak kuch banaya nahi jaata."
             ),
         },
         pitch={
@@ -583,6 +697,8 @@ def render_reply(
     *,
     repeated: bool = False,
     switched: bool = False,
+    closing_count: int = 0,
+    ask_count: int = 0,
 ) -> str:
     """Compose the reply from fixed phrases only.
 
@@ -614,7 +730,10 @@ def render_reply(
     if plan.pitch is not None:
         parts.append(phrases.pitch[plan.pitch])
     if plan.ask is not None:
-        parts.append(phrases.ask[plan.ask])
+        # How many times this slot has already been asked, so the second attempt rephrases
+        # instead of repeating. A question asked twice word for word reads as not having
+        # listened, which is the failure this module exists to remove.
+        parts.append(phrases.ask[plan.ask] if ask_count <= 0 else phrases.ask_again[plan.ask])
     elif plan.intent is Intent.READY:
         # A buyer who has agreed must not be asked the closing question again. Repeating
         # "would a demo or a proposal help?" at the one moment they said yes is the most
@@ -622,7 +741,16 @@ def render_reply(
         # this path did until the shipped sales script was actually run.
         parts.append(phrases.confirm)
     else:
-        parts.append(phrases.closing)
+        # How many times this conversation has already closed, so the same sentence is
+        # never returned twice. Repetition is the single most robotic thing the agent
+        # did: measured against the shipped script it produced three identical replies in
+        # a row, two of them answering direct questions.
+        if closing_count <= 0:
+            parts.append(phrases.closing)
+        elif closing_count == 1:
+            parts.append(phrases.closing_again)
+        else:
+            parts.append(phrases.closing_final)
     return " ".join(parts)
 
 

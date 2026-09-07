@@ -652,3 +652,41 @@ def test_every_adversarial_case_asserted_in_this_module_still_fires() -> None:
 )
 def test_ordinary_business_turns_raise_no_safety_signals(text: str) -> None:
     assert detect_safety_signals(text) == ()
+
+
+def test_a_closed_conversation_says_something_new_each_turn() -> None:
+    """The counter has to be advanced by the engine, not merely supported by the renderer.
+
+    `render_reply` could take a `closing_count` that nothing ever increments and every
+    planner test would still pass, which is how the thresholds in this repo have twice
+    ended up unreachable. This drives real turns and reads the sentences back.
+    """
+
+    engine = ConversationEngine()
+    session_id = uuid4()
+    engine.create_session(session_id)
+
+    engine.process_turn(
+        session_id,
+        text="We sell apparel and need a catalog with online payment.",
+        language=LanguageCode.ENGLISH,
+    )
+    engine.process_turn(
+        session_id,
+        text="Our budget is 150000 and we want it live in 3 months.",
+        language=LanguageCode.ENGLISH,
+    )
+
+    spoken = [
+        engine.process_turn(
+            session_id,
+            text=text,
+            language=LanguageCode.ENGLISH,
+        ).reply
+        for text in (
+            "Who else have you built something like this for?",
+            "Okay, that sounds reasonable. What happens next?",
+        )
+    ]
+
+    assert len(set(spoken)) == len(spoken), spoken

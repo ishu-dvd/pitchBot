@@ -1,38 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Final
 
-from pitchbot.actions.models import DeckIndustry, DeckPreview, DeckRequest, DeckSlide
+from pitchbot.actions.deck_content import phrases_for
+from pitchbot.actions.models import DeckPreview, DeckRequest, DeckSlide
 from pitchbot.adapters import ArtifactAdapter, Clock, EphemeralOperationStore, SystemClock
 from pitchbot.domain import features as catalog_features
 
-_INDUSTRY_CONTENT: dict[DeckIndustry, tuple[str, tuple[str, ...]]] = {
-    DeckIndustry.APPAREL: (
-        "Apparel commerce",
-        ("Size and color variants", "Seasonal collections", "Mobile-first catalog"),
-    ),
-    DeckIndustry.TOYS: (
-        "Toy store commerce",
-        ("Age and category discovery", "Safety information", "Gift-ready collections"),
-    ),
-    DeckIndustry.BOOKS: (
-        "Book commerce",
-        ("Author and genre discovery", "Searchable catalog", "New-release collections"),
-    ),
-    DeckIndustry.FOOD: (
-        "Food commerce",
-        ("Menu and availability", "Delivery-ready ordering", "Dietary information"),
-    ),
-    DeckIndustry.IMPORT_EXPORT: (
-        "Import-export showcase",
-        ("Product specifications", "Markets and certifications", "Inquiry workflow"),
-    ),
-    DeckIndustry.PLASTICS: (
-        "Plastics manufacturing",
-        ("Material and grade catalog", "Technical specifications", "Bulk inquiry workflow"),
-    ),
-}
 _ALLOWED_FEATURES = catalog_features()
+
+# Leading cue words the budget extractor keeps because it matches from the cue onwards, so
+# a captured "budget is 150000" would otherwise reach a slide reading "Budget: budget is
+# 150000". Stripped for display only; the stored fact is untouched.
+_BUDGET_CUES: Final[tuple[str, ...]] = (
+    "budget is",
+    "budget",
+    "बजट",
+    "బడ్జెట్",
+)
 
 
 class DeckService:
@@ -68,7 +54,8 @@ class DeckService:
         if len(self._previews) >= self._max_decks:
             raise RuntimeError("Deck capacity reached")
 
-        subtitle, industry_bullets = _INDUSTRY_CONTENT[request.industry]
+        phrases = phrases_for(request.language)
+        industry = request.industry.value
         features = tuple(
             feature for feature in request.requested_features if feature in _ALLOWED_FEATURES
         )
@@ -78,23 +65,35 @@ class DeckService:
             deck_id=request.deck_id,
             industry=request.industry,
             language=request.language,
-            title=f"Sample Business: {subtitle}",
+            title=phrases.title_template.format(business=phrases.industry_name[industry]),
             slides=(
+                # First, and deliberately: a buyer opens a deck to find out whether they
+                # were listened to. Everything after this slide is the same for every
+                # buyer in the vertical, so leading with the generic material is what made
+                # the old deck feel like a template - which it was.
                 DeckSlide(
-                    title="Business opportunity",
-                    bullets=industry_bullets,
-                ),
-                DeckSlide(
-                    title="Suggested website scope",
-                    bullets=tuple(_feature_label(item) for item in features),
-                ),
-                DeckSlide(
-                    title="Safe next step",
+                    title=phrases.heard_title,
                     bullets=(
-                        "Confirm requirements and content ownership",
-                        "Review a synthetic prototype",
-                        "Approve scope before implementation",
+                        f"{phrases.business_label}: {phrases.industry_name[industry]}",
+                        f"{phrases.features_label}: "
+                        + ", ".join(phrases.feature_label[item] for item in features),
+                        f"{phrases.budget_label}: "
+                        f"{_stated(request.budget_summary) or phrases.unstated}",
+                        f"{phrases.timeline_label}: "
+                        f"{_stated(request.timeline_summary) or phrases.unstated}",
                     ),
+                ),
+                DeckSlide(
+                    title=phrases.opportunity_title,
+                    bullets=phrases.industry_bullets[industry],
+                ),
+                DeckSlide(
+                    title=phrases.scope_title,
+                    bullets=tuple(phrases.feature_label[item] for item in features),
+                ),
+                DeckSlide(
+                    title=phrases.next_step_title,
+                    bullets=phrases.next_steps,
                 ),
             ),
             generated_at=self._clock.now(),
@@ -137,11 +136,20 @@ class DeckService:
                 self._artifact_adapter.clear_operations(operation_key_prefix)
 
 
-def _feature_label(feature: str) -> str:
-    return {
-        "catalog": "Structured product catalog",
-        "online-payments": "Reviewed online payment flow",
-        "inventory": "Inventory visibility",
-        "whatsapp": "Policy-approved WhatsApp inquiry path",
-        "multilingual": "English and Hindi content support",
-    }[feature]
+def _stated(summary: str | None) -> str | None:
+    """Present a captured commercial fact without its extraction artefacts.
+
+    The budget extractor matches from the cue word onwards, so the stored fact reads
+    "budget is 150000". A slide already labelled "Budget" must not repeat the word, and a
+    buyer reading their own figure back should see the figure.
+    """
+
+    if summary is None:
+        return None
+    text = summary.strip()
+    lowered = text.lower()
+    for cue in _BUDGET_CUES:
+        if lowered.startswith(cue.lower()):
+            text = text[len(cue) :].lstrip(" :=-")
+            break
+    return text or None

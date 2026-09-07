@@ -2680,3 +2680,261 @@ line has dropped.
 The `~2,587 ms` figure is corrected where it was load-bearing (the CLI help, `.env.example`,
 the settings comment) and left untouched in earlier entries, which recorded what was true
 when they were written.
+
+
+## The deck ignored the call that produced it (2026-09-07)
+
+Two of this repository's habits met here. The first is that a passing suite says each part
+is internally consistent, not that the parts are connected. The second is that running the
+product finds what tests cannot. `probe_selling_and_deck.py` holds one apparel call and
+then asks for the artefact the call exists to produce.
+
+### What the call knew, and what the deck said
+
+The conversation captured four facts:
+
+| fact | value |
+|---|---|
+| `business_type` | `apparel` |
+| `requested_features` | `catalog,online-payments` |
+| `budget_stated` | `budget is 150000` |
+| `timeline` | `3 months` |
+
+The deck it handed over:
+
+```
+title: Sample Business: Apparel commerce
+[Business opportunity]   Size and color variants / Seasonal collections / Mobile-first catalog
+[Suggested website scope] Structured product catalog / Reviewed online payment flow
+[Safe next step]          Confirm requirements... / Review a synthetic prototype / Approve scope...
+```
+
+The budget and the timing - the two facts a proposal is judged on - are absent, and the
+title is a placeholder that shipped. Only the feature list survived, because
+`preview_deck` took a bare feature tuple while the identical WhatsApp branch two lines
+above it called `build_follow_up(facts=facts)` and received everything.
+
+### The same deck in three languages
+
+`DeckRequest` rejects `LanguageCode.UNKNOWN` with *"Deck language must be explicit"*, so
+every caller must state a language. It was then never read:
+
+| requested | title | first bullet |
+|---|---|---|
+| `en` | Sample Business: Apparel commerce | Size and color variants |
+| `hi` | Sample Business: Apparel commerce | Size and color variants |
+| `te` | Sample Business: Apparel commerce | Size and color variants |
+
+Byte-identical. For a product whose premise is selling in the buyer's language, this was
+the deck defect that mattered most.
+
+### And the agent repeated itself
+
+The same run recorded the worst human-likeness defect in the product. Once every slot is
+filled `plan_reply` moves to `CLOSE`, and `render_reply` had exactly one closing sentence:
+
+```
+BUYER : Our budget is 150000 and we want it live in 3 months.
+AGENT : ...That covers what I need. Would a short demo or a written proposal help more?
+BUYER : Who else have you built something like this for?
+AGENT : That covers what I need. Would a short demo or a written proposal help more?
+BUYER : Okay, that sounds reasonable. What happens next?
+AGENT : That covers what I need. Would a short demo or a written proposal help more?
+```
+
+Three consecutive turns, two of them answering a direct question. After the change the
+close escalates the way a person does - ask, then offer something concrete, then stop
+pushing:
+
+```
+AGENT : ...That covers what I need. Would a short demo or a written proposal help more?
+AGENT : Either one works. I will put a short proposal together and send it across, and we
+        can talk once you have seen it.
+AGENT : Take your time. I will send the details across, and you can pick this up whenever
+        it suits you.
+```
+
+### Still open at the time
+
+Two defects the same run exposed and that change did not fix. *"Everything is on WhatsApp
+and it is getting hard to manage"* is a statement of pain, and the extractor reads it as a
+request for the WhatsApp **feature**, because `whatsapp` is a feature keyword. And a
+social-proof question - *"who else have you built this for"* - matches no intent, so it
+receives whatever the planner was going to say anyway. Both are recorded rather than
+guessed at.
+
+
+## A mention is not an order, and a question deserves an answer (2026-09-07)
+
+The two defects the section above left open, measured on a labelled corpus before either
+was touched. `probe_hearing.py` holds eleven turns labelled with the features a
+salesperson would record, and seven lines labelled with whether a salesperson would answer
+them.
+
+### Hearing a request: 6 / 11
+
+| said | recorded | should have been |
+|---|---|---|
+| "We need a catalog and online payment on the site." | catalog, online-payments | same |
+| "Right now everything is on WhatsApp and it is getting hard to manage." | **whatsapp** | nothing |
+| "We currently take orders on WhatsApp." | **whatsapp** | nothing |
+| "At the moment our catalog is just photos in a folder." | **catalog** | nothing |
+| "Abhi sab kuch WhatsApp par hi hota hai." | **whatsapp** | nothing |
+| "Right now everything is on WhatsApp, we want a proper catalog on the site." | **catalog, whatsapp** | catalog |
+
+The last row decides the design. Any rule that judges the whole turn must get one of those
+two features wrong, so suppression is **clause-scoped** - and the split runs on the raw
+text, because `normalize_text` turns punctuation into spaces and the clause boundary is
+gone by the time the normalised form exists.
+
+The second decision is that present-state words alone are too blunt to suppress on.
+*"Right now we need a catalog"* describes the present and places an order in the same
+breath, so a clause is discarded only when it names today **and** asks for nothing. A fix
+that traded this recall away would cost more than the defect it removed.
+
+Corpus after: **11 / 11**, with that sentence still recording `catalog`.
+
+### Answering a question: 2 / 7
+
+| asked | matched |
+|---|---|
+| "Who else have you built something like this for?" | nothing |
+| "Do you have any references I can talk to?" | nothing |
+| "Have you worked with clothing brands before?" | nothing |
+| "What happens next?" | nothing |
+| "How do we get started?" | nothing |
+| "We are also getting a quote from another vendor." | comparing |
+| "We sell clothes online." | nothing (correct) |
+
+`COMPARING` does not cover the first three. It answers *"we are getting other quotes"*,
+which is about price, while *"who else have you built this for"* is about trust - and the
+two want different sentences. Two new stances, `SOCIAL_PROOF` and `NEXT_STEPS`, each with
+an answer in all four languages.
+
+Corpus after: **7 / 7**. `"Let's start - how do we get started?"` still resolves to
+`READY`, because `INTENT_PRIORITY` keeps a commitment above an enquiry.
+
+The credibility answer names nobody. PitchBot is synthetic, so any customer it cited would
+be invented; it defers to something written instead, which is also what a real seller says
+on a call. `turn-understanding-v1` is left alone - it is a versioned model contract, and
+these two stances are rules-detected only.
+
+### The same call, after
+
+```
+BUYER : Right now everything is on WhatsApp and it is getting hard to manage.
+AGENT : What should the website let your customers do?          <- no invented feature
+BUYER : Who else have you built something like this for?
+AGENT : Fair question. Rather than name other customers on a call, I will include relevant
+        examples in writing. Either one works. I will put a short proposal together and
+        send it across, and we can talk once you have seen it.
+BUYER : Okay, that sounds reasonable. What happens next?
+AGENT : The process is short: we confirm what you need, you review a sample, and nothing
+        gets built until you approve the scope. Take your time. I will send the details
+        across, and you can pick this up whenever it suits you.
+```
+
+`requested_features` is now `catalog,online-payments`; the spurious `whatsapp` is gone.
+
+
+## The last verbatim repeat (2026-09-07)
+
+Re-running the call after the two fixes above left one robotic exchange:
+
+```
+AGENT : ...What should the website let your customers do?
+BUYER : Right now everything is on WhatsApp and it is getting hard to manage.
+AGENT : What should the website let your customers do?
+```
+
+The same sentence, immediately, with no sign the buyer had spoken. This is the defect the
+closing sequence already fixed, one level down - and the state it needed was already there:
+`asked_slot_counts` is passed to `plan_reply` so a slot is not asked forever, and the same
+count says whether this is a first attempt or a second.
+
+A second attempt now rephrases and lowers the bar rather than repeating:
+
+| slot | first | second |
+|---|---|---|
+| features | "What should the website let your customers do?" | "To put it another way, what should a customer be able to do on the site?" |
+| budget | "What budget range are you working with?" | "Even a rough range helps me scope this - what are you thinking?" |
+| timeline | "When would you like this live?" | "Roughly when would you want this live?" |
+
+`MAX_ASKS_PER_SLOT` is untouched, so this changes the wording and not how long the agent
+pushes - two attempts, then the planner moves on.
+
+One ordering detail worth recording, because a mutation caught it: the engine increments
+`asked_slot_counts` **before** rendering, so the count has to be read into a local first.
+Reading it after the increment makes every first ask render as a re-ask.
+
+The recorded call now contains no repeated sentence anywhere.
+
+
+## The Hindi call was not the English call (2026-09-07)
+
+Every end-to-end probe so far had been English, on a product whose stated premise is
+selling in the buyer's language. `probe_languages.py` runs the same three-turn call in
+Hindi, Telugu and Hinglish and reports which slots the conversation managed to fill.
+
+| language | filled | missing |
+|---|---|---|
+| English | business, features, budget, timeline | - |
+| Hindi | business, features, budget | **timeline** |
+| Telugu | features, budget | **business, timeline** |
+| Hinglish | business, features, budget | **timeline** |
+
+### A deadline could only be stated in English
+
+`_TIMELINE_PATTERN` required the English words *in*/*within* **and** digits. Measured on
+ten phrasings, eight failed - every non-English one, including those written with digits:
+
+| said | before |
+|---|---|
+| "in 3 months" | 3 months |
+| "तीन महीने में" | miss |
+| "3 महीने में" | miss |
+| "మూడు నెలల్లో" | miss |
+| "teen mahine mein" | miss |
+
+The agent then asked for the timeline a second time, hit `MAX_ASKS_PER_SLOT`, moved on, and
+the deck reported the deadline as never discussed - for a buyer who had stated it plainly.
+
+Two design points. Telugu writes the case ending onto the unit itself, so `నెలల్లో` is
+`నెల` + "in" as **one token**: a pattern demanding a word boundary after the unit cannot
+match it, which is why units are matched as stems. And the reading normalises to canonical
+English units - "3 months" whatever was said - because the value reaches a slide and
+`pitchbot.actions.policy._TIMELINE` is the allowlist bounding it. Emitting one fixed shape
+keeps that allowlist tight rather than widening it to accept arbitrary Devanagari and
+Telugu, which is the safer of the two directions.
+
+After: **10 / 10**.
+
+### Telugu could not name its own vertical
+
+A Telugu speaker names a shop with the genitive - *"దుస్తుల దుకాణం"* - and the catalogue
+held only the nominative `దుస్తులు`, so the match failed, the buyer got no pitch, and the
+agent asked what their business sells immediately after they had said it. Hindi had the
+same gap in the other direction: `कपड़े` was listed, `कपड़ों` was not, and *"कपड़ों की दुकान"*
+is the wording this product's **own deck** uses for a clothes shop.
+
+| said | before |
+|---|---|
+| "हम कपड़े की दुकान चलाते हैं" | apparel |
+| "हम कपड़ों की दुकान चलाते हैं" | miss |
+| "kapdon ki dukaan" | miss |
+| "దుస్తుల దుకాణం" | miss |
+| "బట్టల షాప్" | miss |
+| "బొమ్మల దుకాణం" | miss |
+| "పుస్తకాల షాప్" | miss |
+| "खिलौनों की दुकान" | miss |
+
+Six of eleven. The fix is not new machinery: `_VOCABULARY_SUFFIXES` already permits the
+number and case endings, so listing the **stem** covers every form at once - `कपड़` matches
+कपड़े and कपड़ों, `దుస్తుల` matches దుస్తుల and దుస్తులు.
+
+Widening vocabulary is exactly how the *"a booking form"* → **books** defect happened
+originally, so that case is asserted alongside: stems are still matched as whole terms with
+only case and number endings allowed, and "a booking form for furniture" still resolves to
+nothing.
+
+After: **11 / 11**, and all four languages fill all four slots.

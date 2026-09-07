@@ -44,6 +44,7 @@ from pitchbot.simulator.models import (
     TurnResponse,
 )
 from pitchbot.simulator.service import (
+    CallDurationLimitError,
     DurableHistoryDisabledError,
     InjectedSimulatorError,
     SessionAdmissionConflictError,
@@ -170,6 +171,10 @@ router = APIRouter(
 def _build_service() -> SimulatorService:
     if not settings.enable_durable_history:
         return SimulatorService(
+            # Built explicitly rather than left to ConversationEngine's own default, which
+            # is 100 and silently outranked settings.max_turns in every deployment that
+            # did not enable durable history - that is, the default one.
+            conversation_engine=ConversationEngine(max_turns=settings.max_turns),
             speech_detector=speech_providers.detector,
             speech_transcriber=speech_providers.transcriber,
             speech_synthesizer=speech_providers.synthesizer,
@@ -177,6 +182,7 @@ def _build_service() -> SimulatorService:
             speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
             speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
             turn_taking=turn_taking,
+            max_call_minutes=settings.max_call_minutes,
         )
     engine = ConversationEngine(
         max_turns=settings.max_turns,
@@ -197,6 +203,7 @@ def _build_service() -> SimulatorService:
         speech_early_detection_seconds=settings.speech_stt_early_detection_seconds,
         speech_transcribe_timeout_ms=settings.speech_stt_timeout_ms,
         turn_taking=turn_taking,
+        max_call_minutes=settings.max_call_minutes,
     )
 
 
@@ -606,6 +613,12 @@ async def _reply_to_utterance(
         # Distinguishable from a transient engine fault: this session can accept no
         # further turns at all, spoken or typed, and reconnecting will not help.
         message["error"] = "turn-capacity-reached"
+        await socket.send_json(message)
+        return True
+    except CallDurationLimitError:
+        # Terminal for the same reason, and the clock will not run backwards either.
+        # Named here so the browser sees a stable code rather than a leaked class name.
+        message["error"] = "call-duration-reached"
         await socket.send_json(message)
         return True
     except (ConversationJournalError, RuntimeError, ValueError) as error:

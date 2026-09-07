@@ -42,22 +42,44 @@ class Intent(StrEnum):
     READY = "ready_to_buy"
     STALLING = "stalling"
     OBJECTING = "objecting"
+    SOCIAL_PROOF = "social_proof"
+    """The buyer is asking who else this has been done for.
+
+    A credibility question, not a comparison: ``COMPARING`` answers *"we are getting other
+    quotes"*, which is about price. Measured before this existed, three phrasings of this
+    question matched no stance at all and received whatever the planner was going to say.
+    """
+
+    NEXT_STEPS = "next_steps"
+    """The buyer is asking how this proceeds.
+
+    A buying signal that is not yet a commitment, so it is answered rather than treated as
+    ``READY``. It matters most late in a call, where the agent had backed off to *"take
+    your time"* and a buyer asking how to start was told not to hurry.
+    """
 
 
 BUSINESS_TYPES: Final[Mapping[str, tuple[str, ...]]] = {
+    # Indic entries are stems, not surface forms. `_VOCABULARY_SUFFIXES` already allows the
+    # number and case endings, so "कपड़" matches कपड़े *and* कपड़ों, and "దుస్తుల" matches
+    # దుస్తుల and దుస్తులు. Listing the nominative alone missed six of eleven natural
+    # phrasings, including "कपड़ों की दुकान" - the very words this product's own deck uses
+    # for a clothes shop - and every Telugu genitive, which is how a Telugu speaker names a
+    # shop at all: "దుస్తుల దుకాణం".
     "apparel": (
         "apparel",
         "clothing",
         "clothes",
         "garment",
-        "कपड़े",
+        "कपड़",
         "kapde",
-        "దుస్తులు",
-        "బట్టలు",
+        "kapdon",
+        "దుస్తుల",
+        "బట్టల",
     ),
-    "toys": ("toy", "toys", "खिलौने", "khilone", "బొమ్మలు"),
-    "books": ("book", "books", "किताब", "kitab", "పుస్తకాలు"),
-    "food": ("food", "restaurant", "bakery", "खाना", "restaurant", "ఆహారం", "బేకరీ", "రెస్టారెంట్"),
+    "toys": ("toy", "toys", "खिलौन", "khilone", "khilonon", "బొమ్మల"),
+    "books": ("book", "books", "किताब", "kitab", "పుస్తకాల"),
+    "food": ("food", "restaurant", "bakery", "खाना", "restaurant", "ఆహార", "బేకరీ", "రెస్టారెంట్"),
     "import-export": ("import export", "import-export", "निर्यात", "आयात", "ఎగుమతి", "దిగుమతి"),
     "plastics": ("plastic", "plastics", "प्लास्टिक", "ప్లాస్టిక్"),
 }
@@ -174,6 +196,54 @@ INTENT_PHRASES: Final[Mapping[Intent, tuple[str, ...]]] = {
         "abhi nahi",
         "agle mahine",
     ),
+    Intent.SOCIAL_PROOF: (
+        "who else",
+        "anyone else",
+        "any references",
+        "references",
+        "worked with",
+        "built something like this",
+        "done this before",
+        "case study",
+        "case studies",
+        "portfolio",
+        "examples of your work",
+        "similar work",
+        "किसके लिए",
+        "पहले किसके",
+        "और किसके",
+        "उदाहरण दिखा",
+        "पहले काम किया",
+        "ఎవరికి చేశారు",
+        "ఇంతకు ముందు చేశారా",
+        "ఉదాహరణలు చూపించ",
+        "kiske liye banaya",
+        "aur kiske liye",
+        "pehle kaam kiya",
+        "kaam kar chuke",
+    ),
+    Intent.NEXT_STEPS: (
+        "what happens next",
+        "what next",
+        "how do we get started",
+        "how do we start",
+        "how does this work",
+        "what is the process",
+        "whats the process",
+        "next step",
+        "next steps",
+        "आगे क्या",
+        "प्रक्रिया क्या",
+        "कैसे शुरू",
+        "तरीका क्या",
+        "తర్వాత ఏమిటి",
+        "ఎలా మొదలు",
+        "ప్రక్రియ ఏమిటి",
+        "aage kya",
+        "kaise shuru karein",
+        "process kya hai",
+        "aage ka tarika",
+    ),
 }
 """Phrases that reveal a stance, checked in :data:`INTENT_PRIORITY` order.
 
@@ -193,6 +263,8 @@ INTENT_PRIORITY: Final[tuple[Intent, ...]] = (
     Intent.OBJECTING,
     Intent.COMPARING,
     Intent.STALLING,
+    Intent.SOCIAL_PROOF,
+    Intent.NEXT_STEPS,
 )
 """Which stance wins when a turn carries more than one.
 

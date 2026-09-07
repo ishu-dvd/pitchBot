@@ -657,7 +657,7 @@ async def test_all_industry_decks_are_bounded_and_idempotent() -> None:
             idempotency_key=f"deck-operation-{index}",
         )
         preview = await service.create(request)
-        assert len(preview.slides) == 3
+        assert len(preview.slides) == 4
         assert "unknown-buyer-text" not in preview.model_dump_json()
         assert await service.create(request) == preview
 
@@ -1347,3 +1347,123 @@ async def test_callback_bookkeeping_does_not_grow_with_session_count() -> None:
         assert service._pending_schedule_cancellations == {}
         assert service._callback_incarnations == {}
         assert service._cleanup_attempts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_deck_carries_what_the_buyer_actually_said() -> None:
+    """A buyer opens a deck to find out whether they were listened to.
+
+    Before PR 54 the deck received only the feature list, so the budget and the timing -
+    the two facts that decide whether a proposal is worth reading - were captured by the
+    conversation and then dropped. The title was the literal string "Sample Business".
+    """
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    preview = await service.create(
+        DeckRequest(
+            lead_id=uuid4(),
+            deck_id="deck-heard",
+            industry=DeckIndustry.APPAREL,
+            language=LanguageCode.ENGLISH,
+            requested_features=("catalog", "online-payments"),
+            budget_summary="budget is 150000",
+            timeline_summary="3 months",
+            idempotency_key="deck-heard-1",
+        )
+    )
+
+    rendered = preview.model_dump_json()
+    assert "Sample Business" not in rendered
+    assert "150000" in rendered
+    assert "3 months" in rendered
+    # The cue word the extractor keeps must not survive onto a slide already labelled
+    # "Budget", or the buyer reads "Budget: budget is 150000".
+    assert "budget is 150000" not in rendered
+    assert preview.slides[0].title == "What you told us"
+
+
+@pytest.mark.asyncio
+async def test_a_deck_says_so_when_a_commercial_was_never_discussed() -> None:
+    """Silence is reported as silence rather than invented or omitted."""
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    preview = await service.create(
+        DeckRequest(
+            lead_id=uuid4(),
+            deck_id="deck-silent",
+            industry=DeckIndustry.BOOKS,
+            language=LanguageCode.ENGLISH,
+            requested_features=("catalog",),
+            idempotency_key="deck-silent-1",
+        )
+    )
+
+    heard = preview.slides[0].bullets
+    assert any(bullet.startswith("Budget: not discussed yet") for bullet in heard)
+    assert any(bullet.startswith("Timeline: not discussed yet") for bullet in heard)
+
+
+@pytest.mark.asyncio
+async def test_a_deck_is_written_in_the_language_it_was_asked_for() -> None:
+    """`DeckRequest` has always insisted the language be explicit, then ignored it.
+
+    Every deck was byte-identical in English, Hindi and Telugu, which for a product whose
+    whole premise is selling in the buyer's language is the defect that matters most.
+    """
+
+    service = DeckService(
+        artifact_adapter=MockArtifactAdapter(),
+        clock=FakeClock(datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+    rendered: dict[LanguageCode, str] = {}
+    for language in (LanguageCode.ENGLISH, LanguageCode.HINDI, LanguageCode.TELUGU):
+        preview = await service.create(
+            DeckRequest(
+                lead_id=uuid4(),
+                deck_id=f"deck-{language.value}",
+                industry=DeckIndustry.APPAREL,
+                language=language,
+                requested_features=("catalog",),
+                idempotency_key=f"deck-language-{language.value}",
+            )
+        )
+        rendered[language] = (
+            preview.title
+            + " "
+            + " ".join(bullet for slide in preview.slides for bullet in slide.bullets)
+        )
+
+    assert len(set(rendered.values())) == 3
+    assert "कपड़ों" in rendered[LanguageCode.HINDI]
+    assert "దుస్తుల" in rendered[LanguageCode.TELUGU]
+
+
+def test_every_deck_language_covers_the_whole_catalogue() -> None:
+    """A missing industry or feature would be a KeyError in front of a customer.
+
+    `DeckPhrases.__post_init__` enforces this at construction, so importing the module is
+    the check. Asserting it here states the guarantee where a reader looks for it, and
+    catches a language added to the enum without deck copy.
+    """
+
+    from pitchbot.actions.deck_content import deck_languages, phrases_for
+    from pitchbot.domain import business_types
+    from pitchbot.domain import features as catalog_features
+
+    assert LanguageCode.UNKNOWN not in deck_languages()
+    for language in deck_languages():
+        phrases = phrases_for(language)
+        assert set(phrases.industry_bullets) == set(business_types())
+        assert set(phrases.feature_label) == set(catalog_features())
+
+    # UNKNOWN falls back rather than raising, matching the planner.
+    assert phrases_for(LanguageCode.UNKNOWN) is phrases_for(LanguageCode.ENGLISH)

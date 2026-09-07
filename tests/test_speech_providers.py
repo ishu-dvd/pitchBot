@@ -711,3 +711,34 @@ def test_the_durable_history_branch_hands_them_over_too(
     pipeline = service.create_speech_pipeline(session.session_id)
 
     assert pipeline.turn_taking.config.end_silence_ms == 480
+
+
+def test_both_branches_apply_the_configured_call_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two call limits Settings declares must be the ones the service enforces.
+
+    Neither reached the running service before PR 54. `max_call_minutes` had no consumer
+    at all, and `max_turns` was applied only on the durable branch - so the default
+    deployment silently ran on ConversationEngine's own default of 100 instead of 80.
+    Both branches are asserted because duplication is how one comes to lack an argument
+    the other has.
+    """
+
+    from pitchbot.simulator import router
+
+    monkeypatch.setattr(app_settings, "max_call_minutes", 7)
+    monkeypatch.setattr(app_settings, "max_turns", 33)
+
+    monkeypatch.setattr(app_settings, "enable_durable_history", False)
+    default_branch = router._build_service()
+    assert default_branch._max_call_minutes == 7
+    assert default_branch._conversation._capacities[0] == 33
+
+    monkeypatch.setattr(app_settings, "enable_durable_history", True)
+    monkeypatch.setattr(app_settings, "durable_history_digest_key", "ab" * 32)
+    monkeypatch.setattr(app_settings, "database_url", f"sqlite:///{tmp_path / 'limits.db'}")
+    durable_branch = router._build_service()
+    assert durable_branch._max_call_minutes == 7
+    assert durable_branch._conversation._capacities[0] == 33

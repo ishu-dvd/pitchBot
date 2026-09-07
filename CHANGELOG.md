@@ -670,3 +670,61 @@ All notable changes to PitchBot are documented here.
 
   The same run confirms the timing fix itself: first filler **925 ms** measured against
   **920 ms** predicted from audio time.
+
+
+### Changed (PR 54)
+
+- **A deck now says what the buyer said, in the buyer's language.** Running one apparel
+  call end to end showed the deck ignoring the conversation that produced it: the buyer
+  stated a budget of 150000 and a three-month deadline, the engine captured both, and the
+  deck read `Sample Business: Apparel commerce` with three canned bullets. The same deck
+  came out byte-identical in English, Hindi and Telugu, despite `DeckRequest` rejecting an
+  unspecified language. It now opens with what the buyer said and is written from a
+  complete per-language table.
+- **The close no longer repeats itself.** Once every slot was filled, the agent returned
+  *"That covers what I need. Would a short demo or a written proposal help more?"* on three
+  consecutive turns, twice as the answer to a direct question. The close is now a
+  three-step sequence in all four languages: ask, offer something concrete, then stop
+  pushing.
+- **`PITCHBOT_MAX_CALL_MINUTES` and `PITCHBOT_MAX_TURNS` are enforced.** The duration cap
+  had no consumer at all, so a session accepted turns a day after it began. The turn cap
+  was applied only when durable history was enabled, so the default deployment ran on
+  `ConversationEngine`'s default of 100 rather than the configured 80. Set
+  `PITCHBOT_MAX_CALL_MINUTES=0` to disable the duration cap.
+- **A mention of a feature is no longer read as an order for it.** *"Right now everything
+  is on WhatsApp and it is getting hard to manage"* is a statement of pain, and it was
+  recorded as a request for a WhatsApp integration; on a labelled corpus 6 of 11 turns were
+  read correctly. The rule is clause-scoped, so *"right now everything is on WhatsApp, we
+  want a proper catalog"* keeps `catalog` and drops `whatsapp`, and it only fires when a
+  clause describes today **and** asks for nothing - *"right now we need a catalog"* is
+  still an order. Corpus is now 11 of 11.
+- **The agent answers a direct question instead of talking past it.** Two new stances,
+  `social_proof` ("who else have you built something like this for?", "any references?")
+  and `next_steps` ("what happens next?", "how do we get started?"), each with an answer in
+  all four languages. Both were unrecognised, so they received whatever the planner was
+  going to say - which late in a call meant a buyer asking how to start was told to take
+  their time. Question recognition went from 2 of 7 to 7 of 7. The credibility answer names
+  nobody: PitchBot is synthetic, and a fabricated client list would be a lie told to a
+  buyer.
+- **A question the buyer did not answer is rephrased, not repeated.** Turn 1 of the
+  recorded call asked what the website should let customers do; the buyer replied with a
+  statement of pain; turn 2 returned that same sentence and nothing else. A second attempt
+  now rephrases and lowers the bar - *"even a rough range helps me scope this"* - in all
+  four languages. `MAX_ASKS_PER_SLOT` still stops at two attempts, so this changes the
+  wording, not how long the agent pushes. The recorded call now repeats no sentence at all.
+- **A buyer can state a deadline, and name their shop, in their own language.** Running the
+  same call in Hindi, Telugu and Hinglish left `timeline` empty in all three: the extractor
+  required the English words *in*/*within* plus digits, so *"तीन महीने में"*,
+  *"మూడు నెలల్లో"* and *"teen mahine mein"* all failed - eight of ten phrasings. Telugu
+  also could not name its own vertical, because a Telugu speaker says *"దుస్తుల దుకాణం"*
+  (genitive) and only the nominative was listed; Hindi missed *"कपड़ों की दुकान"*, which is
+  the wording this product's own deck uses for a clothes shop. Six of eleven natural
+  phrasings missed. Indic entries are now stems, and a deadline is normalised to canonical
+  English units so `policy._TIMELINE` stays a tight allowlist instead of being widened to
+  accept arbitrary Devanagari and Telugu. All four languages now fill all four slots.
+
+### Deferred (PR 54)
+
+- Nothing from the recorded call remains open. The two defects this PR originally deferred
+  - a WhatsApp pain read as a feature request, and an unanswered credibility question -
+  are fixed above and measured on a labelled corpus.
