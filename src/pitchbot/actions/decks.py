@@ -3,21 +3,21 @@ from __future__ import annotations
 import asyncio
 from typing import Final
 
-from pitchbot.actions.deck_content import phrases_for
+from pitchbot.actions.deck_content import DeckPhrases, phrases_for
 from pitchbot.actions.models import DeckPreview, DeckRequest, DeckSlide
 from pitchbot.adapters import ArtifactAdapter, Clock, EphemeralOperationStore, SystemClock
+from pitchbot.domain import BUDGET_CUES
 from pitchbot.domain import features as catalog_features
 
 _ALLOWED_FEATURES = catalog_features()
 
 # Leading cue words the budget extractor keeps because it matches from the cue onwards, so
 # a captured "budget is 150000" would otherwise reach a slide reading "Budget: budget is
-# 150000". Stripped for display only; the stored fact is untouched.
+# 150000". Stripped for display only; the stored fact is untouched. Built from the shared
+# catalogue so a language added there is stripped here too, longest form first.
 _BUDGET_CUES: Final[tuple[str, ...]] = (
-    "budget is",
-    "budget",
-    "बजट",
-    "బడ్జెట్",
+    *(f"{cue} is" for cue in BUDGET_CUES),
+    *BUDGET_CUES,
 )
 
 
@@ -61,6 +61,8 @@ class DeckService:
         )
         if not features:
             features = ("catalog", "multilingual")
+        budget = _stated(request.budget_summary) or phrases.unstated
+        timeline = _localised_timeline(request.timeline_summary, phrases) or phrases.unstated
         preview = DeckPreview(
             deck_id=request.deck_id,
             industry=request.industry,
@@ -77,10 +79,8 @@ class DeckService:
                         f"{phrases.business_label}: {phrases.industry_name[industry]}",
                         f"{phrases.features_label}: "
                         + ", ".join(phrases.feature_label[item] for item in features),
-                        f"{phrases.budget_label}: "
-                        f"{_stated(request.budget_summary) or phrases.unstated}",
-                        f"{phrases.timeline_label}: "
-                        f"{_stated(request.timeline_summary) or phrases.unstated}",
+                        f"{phrases.budget_label}: {budget}",
+                        f"{phrases.timeline_label}: {timeline}",
                     ),
                 ),
                 DeckSlide(
@@ -134,6 +134,30 @@ class DeckService:
                 self._previews.pop(deck_id, None)
             if isinstance(self._artifact_adapter, EphemeralOperationStore):
                 self._artifact_adapter.clear_operations(operation_key_prefix)
+
+
+def _localised_timeline(summary: str | None, phrases: DeckPhrases) -> str | None:
+    """A deadline the buyer can read, from a deadline the allowlist can check.
+
+    ``conversation.rules`` normalises every language onto English units so the outbound
+    allowlist stays a short closed list. Rendering that canonical form verbatim handed a
+    Telugu buyer a slide reading "3 months", so the unit is translated back on the way out
+    while the digits, which every reader here uses, stay as they are.
+
+    Anything that is not a recognised canonical form is returned unchanged rather than
+    dropped: an unexpected value is a bug worth seeing, not worth hiding from the buyer.
+    """
+
+    text = _stated(summary)
+    if text is None:
+        return None
+    lowered = text.lower().strip()
+    if lowered in phrases.timeline_units:
+        return phrases.timeline_units[lowered]
+    count, _, unit = lowered.partition(" ")
+    if count.isdigit() and unit in phrases.timeline_units:
+        return f"{count} {phrases.timeline_units[unit]}"
+    return text
 
 
 def _stated(summary: str | None) -> str | None:

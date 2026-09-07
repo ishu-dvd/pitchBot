@@ -24,6 +24,7 @@ because those extractors do keep buyer text, and so their values must never be r
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Final
@@ -99,6 +100,65 @@ FEATURES: Final[Mapping[str, tuple[str, ...]]] = {
     ),
 }
 """Capabilities a buyer can ask for, and the words that identify each one."""
+
+
+BUDGET_CUES: Final[tuple[str, ...]] = ("budget", "बजट", "బడ్జెట్")
+"""The word "budget", in each language PitchBot sells in.
+
+One tuple because there were three copies and they disagreed. `conversation.rules` heard a
+budget stated in Telugu, `actions.decks` knew how to display it, and `actions.policy` - the
+minimiser that decides what may leave a conversation - omitted `బడ్జెట్` and silently
+discarded it. Measured end to end: a Telugu buyer said *"మా బడ్జెట్ 150000"* and the deck
+handed back to them read *"బడ్జెట్: ఇంకా చర్చించలేదు"* - budget not yet discussed.
+
+Nothing detected the disagreement, because each copy was internally consistent and every
+test that touched a budget was written in English. Keeping the vocabulary in one place is
+the only fix that cannot silently regress: a language added here is added everywhere.
+"""
+
+BUDGET_INTENT_CUES: Final[tuple[str, ...]] = (
+    "willing to spend",
+    "ready to spend",
+    "happy to spend",
+    "could spend",
+    "can spend",
+    "spend up to",
+    "kharch kar sakte",
+)
+"""Saying what you are prepared to pay, without using the word "budget".
+
+Every entry carries a modal, and that is the whole design. Bare *"we spend five lakh on
+ads"* is what a company already pays someone else; *"we can spend five lakh"* is what they
+are prepared to pay us. Admitting bare ``spend`` would turn the first into a budget, and a
+wrong figure here is quoted back to the buyer and shapes a proposal.
+"""
+
+CURRENCY_MARKERS: Final[tuple[str, ...]] = ("₹", "rs.", "rs", "inr")
+"""Ways a rupee amount is marked, which stand in for the word "budget" when present."""
+
+INDIC_SCRIPT_RANGES: Final[str] = "\u0900-\u097f\u0c00-\u0c7f\u200c\u200d"
+"""Devanagari and Telugu in full, plus the joiners, as a regex character-class body.
+
+Needed because Python's ``\\w`` is defined by :meth:`str.isalnum`, which is false for
+combining marks - and in these scripts the vowels *are* combining marks. A class of
+``[\\w\\s]`` therefore matches ``बजट द`` and stops dead at the ``ो`` of ``दो``. The bug was
+invisible for as long as every budget in every test was written in English, and invisible
+again in Hindi whenever a digit happened to come before the first vowel sign.
+
+Whole blocks rather than hand-picked mark ranges: the point of the class is to exclude
+markup, links and addresses, and no part of either script is a way to write those.
+"""
+
+
+def budget_alternation() -> str:
+    """The cue half of a budget pattern, as one regex alternation.
+
+    Built here rather than in each consumer so the extractor, the minimiser and the deck
+    cannot drift apart again. Longest first, because alternation is ordered.
+    """
+
+    cues = sorted((*BUDGET_CUES, *BUDGET_INTENT_CUES, *CURRENCY_MARKERS), key=len, reverse=True)
+    return "|".join(re.escape(cue) for cue in cues)
 
 
 INTENT_PHRASES: Final[Mapping[Intent, tuple[str, ...]]] = {
@@ -289,11 +349,16 @@ def features() -> frozenset[str]:
 
 
 __all__ = [
+    "BUDGET_CUES",
+    "BUDGET_INTENT_CUES",
     "BUSINESS_TYPES",
+    "CURRENCY_MARKERS",
     "FEATURES",
+    "INDIC_SCRIPT_RANGES",
     "INTENT_PHRASES",
     "INTENT_PRIORITY",
     "Intent",
+    "budget_alternation",
     "business_types",
     "features",
 ]

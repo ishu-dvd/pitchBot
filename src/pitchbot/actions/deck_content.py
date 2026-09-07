@@ -23,6 +23,15 @@ from pitchbot.domain import features as catalog_features
 _INDUSTRIES: Final[frozenset[str]] = frozenset(business_types())
 _FEATURES: Final[frozenset[str]] = frozenset(catalog_features())
 
+TIMELINE_UNITS: Final[frozenset[str]] = frozenset({"days", "weeks", "months", "near-term"})
+"""Every shape ``conversation.rules._match_timeline`` can emit.
+
+That matcher normalises every language onto English units on purpose, so the outbound
+allowlist stays tight. The cost is paid here: a Telugu buyer who said *"మూడు నెలల్లో"* was
+handed a deck reading **"సమయం: 3 months"**. Normalising in and localising out keeps both
+properties - one canonical form to validate, and a deck the buyer can read.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class DeckPhrases:
@@ -46,6 +55,7 @@ class DeckPhrases:
     industry_name: Mapping[str, str]
     industry_bullets: Mapping[str, tuple[str, ...]]
     feature_label: Mapping[str, str]
+    timeline_units: Mapping[str, str]
     next_steps: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -55,6 +65,8 @@ class DeckPhrases:
             raise ValueError("Deck industry bullets must cover exactly the catalogue")
         if set(self.feature_label) != _FEATURES:
             raise ValueError("Deck feature labels must cover exactly the catalogue")
+        if set(self.timeline_units) != TIMELINE_UNITS:
+            raise ValueError("Deck timeline units must cover exactly the canonical set")
         if "{business}" not in self.title_template:
             raise ValueError("Deck title template must place the business")
         if not self.next_steps:
@@ -120,6 +132,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
             "whatsapp": "Policy-approved WhatsApp inquiry path",
             "multilingual": "Content in more than one language",
         },
+        timeline_units={
+            "days": "days",
+            "weeks": "weeks",
+            "months": "months",
+            "near-term": "as soon as possible",
+        },
         next_steps=(
             "Confirm requirements and who owns the content",
             "Review a synthetic prototype",
@@ -183,6 +201,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
             "inventory": "स्टॉक की जानकारी",
             "whatsapp": "नीति के अनुसार व्हाट्सऐप पूछताछ",
             "multilingual": "एक से ज़्यादा भाषाओं में सामग्री",
+        },
+        timeline_units={
+            "days": "दिन",
+            "weeks": "हफ़्ते",
+            "months": "महीने",
+            "near-term": "जल्द से जल्द",
         },
         next_steps=(
             "ज़रूरतें और सामग्री की ज़िम्मेदारी तय करना",
@@ -248,6 +272,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
             "whatsapp": "నిబంధనల ప్రకారం వాట్సాప్ విచారణ",
             "multilingual": "ఒకటి కంటే ఎక్కువ భాషల్లో సమాచారం",
         },
+        timeline_units={
+            "days": "రోజులు",
+            "weeks": "వారాలు",
+            "months": "నెలలు",
+            "near-term": "వీలైనంత త్వరగా",
+        },
         next_steps=(
             "అవసరాలు, కంటెంట్ బాధ్యత ఖరారు చేయడం",
             "ఒక నమూనా ప్రోటోటైప్ చూడటం",
@@ -311,6 +341,12 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
             "inventory": "Stock ki visibility",
             "whatsapp": "Policy ke hisaab se WhatsApp inquiry",
             "multilingual": "Ek se zyada bhaashaon mein content",
+        },
+        timeline_units={
+            "days": "din",
+            "weeks": "hafte",
+            "months": "mahine",
+            "near-term": "jitna jaldi ho sake",
         },
         next_steps=(
             "Requirements aur content ki zimmedari tay karna",

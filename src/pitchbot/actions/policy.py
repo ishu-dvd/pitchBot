@@ -13,7 +13,15 @@ from pitchbot.actions.models import (
     FollowUpSummary,
 )
 from pitchbot.adapters.clock import Clock, SystemClock
-from pitchbot.domain import ActionType, JsonValue, LanguageCode, LeadTemperature, business_types
+from pitchbot.domain import (
+    INDIC_SCRIPT_RANGES,
+    ActionType,
+    JsonValue,
+    LanguageCode,
+    LeadTemperature,
+    budget_alternation,
+    business_types,
+)
 from pitchbot.domain import features as catalog_features
 
 _NEXT_STEPS = {
@@ -23,7 +31,21 @@ _NEXT_STEPS = {
 }
 _BUSINESS_TYPES = business_types()
 _FEATURES = catalog_features()
-_BUDGET = re.compile(r"(?:budget|बजट|₹|rs\.?|inr)[\w\s₹,.-]{1,90}", re.IGNORECASE)
+_BUDGET = re.compile(
+    rf"(?:{budget_alternation()})[\w\s₹,.\-{INDIC_SCRIPT_RANGES}]{{1,90}}",
+    re.IGNORECASE,
+)
+"""What a captured budget must look like before it is allowed to leave the conversation.
+
+Both halves used to be written out here, and both were wrong. The cue list omitted
+`బడ్జెట్`, so a Telugu buyer's budget was extracted, stored, then dropped on its way to the
+deck - which reported it as never discussed. The character class relied on ``\\w``, which
+excludes combining marks, so a Hindi budget survived only as far as its first vowel sign:
+``बजट दो लाख`` reached the slide as ``बजट द``.
+
+Both halves are now built from the shared catalogue, which is the only arrangement in which
+adding a language cannot leave one of them behind.
+"""
 _TIMELINE = re.compile(
     r"(?:near-term|\d{1,3}\s+(?:day|days|week|weeks|month|months))",
     re.IGNORECASE,

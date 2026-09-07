@@ -22,6 +22,7 @@ from pitchbot.domain import (
     LanguageCode,
     RequirementFact,
     RequirementRevision,
+    budget_alternation,
 )
 
 _RULE_VERSION = "conversation-rules-v1"
@@ -916,13 +917,84 @@ A closed list rather than "allow any two words" on purpose. A permissive gap wou
 than missing one: a wrong number here is quoted back to a buyer and shapes a proposal.
 """
 
+_BUDGET_SCALES: Final[tuple[str, ...]] = (
+    "thousand",
+    "hazaar",
+    "hazar",
+    "हज़ार",
+    "हजार",
+    "వేలు",
+    "వేల",
+    "lakhs",
+    "lakh",
+    "lac",
+    "लाखों",
+    "लाख",
+    "లక్షలు",
+    "లక్షల",
+    "లక్ష",
+    "crores",
+    "crore",
+    "करोड़",
+    "करोड",
+    "కోట్లు",
+    "కోట్ల",
+    "కోటి",
+    "k",
+)
+"""Magnitude words, which is how a rupee figure is said out loud on this subcontinent.
+
+Longest-first within each family so the alternation cannot match ``lakh`` and strand the
+``s``, or match ``లక్షల`` and strand the ``ు``. Telugu and Hindi inflect the scale itself,
+so each inflected form is listed rather than relying on a suffix rule - the number of forms
+is small and closed, and a wrong budget is worse than a verbose table.
+"""
+
+_BUDGET_WORD_NUMBERS: Final[tuple[str, ...]] = (
+    # English
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "fifteen", "twenty", "twenty five", "thirty", "forty", "fifty",
+    "sixty", "seventy", "seventy five", "eighty", "ninety", "hundred",
+    # Hinglish
+    "ek", "do", "teen", "char", "paanch", "panch", "chhe", "saat", "aath", "nau", "das",
+    "pandrah", "bees", "pachees", "tees", "chalees", "pachas", "saath", "assi", "nabbe", "sau",
+    # Hindi
+    "एक", "दो", "तीन", "चार", "पांच", "पाँच", "छह", "सात", "आठ", "नौ", "दस",
+    "पंद्रह", "बीस", "पच्चीस", "तीस", "चालीस", "पचास", "साठ", "अस्सी", "नब्बे", "सौ",
+    # Telugu
+    "ఒక", "ఒకటి", "రెండు", "మూడు", "నాలుగు", "ఐదు", "ఆరు", "ఏడు", "ఎనిమిది", "తొమ్మిది", "పది",
+    "పదిహేను", "ఇరవై", "ముప్పై", "నలభై", "యాభై", "అరవై", "డెబ్బై", "ఎనభై", "తొంభై", "వంద",
+)  # fmt: skip
+"""Counts written as words, because a budget is spoken far more often than it is typed.
+
+Deliberately **not** shared with ``_TIMELINE_WORD_NUMBERS``. That table feeds a matcher
+which needs no preceding cue, so admitting English number words there would read *"we
+shipped two months ago"* as a deadline of two months. Here every match is anchored to an
+explicit budget cue, so the same words are safe.
+"""
+
 _BUDGET_PATTERN = re.compile(
-    r"(?:budget(?:\s+is)?|बजट|బడ్జెట్|₹|rs\.?|inr)\s*[:=-]?\s*"
+    rf"(?:{budget_alternation()})(?:\s+(?:is|of))?\s*[:=-]?\s*"
     r"(?:(?:" + "|".join(re.escape(hedge) for hedge in _BUDGET_HEDGES) + r")\s+)?"
     r"(₹|rs\.?|inr)?\s*"
-    r"([0-9][0-9,]*(?:\s*(?:k|lakh|लाख|లక్ష|లక్షల))?)",
+    r"(?:"
+    # Digits stand alone - 150000 means one thing. A number written as a word must name
+    # its scale, or "budget is one of our concerns" would be read as a budget of one.
+    r"[0-9][0-9,]*(?:\s*(?:" + "|".join(re.escape(scale) for scale in _BUDGET_SCALES) + r"))?"
+    r"|(?:"
+    + "|".join(re.escape(word) for word in sorted(_BUDGET_WORD_NUMBERS, key=len, reverse=True))
+    + r")\s*(?:"
+    + "|".join(re.escape(scale) for scale in _BUDGET_SCALES)
+    + r")"
+    r")",
     re.IGNORECASE,
 )
+"""A stated budget, however it is said, anchored to an explicit cue.
+
+The cue half comes from the shared catalogue so the extractor and the outbound minimiser
+cannot disagree about which languages exist. Anchoring to a cue is what makes the word
+numbers safe: *"we sold five lakh units last year"* names no budget and matches nothing.
+"""
 _TIMELINE_PATTERN = re.compile(
     r"\b(?:in|within)\s+(\d{1,3}\s+(?:day|days|week|weeks|month|months))\b",
     re.IGNORECASE,
