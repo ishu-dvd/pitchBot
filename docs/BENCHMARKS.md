@@ -3145,3 +3145,48 @@ language for internal vocabulary instead:
 The two languages that got it right are what correct looks like. All four now agree.
 
 Mutation score: **13/13**, harness runtime 35 s.
+
+## The third preview action (PR 56)
+
+`ARTIFACT` and `WHATSAPP` were both found to be handed the conversation's own facts and to
+ignore most of them. `CALLBACK` was the branch left. It takes no conversation input at all
+beyond a delay, so three calls of very different depth produced one identical callback:
+
+| Call | Before | After |
+| --- | --- | --- |
+| business type + demo ask | `website-discovery` / `UTC` | `website-discovery` / `Asia/Kolkata` |
+| + feature list | `website-discovery` / `UTC` | **`requirements-review`** / `Asia/Kolkata` |
+| + budget and deadline | `website-discovery` / `UTC` | **`proposal-review`** / `Asia/Kolkata` |
+
+**Two of the three agendas were dead.** `REQUIREMENTS_REVIEW` and `PROPOSAL_REVIEW` appear
+nowhere in `src/` or `tests/` outside their own enum definition. A buyer who had stated
+their vertical, feature list, budget and deadline was told the next call was to discover
+what they need.
+
+**The timezone was declared and never read.** `Settings.timezone = "Asia/Kolkata"` has
+always existed; `grep` finds no reader. `workflows.py` hardcoded `timezone="UTC"` and
+`callbacks.py:198` passes `request.timezone` verbatim into the scheduler payload — so
+every callback reached the scheduler 5h30m from the buyer, for a product whose copy is
+Hindi, Telugu and Hinglish.
+
+### Measured and deliberately left alone
+
+A buyer who states their vertical *and* their exact feature list is classified
+`REVIEW_NEEDED` and refused every action:
+
+```
+"We run a clothing store and want to sell online."
+"We need a catalog and online payment."
+   -> blocked: ['classification-review']
+```
+
+`_POSITIVE_EVIDENCE` has four signals - budget (0.25), timeline (0.25), decision (0.30),
+next-step (0.20). **Knowing exactly what someone wants to buy is not evidence of anything.**
+Adding a demo request ("Can you show me a demo?") supplies next-step evidence and the same
+call is approved, which is how the two revived agendas become reachable.
+
+That is an authorization gate with compliance implications, so it is recorded here with
+evidence rather than changed in a PR about buyer-facing artefacts. It is the top candidate
+for the next one.
+
+Mutation score for the callback change: **8/8** (21/21 across the whole PR).

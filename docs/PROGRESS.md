@@ -2606,3 +2606,23 @@ clean. 4/4 mutations caught. Live server before and after.
   which then also caught "Review a synthetic prototype" in English and Hinglish where Hindi
   and Telugu already said "sample".
 - **Mutation score:** 13/13.
+
+### PR 56 addendum - the third preview action
+
+- **Measured:** `preview_callback` takes no conversation input beyond a delay. Three calls
+  of very different depth produced one identical callback: `website-discovery` / `UTC`.
+- **Two of three `CallbackAgenda` members were dead** - `REQUIREMENTS_REVIEW` and
+  `PROPOSAL_REVIEW` appear nowhere in `src/` or `tests/` outside their own definition.
+- **`Settings.timezone` was declared and never read.** `workflows.py` hardcoded `"UTC"`
+  and `callbacks.py` passes `request.timezone` straight to the scheduler, so every callback
+  reached the scheduler 5h30m from the buyer. `DEFAULT_TIMEZONE` now lives in `domain` and
+  both the settings default and the action-layer default are built from it; `router.py`
+  forwards `settings.timezone` through `SimulatorService`.
+- **What changed:** `preview_callback` takes the same `FollowUpSummary` its two siblings do,
+  and `agenda_for()` derives the agenda from it. All three agendas are now produced by real
+  calls, asserted end to end as well as at the unit level.
+- **Measured and left alone:** a buyer who states their vertical and their exact feature
+  list is `REVIEW_NEEDED` and refused every action - `_POSITIVE_EVIDENCE` scores only money,
+  urgency, decision language and next-step language. An authorization gate is not something
+  to change inside a PR about buyer-facing artefacts; it is the top candidate for the next.
+- **Mutation score:** 8/8 for the callback change, 21/21 across the PR.
