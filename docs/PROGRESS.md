@@ -2626,3 +2626,23 @@ clean. 4/4 mutations caught. Live server before and after.
   urgency, decision language and next-step language. An authorization gate is not something
   to change inside a PR about buyer-facing artefacts; it is the top candidate for the next.
 - **Mutation score:** 8/8 for the callback change, 21/21 across the PR.
+
+### PR 56 addendum - the turn that ends the relationship
+
+- **Measured:** six ways an adult asks not to be contacted, four languages. **12 of 24
+  unheard.** Hindi could express one of six concepts; Hinglish two; Telugu four.
+- **Three causes:** the nuqta spelling `फ़ोन` absent while `फोन` present; `stop contacting`
+  missing though `stop calling` and `do not contact` were both listed; and the removal
+  template requiring `ordered=True` while the message template beside it already documents
+  that Hindi and Hinglish are verb-final. Telugu had **no token in any** of the three groups
+  the removal template matches on, so it could never fire in Telugu at all.
+- **Measured the other direction too, and it was already wrong:** "Remove my old product
+  list from the homepage" and "delete my duplicate product records" ended the conversation
+  permanently before this change. In a catalogue-building product that token shape is
+  ordinary talk. The template now rejects windows carrying product/catalogue/page words and
+  matches preceded by a capability marker. `can` is deliberately excluded - "can you remove
+  me from your list" is a real opt-out.
+- **Result:** refusals heard 12/24 -> 24/24; false opt-outs 2/15 -> 0/15.
+- **Caught by the existing suite:** the first widening made "Does it let me remove contacts
+  from the list?" an opt-out. That test already existed and did its job.
+- **Mutation score:** 12/12 for the opt-out change, 33/33 across the PR.

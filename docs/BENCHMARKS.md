@@ -3190,3 +3190,80 @@ evidence rather than changed in a PR about buyer-facing artefacts. It is the top
 for the next one.
 
 Mutation score for the callback change: **8/8** (21/21 across the whole PR).
+
+## The turn that ends the relationship (PR 56)
+
+An opt-out is the one signal this product calls terminal and unrecoverable. It had never
+been driven end to end in a non-English language.
+
+Six ways an adult actually asks not to be contacted, in four languages:
+
+| concept | en | hi | te | mixed |
+| --- | --- | --- | --- | --- |
+| do not call | yes | yes | yes | yes |
+| do not phone (`फ़ोन`, nuqta) | yes | **NO** | yes | yes |
+| do not contact | yes | **NO** | yes | **NO** |
+| stop contacting | **NO** | **NO** | **NO** | **NO** |
+| remove my number | yes | **NO** | yes | **NO** |
+| remove me from your list | yes | **NO** | **NO** | **NO** |
+| **unheard** | 1/6 | **5/6** | 2/6 | 4/6 |
+
+**12 of 24 unheard.** A Hindi speaker could express exactly one of the six concepts.
+
+### Three causes
+
+**One codepoint.** `फ़ोन` (nuqta, U+095E) was absent while `फोन` was present. Both are
+standard spellings of "phone"; which one a person typed decided whether their refusal was
+heard.
+
+**One hole in the cross product.** `stop calling` listed, `do not contact` listed,
+`stop contacting` not - unheard in every language at once.
+
+**One piece of reasoning applied to a template but not its sibling.** The removal template
+required `ordered=True`. The message template three lines below already says Hindi and
+Hinglish are verb-final so *"order cannot be required"*. Token analysis:
+
+```
+en remove-list         MATCHES  verb=['remove'] self=['me']    record=['list']
+hi remove-from-list    no       verb=[]         self=['मुझे']   record=['सूची']
+mixed remove-list      no       verb=[]         self=['mujhe'] record=['list']
+te remove-from-list    no       verb=[]         self=[]        record=[]
+
+telugu tokens in the three sets:
+  REMOVAL_VERBS    []
+  SELF_REFERENCE   []
+  CONTACT_RECORDS  []
+```
+
+Telugu had **no token in any group** - the template could never fire in Telugu whatever the
+buyer said. Hindi and Hinglish were missing only the bare-stem verb (`हटा` / `hata`, the
+polite form an adult uses) on top of the ordering problem.
+
+### The other direction, which was already wrong
+
+Widening a terminal signal is only safe if ordinary talk stays ordinary. In a product that
+builds catalogues, a removal verb + a self-reference + a record noun is what a buyer says
+about their own data all day:
+
+| sentence | before | after |
+| --- | --- | --- |
+| "Remove my old product list from the homepage." | **STOPPED** | ok |
+| "Can you delete my duplicate product records?" | **STOPPED** | ok |
+| "Does it let me remove contacts from the list?" | ok | ok |
+| "मेरी लिस्ट से यह प्रोडक्ट हटा दीजिए।" | ok | ok |
+
+Two ended the relationship permanently before this change. What separates the readings is
+*whose* list - theirs to publish, or ours to contact them from - so the template now
+refuses any window carrying a product, catalogue or page word, and any match preceded by a
+capability marker (`does it let me...` is a question about the software). `can` is
+deliberately **not** a capability marker: "can you remove me from your list" is a real
+opt-out, and the politest one.
+
+### Result
+
+| | before | after |
+| --- | --- | --- |
+| refusals heard | 12/24 | **24/24** |
+| false opt-outs | 2/15 | **0/15** |
+
+Mutation score for the opt-out change: **12/12** (33/33 across the whole PR).
