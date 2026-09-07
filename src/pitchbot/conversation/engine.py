@@ -406,10 +406,22 @@ class ConversationEngine:
         distinct_dimensions = len({item.dimension for item in state.evidence})
 
         if force_cold or raw_score <= -0.4:
+            # Loosening this floor changes no reachable outcome, because a raw score at or
+            # below -0.4 puts the clamped score at zero, which falls through every branch
+            # below to the same COLD. It is kept as the explicit statement of intent: a
+            # buyer who said no is cold because they said no, not because the arithmetic
+            # happened to land there.
             temperature = LeadTemperature.COLD
         elif not weights:
             temperature = LeadTemperature.REVIEW_NEEDED
         elif score >= 0.75 and distinct_dimensions >= 2:
+            # The dimension count looks redundant and is not. Evidence is deduped by
+            # dimension before it reaches here, so one dimension contributes at most one
+            # weight, and no single weight today can carry the score to 0.75 on its own -
+            # which is why deleting this clause changes no current behaviour and survives
+            # the suite. It is the guard that keeps that true after the next weight is
+            # added: HOT should mean the buyer said several different things, never that
+            # they said one very loud one.
             temperature = LeadTemperature.HOT
         elif score >= 0.45:
             temperature = LeadTemperature.WARM

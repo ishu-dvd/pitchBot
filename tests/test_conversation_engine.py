@@ -8,6 +8,8 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from pitchbot.actions.models import ActionAuthorizationContext, AuthorizationStatus
+from pitchbot.actions.policy import ActionPolicy
 from pitchbot.conversation import (
     ConversationDisposition,
     ConversationEngine,
@@ -15,8 +17,9 @@ from pitchbot.conversation import (
     SafetySignal,
     rules,
 )
-from pitchbot.conversation.rules import detect_safety_signals
-from pitchbot.domain import LanguageCode, LeadTemperature
+from pitchbot.conversation.rules import _REQUIREMENT_WEIGHT, detect_safety_signals
+from pitchbot.domain import ContactPolicy, LanguageCode, LeadTemperature
+from pitchbot.domain.models import ActionType
 
 
 def session(engine: ConversationEngine) -> UUID:
@@ -43,7 +46,10 @@ def test_explicit_commercial_evidence_reaches_hot_without_personality_inference(
     assert result.classification.temperature is LeadTemperature.HOT
     assert result.phase is ConversationPhase.NEXT_STEP
     dimensions = {item.dimension for item in engine.snapshot(session_id).evidence}
-    assert dimensions == {"budget", "decision", "timeline"}
+    # `requirement` is here because the first turn asked for a catalog with payments.
+    # The subject of this test is what must *not* appear: nothing derived from how the
+    # buyer speaks. Personality, accent, language and business type are all absent.
+    assert dimensions == {"budget", "decision", "requirement", "timeline"}
 
 
 def test_language_frustration_and_business_type_are_not_intent_evidence() -> None:
@@ -166,7 +172,11 @@ def test_repetition_is_acknowledged_without_duplicate_facts_or_evidence() -> Non
     assert result.repeated_turn
     snapshot = engine.snapshot(session_id)
     assert len(snapshot.facts) == 2
-    assert len(snapshot.evidence) == 1
+    # One turn asking for a catalog and a demo is two dimensions; saying it twice is still
+    # two. Asserted as a set as well as a count, so a duplicate of a single dimension
+    # cannot satisfy the count and pass unnoticed.
+    assert len(snapshot.evidence) == 2
+    assert {item.dimension for item in snapshot.evidence} == {"requirement", "next-step"}
 
 
 def test_paraphrased_evidence_cannot_inflate_classification() -> None:
@@ -943,6 +953,12 @@ def test_asking_to_be_spoken_to_in_a_language_is_not_a_website_requirement() -> 
         ("multilingual", "We need the site in two languages"),
         ("multilingual", "The site should support regional languages"),
         ("whatsapp", "Send the order to my WhatsApp number"),
+        # The gerund. `_VOCABULARY_SUFFIXES` drops derivational endings so that `booking`
+        # cannot read as the *books* business, which means "stock tracking" is not
+        # reachable by inflecting "stock track" and had to be listed in its own right.
+        # Measured over six such phrasings it was the only miss - "product listing",
+        # "payment processing" and "WhatsApp ordering" were already listed as said.
+        ("inventory", "We need stock tracking on the site"),
     ],
 )
 def test_a_feature_is_heard_however_the_buyer_happens_to_phrase_it(feature: str, text: str) -> None:
@@ -954,6 +970,291 @@ def test_a_feature_is_heard_however_the_buyer_happens_to_phrase_it(feature: str,
     nothing at all. That is where the real loss was: not a buyer who used an unusual word,
     but a buyer who said "we want to accept UPI" and was followed up as though they had
     named no requirement.
+    """
+
+    assert feature in _features_heard(text, LanguageCode.ENGLISH)
+
+
+def _authorization(turns: tuple[str, ...]) -> tuple[LeadTemperature, set[str], bool]:
+    """Drive a whole call, then ask the real policy whether it would allow a deck."""
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    for text in turns:
+        engine.process_turn(session_id, text=text, language=LanguageCode.ENGLISH)
+    snapshot = engine.snapshot(session_id)
+    temperature = snapshot.classifications[-1].temperature
+    decision = ActionPolicy().authorize(
+        ActionType.ARTIFACT_PREVIEW,
+        ActionAuthorizationContext(
+            temperature=temperature,
+            contact_policy=ContactPolicy(
+                opted_out=False,
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+            disclosure_delivered=True,
+            consent_granted=True,
+            conversation_disposition="continue",
+            used_actions=0,
+            max_actions=5,
+        ),
+    )
+    dimensions = {item.dimension for item in snapshot.evidence}
+    return temperature, dimensions, decision.status is AuthorizationStatus.APPROVED
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        pytest.param(
+            (
+                "We run a garment manufacturing business in Surat",
+                "We need an online catalogue and online payments",
+            ),
+            id="vertical-then-features",
+        ),
+        pytest.param(
+            ("I want a product catalogue, UPI payments and stock tracking on the site",),
+            id="features-in-one-breath",
+        ),
+        pytest.param(
+            (
+                "We are a pharmacy distributor",
+                "We need the site in Hindi and English and orders on WhatsApp",
+            ),
+            id="features-and-who-they-sell-to",
+        ),
+    ],
+)
+def test_a_buyer_who_says_what_they_want_is_not_sent_for_review(turns: tuple[str, ...]) -> None:
+    """Telling us what to build is evidence, and used not to be.
+
+    Driven through the engine and the real :class:`ActionPolicy`, because the failure was
+    only visible end to end: `_POSITIVE_EVIDENCE` scored money, deadline, decision and
+    next-step, so a buyer who named their vertical and listed exact features produced no
+    evidence of any kind, classified `REVIEW_NEEDED` and was blocked with
+    `CLASSIFICATION_REVIEW`. Measured over twelve realistic call shapes, four of the ten
+    that should have been actionable failed exactly this way.
+    """
+
+    temperature, dimensions, approved = _authorization(turns)
+
+    assert "requirement" in dimensions
+    assert temperature is not LeadTemperature.REVIEW_NEEDED
+    assert approved
+
+
+def test_saying_nothing_at_all_still_fails_closed() -> None:
+    """The widening must not cost the fail-closed default that ADR-0003 requires.
+
+    `REVIEW_NEEDED` means "nothing was said", and a buyer who has said nothing is still
+    refused. This is the assertion that stops the previous test being satisfied by simply
+    approving everybody.
+    """
+
+    temperature, dimensions, approved = _authorization(("Just tell me what you do", "Okay, I see"))
+
+    assert dimensions == set()
+    assert temperature is LeadTemperature.REVIEW_NEEDED
+    assert not approved
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We do not want online payments, cash only",
+        "We already have an online catalogue",
+        "Right now everything is on WhatsApp",
+        "My nephew needs a catalogue for his shop",
+        "A friend asked me about online payments",
+        "A relative asked me about an online catalogue",
+        "We stopped using WhatsApp for orders",
+        "We used to have an online catalogue",
+        "We no longer take orders on WhatsApp",
+        "We dropped online payments last year",
+        "We moved off WhatsApp ordering",
+        "Currently we track stock in a register",
+        # The past tense in the other three languages. Written as the grammatical
+        # auxiliary rather than a phrase, because the first attempt at these was two
+        # contiguous phrases that no real sentence matched.
+        "हमने व्हाट्सऐप पर ऑर्डर लेना बंद कर दिया",
+        "हम पहले ऑनलाइन कैटलॉग रखते थे",
+        "Hum pehle online catalogue use karte the",
+        "Humne WhatsApp par order lena band kar diya",
+        "మేము వాట్సాప్ ఆర్డర్లు ఆపేశాము",
+        "మేము ముందు ఆన్‌లైన్ కేటలాగ్ వాడేవాళ్ళం",
+    ],
+)
+def test_naming_a_feature_is_not_evidence_of_wanting_it(text: str) -> None:
+    """Requirement evidence is emitted from the recorded fact, never from a phrase list.
+
+    That is the whole safety argument: the fact only exists once `_requesting_clauses` has
+    discarded refusals, third parties, descriptions of today and descriptions of the past,
+    so those guards are inherited rather than reimplemented. A parallel phrase list inside
+    `_extract_evidence` would have matched whole turns with no clause scoping and warmed
+    every sentence below.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    result = engine.process_turn(session_id, text=text, language=LanguageCode.ENGLISH)
+
+    assert not any(item.dimension == "requirement" for item in result.evidence)
+
+
+def test_a_stated_requirement_is_worth_less_than_asking_for_a_demo() -> None:
+    """Ordering the weights, so a later edit cannot quietly make intent cheap.
+
+    Saying what you want is weaker intent than asking for a demo, which is weaker than
+    committing money. Asserted as behaviour and not as arithmetic on 0.35: a test that
+    recomputes the classifier's own base score passes whatever that base becomes, which is
+    how a threshold change hides. What must hold is that a lone requirement is warm enough
+    to act on and not warm enough to be hot.
+    """
+
+    assert 0 < _REQUIREMENT_WEIGHT < 0.20
+
+    temperature, dimensions, approved = _authorization(("We need an online catalogue",))
+    assert dimensions == {"requirement"}
+    assert temperature is LeadTemperature.WARM
+    assert approved
+
+
+def test_wanting_things_and_asking_for_a_demo_is_still_not_a_hot_lead() -> None:
+    """Two soft signals must not add up to the temperature reserved for money.
+
+    HOT is what a buyer reaches by committing something - a budget, a deadline, a decision.
+    A requirement plus a next-step is two dimensions and enough to act on, but it is not a
+    commitment, and the classifier's thresholds are what keep those apart. Nothing pinned
+    them: lowering the HOT line to 0.70, or raising the base score to 0.45, both survived
+    the whole suite while turning this call hot.
+    """
+
+    temperature, dimensions, _ = _authorization(
+        ("We need an online catalogue", "Can you send me a demo?")
+    )
+
+    assert dimensions == {"requirement", "next-step"}
+    assert temperature is LeadTemperature.WARM
+
+
+def test_committing_money_on_top_of_a_requirement_is_a_hot_lead() -> None:
+    """The other side of the same line, so it cannot be satisfied by never returning HOT."""
+
+    temperature, dimensions, approved = _authorization(
+        ("We need an online catalogue", "Our budget is around 2 lakh")
+    )
+
+    assert dimensions == {"requirement", "budget"}
+    assert temperature is LeadTemperature.HOT
+    assert approved
+
+
+def test_a_buyer_who_says_no_is_cold_and_not_merely_unclassified() -> None:
+    """Rejection has to produce counter-evidence, not an absence of evidence.
+
+    Removing `_NEGATIVE_EVIDENCE` from the extractor survived the entire suite. The action
+    outcome happens to be the same either way - both COLD and REVIEW_NEEDED are blocked -
+    which is exactly why nothing noticed. They are not the same thing: REVIEW_NEEDED means
+    nobody knows, COLD means the buyer told us, and only one of those should survive a
+    later change that makes review-needed leads actionable.
+    """
+
+    temperature, dimensions, approved = _authorization(("We are not interested, thanks",))
+
+    assert dimensions == {"rejection"}
+    assert temperature is LeadTemperature.COLD
+    assert not approved
+
+
+def test_saying_the_same_requirement_a_second_way_does_not_record_it_twice() -> None:
+    """The claim that restating a requirement is free, actually measured.
+
+    Identical text is caught earlier by the repeated-turn guard, so the fact-level dedup in
+    `extract_business_signals` is only reachable through a *rephrase* - and deleting it
+    survived the suite. It matters here because requirement evidence is emitted from the
+    recorded fact: without this, a buyer who says the same thing twice in different words
+    would bank the intent twice.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    first = engine.process_turn(
+        session_id, text="We need an online catalogue", language=LanguageCode.ENGLISH
+    )
+    second = engine.process_turn(
+        session_id,
+        text="We really do need that online catalogue on the site",
+        language=LanguageCode.ENGLISH,
+    )
+
+    # Asserted on the per-turn result, not on the snapshot. `snapshot.facts` is
+    # `facts_by_key.values()` - a dict keyed by fact key, which cannot hold a duplicate
+    # whatever the extractor does, so an assertion there passes even with the dedup
+    # deleted. The rephrase re-deriving the same value is visible only here.
+    assert [fact.key for fact in first.facts] == ["requested_features"]
+    assert second.facts == ()
+    assert len(engine.snapshot(session_id).evidence) == 1
+
+
+def test_a_stated_no_survives_the_positives_piled_on_top_of_it() -> None:
+    """Counter-evidence has to keep a lead below the actionable line, not just offset it.
+
+    A buyer who says they do not need a website and then talks about money and timing is
+    the shape that matters: every positive signal is real, and the "no" is still the most
+    recent thing they meant. The score lands at 0.40, four hundredths under the WARM line -
+    close enough that lowering that line by a tenth flips this call to WARM and approves a
+    deck, which survived the whole suite before this test existed.
+    """
+
+    temperature, dimensions, approved = _authorization(
+        ("We do not need a website", "Our budget is 2 lakh", "We are ready to start")
+    )
+
+    assert dimensions == {"no-need", "budget", "decision"}
+    assert temperature is LeadTemperature.COLD
+    assert not approved
+
+
+def test_confidence_reflects_how_many_different_things_the_buyer_said() -> None:
+    """One dimension is a guess; several agreeing is not.
+
+    Confidence is carried on every classification and read by operators, and no test
+    asserted it - zeroing its dependence on the evidence count survived the suite.
+    """
+
+    engine = ConversationEngine()
+    session_id = session(engine)
+    thin = engine.process_turn(
+        session_id, text="We need an online catalogue", language=LanguageCode.ENGLISH
+    )
+    thick = engine.process_turn(
+        session_id,
+        text="Our budget is around 2 lakh and we want to launch in 3 months",
+        language=LanguageCode.ENGLISH,
+    )
+
+    assert thick.classification.confidence > thin.classification.confidence
+
+
+@pytest.mark.parametrize(
+    ("feature", "text"),
+    [
+        ("whatsapp", "We stopped using WhatsApp and we want it properly on the site"),
+        ("online-payments", "Right now everything is cash, we want online payments"),
+    ],
+)
+def test_describing_the_past_does_not_swallow_the_request_beside_it(
+    feature: str, text: str
+) -> None:
+    """The past-state guard is conditional, and this is why it has to be.
+
+    A buyer explaining what they moved off is usually explaining it in order to ask for the
+    replacement. Making the cue unconditional - the way a refusal is unconditional - would
+    read the whole sentence as history and record nothing.
     """
 
     assert feature in _features_heard(text, LanguageCode.ENGLISH)
