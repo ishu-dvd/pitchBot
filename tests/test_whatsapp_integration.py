@@ -17,14 +17,30 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from test_action_workflows import eligible_context
 
+from pitchbot.actions.callbacks import CallbackService
+from pitchbot.actions.decks import DeckService
+from pitchbot.actions.models import ActionPreviewResult, FollowUpSummary
+from pitchbot.actions.policy import ActionPolicy
+from pitchbot.actions.workflows import ActionWorkflowService, _synthetic_contact
+from pitchbot.adapters.contracts import WhatsAppAdapter
 from pitchbot.adapters.errors import ExternalNetworkDisabledError, PermanentAdapterError
+from pitchbot.adapters.mocks import (
+    MockArtifactAdapter,
+    MockSchedulerAdapter,
+    MockTelephonyAdapter,
+    MockWhatsAppAdapter,
+)
 from pitchbot.adapters.network import NetworkPolicy
 from pitchbot.adapters.whatsapp_cloud import WhatsAppCloudAdapter
+from pitchbot.domain import LanguageCode
 from pitchbot.whatsapp import (
     FREE_ENTRY_POINT_WINDOW,
     RATES_CURRENCY,
@@ -42,7 +58,17 @@ from pitchbot.whatsapp import (
     window_closes_at,
 )
 
-NUMBER = "919876543210"
+NUMBER = "+919876543210"
+
+
+class _FrozenClock:
+    """A clock that does not move, so a test asserting on cost windows is not racing one."""
+
+    def __init__(self, at: datetime) -> None:
+        self._at = at
+
+    def now(self) -> datetime:
+        return self._at
 
 
 def _adapter(
@@ -614,3 +640,164 @@ async def test_the_fake_rejects_an_invalid_recipient_type() -> None:
 
     assert response.status_code == 400
     assert fake.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_operator_is_told_whether_a_message_was_actually_sent() -> None:
+    """The label reports the adapter's outcome, not which adapter happens to be installed.
+
+    `preview_whatsapp` returned the constant "Mock WhatsApp preview prepared; nothing was
+    sent." for every outcome. Driving the real client against the fake showed both ways
+    that is wrong: a message that reached the API and came back with a provider reference
+    was still reported as unsent, and a send refused because it would be billed produced a
+    byte-identical label. On the one path in this product where the difference is money,
+    "delivered" and "refused" were indistinguishable - and no test noticed, because nothing
+    asserted the label at all.
+    """
+
+    now = datetime(2026, 9, 7, 12, tzinfo=UTC)
+    clock = _FrozenClock(now)
+    follow_up = FollowUpSummary(
+        lead_id=uuid4(), language=LanguageCode.ENGLISH, requested_features=("catalog",)
+    )
+
+    def _service(
+        whatsapp: WhatsAppAdapter, *, resolver: Callable[[UUID], str] | None = None
+    ) -> ActionWorkflowService:
+        policy = ActionPolicy(clock=clock)
+        return ActionWorkflowService(
+            policy=policy,
+            callbacks=CallbackService(
+                scheduler=MockSchedulerAdapter(),
+                telephony=MockTelephonyAdapter(),
+                policy=policy,
+                clock=clock,
+            ),
+            decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+            whatsapp=whatsapp,
+            clock=clock,
+            contact_resolver=resolver,
+        )
+
+    async def _preview(
+        whatsapp: WhatsAppAdapter, *, resolver: Callable[[UUID], str] | None = None
+    ) -> ActionPreviewResult:
+        return await _service(whatsapp, resolver=resolver).preview_whatsapp(
+            session_id=uuid4(),
+            follow_up=follow_up,
+            context=eligible_context(),
+            operation_id=uuid4(),
+        )
+
+    # 1. The mock, which is what every deployment runs today: nothing left the process.
+    simulated = await _preview(MockWhatsAppAdapter())
+    assert simulated.label == "WhatsApp follow-up prepared; nothing was sent."
+    assert simulated.executed is False
+
+    # 2. The real client, given a real destination and an open window: genuinely sent.
+    sending_fake = FakeGraphApi()
+    sender = _adapter(sending_fake)
+    sender.record_inbound(NUMBER, now - timedelta(hours=1))
+    sent = await _preview(sender, resolver=lambda _lead_id: NUMBER)
+    assert sent.label == "WhatsApp follow-up sent."
+    assert sent.executed is True
+    assert sent.provider_reference is not None
+    assert len(sending_fake.sent) == 1
+
+    # 3. The real client with no window: refused for cost, and the reason is carried out.
+    refusing_fake = FakeGraphApi()
+    refused = await _preview(_adapter(refusing_fake), resolver=lambda _lead_id: NUMBER)
+    assert refused.label.startswith("WhatsApp follow-up not sent: ")
+    assert "never messaged or called us" in refused.label
+    assert refused.executed is False
+    assert refusing_fake.sent == []
+
+    # The three outcomes must be distinguishable from the label alone, which is the only
+    # thing an operator reading the event stream sees.
+    assert len({simulated.label, sent.label, refused.label}) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_lead_can_never_be_messaged_by_the_real_client() -> None:
+    """The simulator has no phone number, and now it cannot accidentally acquire one.
+
+    This was true by accident before - the contact reference has always been
+    ``synthetic:<uuid>`` - but nothing enforced it, so wiring the real client into the
+    simulator would have posted that string to Graph. That is not a harmless no-op: Meta
+    does not reject a malformed recipient, it strips the separators and prepends the
+    business's own country calling code, then delivers to whatever number that produces.
+    """
+
+    fake = FakeGraphApi()
+    adapter = _adapter(fake)
+    destination = _synthetic_contact(uuid4())
+    adapter.record_inbound(destination, datetime(2026, 9, 7, 11, tzinfo=UTC))
+
+    result = await adapter.send_message(
+        destination, "hello", "k-sim", now=datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+
+    assert result.status == "refused-invalid-destination"
+    assert "not a full international number" in result.detail
+    assert fake.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_number_without_a_country_code_is_delivered_to_somebody_else() -> None:
+    """Meta's most dangerous documented behaviour, made executable.
+
+        "If the plus sign is omitted, your business phone number's country calling code is
+        prepended to the customer's phone number. This can result in undelivered or
+        misdelivered messages."
+
+    There is no error, no rejection and no published regex to validate against - the
+    request returns 200 and the message goes to a stranger. Two things guard it, and this
+    test pins both: the client refuses the destination before building a request, and the
+    fake reproduces the coercion so the hazard stays visible if that gate is ever removed.
+    """
+
+    fake = FakeGraphApi(business_country_code="91")
+
+    # What Meta would actually do with a plausible-looking but plus-less number.
+    assert fake.resolve_recipient("919876543210") == "91919876543210"
+    # Separators are documented as supported and stripped, so these are all the same number.
+    assert fake.resolve_recipient("+91 (98765) 43-210") == "919876543210"
+
+    # And the client never lets one reach the wire in the first place.
+    adapter = _adapter(fake)
+    adapter.record_inbound("919876543210", datetime(2026, 9, 7, 11, tzinfo=UTC))
+    result = await adapter.send_message(
+        "919876543210", "hello", "k-nocc", now=datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+
+    assert result.status == "refused-invalid-destination"
+    assert fake.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_recipient_is_reported_rather_than_hidden() -> None:
+    """When Meta says it delivered elsewhere, say so.
+
+    Meta documents that ``wa_id`` "may not match `input` value", and that for Brazil and
+    Mexico "the extra added prefix of the phone number may be modified by the Cloud API.
+    This is a standard behavior of the system and is not considered a bug." So this is
+    information rather than an error - but comparing the two is the only documented way to
+    notice at send time that a number was rewritten, because the request succeeds anyway.
+    """
+
+    fake = FakeGraphApi(
+        business_country_code="52",
+        # Meta names Brazil and Mexico but does not say what the modification is, so the
+        # test supplies a concrete shape rather than the fake pretending to know one.
+        recipient_rewrite=lambda resolved: "521" + resolved[2:],
+    )
+    adapter = _adapter(fake)
+    adapter.record_inbound(NUMBER, datetime(2026, 9, 7, 11, tzinfo=UTC))
+
+    result = await adapter.send_message(
+        NUMBER, "hello", "k-rewrite", now=datetime(2026, 9, 7, 12, tzinfo=UTC)
+    )
+
+    assert result.status == "sent"
+    assert "delivered to 5219876543210" in result.detail
+    assert "not 919876543210" in result.detail

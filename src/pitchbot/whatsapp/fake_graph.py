@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -37,6 +39,9 @@ from fastapi.responses import JSONResponse
 MESSAGING_PRODUCT: Final = "whatsapp"
 _REQUIRED_FIELDS: Final = ("messaging_product", "recipient_type", "to", "type")
 _RECIPIENT_TYPES: Final = frozenset({"individual", "group"})
+
+_SEPARATORS: Final = re.compile(r"[+\-() ]")
+"""Exactly the characters Meta documents as supported and stripped in a ``to`` value."""
 
 
 @dataclass(slots=True)
@@ -65,6 +70,16 @@ class FakeGraphApi:
     expected_token: str = "test-token"
     api_version: str = "v22.0"
     sent: list[SentMessage] = field(default_factory=list)
+    # The country calling code Meta prepends when a ``to`` arrives without a plus sign.
+    # India, because that is the market this product sells into and therefore the code a
+    # misdelivered message here would actually be sent with.
+    business_country_code: str = "91"
+    # An optional rewrite applied to the resolved recipient, modelling Meta's statement
+    # that for Brazil and Mexico "the extra added prefix of the phone number may be
+    # modified by the Cloud API. This is a standard behavior of the system and is not
+    # considered a bug." The docs do not say which digit, in which direction, or under what
+    # conditions - so the shape is supplied by the caller rather than guessed here.
+    recipient_rewrite: Callable[[str], str] | None = None
     # Numbers the fake will accept, mirroring the real test number's allowlist of verified
     # recipients. Empty means "accept anyone", which the real thing never does.
     allowed_recipients: frozenset[str] = frozenset()
@@ -109,8 +124,14 @@ class FakeGraphApi:
 
         to = str(payload["to"])
         if self.allowed_recipients and to not in self.allowed_recipients:
-            # What the real test number says when the recipient was never verified. It is
-            # the first wall anyone hits, so the fake has to have it.
+            # What the real test number said when the recipient was never verified.
+            #
+            # UNVERIFIED as of 2026-09-07: code 131030 and the wording "Recipient phone
+            # number not in allowed list" do not appear anywhere in Meta's current
+            # error-code reference (checked against both the new documentation URL and the
+            # legacy one, 0 hits on each). It was a real historical development-mode code,
+            # so it is kept - but it is a recollection, not a citation, and a client must
+            # not branch on this specific number.
             return _error(400, "Recipient phone number not in allowed list.", code=131_030)
 
         message_type = str(payload["type"])
@@ -135,10 +156,36 @@ class FakeGraphApi:
         return JSONResponse(
             {
                 "messaging_product": MESSAGING_PRODUCT,
-                "contacts": [{"input": to, "wa_id": to.lstrip("+")}],
+                "contacts": [{"input": to, "wa_id": self.resolve_recipient(to)}],
                 "messages": [{"id": message_id, "message_status": "accepted"}],
             }
         )
+
+    def resolve_recipient(self, to: str) -> str:
+        """Turn a submitted ``to`` into the number Meta would actually deliver to.
+
+        Reproduces the documented behaviour rather than a convenient one, because the
+        convenient version hides the single most dangerous property of this API:
+
+            "Plus signs (+), hyphens (-), parenthesis ((,)), and spaces are supported in
+            send message requests."
+
+            "If the plus sign is omitted, your business phone number's country calling code
+            is prepended to the customer's phone number. This can result in undelivered or
+            misdelivered messages."
+
+        So a malformed number is **not rejected**. It is silently rewritten and delivered to
+        somebody else, and the request still returns 200. A fake that simply stripped the
+        ``+`` would make that failure mode untestable, which is exactly how it would reach
+        production unnoticed.
+
+        Read 2026-09-07 from
+        https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages
+        """
+
+        digits = _SEPARATORS.sub("", to)
+        resolved = digits if to.strip().startswith("+") else f"{self.business_country_code}{digits}"
+        return self.recipient_rewrite(resolved) if self.recipient_rewrite else resolved
 
 
 def _bearer(header: str) -> str:

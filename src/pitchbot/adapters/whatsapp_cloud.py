@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from datetime import datetime
 from typing import Any, Final
 
@@ -39,6 +40,24 @@ HTTPX_AVAILABLE: Final[bool] = importlib.util.find_spec("httpx") is not None
 
 DEFAULT_BASE_URL: Final = "https://graph.facebook.com"
 DEFAULT_API_VERSION: Final = "v22.0"
+
+DESTINATION_PATTERN: Final = re.compile(r"^\+[1-9]\d{6,14}$")
+"""What this client insists a recipient looks like, because Meta insists on nothing.
+
+There is **no** published regex, character class or length bound for ``to``: the field is a
+bare ``string`` in the schema, and the term "E.164" does not appear in the Cloud API
+documentation at all. What is documented is the failure mode, and it is not an error:
+
+    "If the plus sign is omitted, your business phone number's country calling code is
+    prepended to the customer's phone number. This can result in undelivered or
+    misdelivered messages."
+
+A malformed destination therefore returns **200** and is delivered to somebody else. That
+is the one failure a caller cannot detect after the fact, so it is refused before the
+request is built. Checked 2026-09-07 against
+https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages
+and the schema-backed message API reference.
+"""
 
 # Graph error codes worth distinguishing. Everything else is treated as permanent, because
 # retrying a request the server has already rejected on content is how a number gets rate
@@ -121,6 +140,23 @@ class WhatsAppCloudAdapter(WhatsAppAdapter):
         if previous is not None:
             return previous
 
+        if not DESTINATION_PATTERN.match(contact_ref):
+            # Refused rather than raised: the caller asked for something this client will
+            # not do, which is the same shape as the cost refusal below. Sending anyway is
+            # the dangerous option - Graph would accept it, rewrite it and deliver it to a
+            # stranger, and report success while doing so.
+            result = ActionResult(
+                idempotency_key=idempotency_key,
+                status="refused-invalid-destination",
+                detail=(
+                    f"{contact_ref!r} is not a full international number. WhatsApp does not "
+                    "reject a malformed recipient - it prepends this business's country "
+                    "calling code and delivers to whoever that produces."
+                ),
+            )
+            self._results[idempotency_key] = result
+            return result
+
         self._policy.require_external_network("whatsapp.send_message")
 
         decision = decide(
@@ -156,7 +192,7 @@ class WhatsAppCloudAdapter(WhatsAppAdapter):
             idempotency_key=idempotency_key,
             status="sent",
             provider_reference=messages[0].get("id"),
-            detail=messages[0].get("message_status", ""),
+            detail=_delivery_detail(contact_ref, body, messages[0].get("message_status", "")),
         )
         self._results[idempotency_key] = result
         return result
@@ -190,6 +226,28 @@ class WhatsAppCloudAdapter(WhatsAppAdapter):
         raise _graph_error(response.status_code, response.text)
 
 
+def _delivery_detail(contact_ref: str, body: dict[str, Any], status: str) -> str:
+    """Report the number Meta says it delivered to, when it is not the one we asked for.
+
+    Meta documents both halves of this explicitly - that ``wa_id`` "may not match `input`
+    value", and that for **Brazil and Mexico** "the extra added prefix of the phone number
+    may be modified by the Cloud API. This is a standard behavior of the system and is not
+    considered a bug." So a mismatch is information, not an error, and is reported rather
+    than raised.
+
+    It is worth reporting because comparing the returned ``wa_id`` against the intended
+    recipient is the only documented way to notice at send time that a number was rewritten
+    - the request itself succeeds either way.
+    """
+
+    contacts = body.get("contacts") or []
+    delivered = str(contacts[0].get("wa_id", "")) if contacts else ""
+    intended = contact_ref.lstrip("+")
+    if delivered and delivered != intended:
+        return f"{status} (delivered to {delivered}, not {intended})".strip()
+    return status
+
+
 def _graph_error(status: int, text: str) -> Exception:
     """Turn Graph's error envelope into the right kind of adapter error.
 
@@ -214,4 +272,10 @@ def _graph_error(status: int, text: str) -> Exception:
     return PermanentAdapterError(label)
 
 
-__all__ = ["DEFAULT_API_VERSION", "DEFAULT_BASE_URL", "HTTPX_AVAILABLE", "WhatsAppCloudAdapter"]
+__all__ = [
+    "DEFAULT_API_VERSION",
+    "DEFAULT_BASE_URL",
+    "DESTINATION_PATTERN",
+    "HTTPX_AVAILABLE",
+    "WhatsAppCloudAdapter",
+]

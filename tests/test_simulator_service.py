@@ -246,7 +246,7 @@ async def test_turn_language_preview_and_history_are_explicit(
     )
 
     assert result.preview is not None
-    assert result.preview.label == "Mock WhatsApp preview prepared; nothing was sent."
+    assert result.preview.label == "WhatsApp follow-up prepared; nothing was sent."
     assert result.preview.decision.status.value == "approved"
     assert result.events[-1].metadata["executed"] is False
     assert result.temperature == "warm"

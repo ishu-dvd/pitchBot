@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -21,6 +22,37 @@ from pitchbot.actions.policy import ActionPolicy
 from pitchbot.actions.summary_text import localised_timeline, stated_budget
 from pitchbot.adapters import Clock, EphemeralOperationStore, WhatsAppAdapter
 from pitchbot.domain import DEFAULT_TIMEZONE, ActionType, LanguageCode
+
+
+def _synthetic_contact(lead_id: UUID) -> str:
+    """The destination a simulated lead has: one no real handset can be reached at.
+
+    Deliberately not a phone number, and deliberately not *nearly* a phone number. The
+    Cloud API does not reject a malformed recipient - it rewrites it and delivers - so the
+    safe synthetic value is one that cannot survive a client-side destination check at all.
+    """
+
+    return f"synthetic:{lead_id}"
+
+
+def _delivery_label(status: str, detail: str) -> str:
+    """Say what the adapter reports happened, rather than what the caller assumes.
+
+    This used to be the constant ``"Mock WhatsApp preview prepared; nothing was sent."``,
+    which is a statement about *which adapter is installed* dressed up as a statement about
+    *what happened*. Driving the real client against the local fake showed the cost: the
+    message reached the API, came back with a provider reference, and the operator was told
+    nothing was sent. In the other direction a send refused for cost produced the identical
+    label, so "delivered" and "refused because it would be billed" were indistinguishable -
+    on the one code path in this product where the difference is money.
+    """
+
+    if status == "sent":
+        return "WhatsApp follow-up sent."
+    if status.startswith("refused"):
+        reason = detail.strip() or "the adapter refused to send it"
+        return f"WhatsApp follow-up not sent: {reason}"[:300]
+    return "WhatsApp follow-up prepared; nothing was sent."
 
 
 def agenda_for(follow_up: FollowUpSummary) -> CallbackAgenda:
@@ -56,13 +88,25 @@ class ActionWorkflowService:
         whatsapp: WhatsAppAdapter,
         clock: Clock,
         callback_timezone: str = DEFAULT_TIMEZONE,
+        contact_resolver: Callable[[UUID], str] | None = None,
     ) -> None:
+        """``contact_resolver`` turns a lead id into a WhatsApp destination.
+
+        It defaults to a ``synthetic:`` reference that no real number can equal, so a
+        simulator wired to the live client refuses to send rather than reaching a stranger.
+        That was already true by accident - the reference has always been synthetic - but
+        nothing enforced it and nothing said so. It is a callback rather than a field on
+        :class:`FollowUpSummary` because that summary is a deliberately minimised set of
+        allowlisted facts, and a phone number does not belong in it.
+        """
+
         self._policy = policy
         self._callbacks = callbacks
         self._decks = decks
         self._whatsapp = whatsapp
         self._clock = clock
         self._callback_timezone = callback_timezone
+        self._contact_resolver = contact_resolver or _synthetic_contact
 
     async def preview_whatsapp(
         self,
@@ -79,13 +123,14 @@ class ActionWorkflowService:
             )
         message = self._render_follow_up(follow_up)
         result = await self._whatsapp.send_message(
-            f"synthetic:{follow_up.lead_id}",
+            self._contact_resolver(follow_up.lead_id),
             message,
             f"simulator:{session_id}:whatsapp:{operation_id}",
         )
         return ActionPreviewResult(
             decision=decision,
-            label="Mock WhatsApp preview prepared; nothing was sent.",
+            label=_delivery_label(result.status, result.detail),
+            executed=result.status == "sent",
             provider_reference=result.provider_reference,
         )
 
