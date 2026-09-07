@@ -2727,3 +2727,64 @@ defects, and measuring the extraction it feeds found the largest gap in the prod
   number survived the whole suite - a simulator wired to the live client would have started
   messaging strangers with CI green. Now asserted through the destination gate over 25 lead
   ids, because the property is "no real handset can be reached at this".
+
+## Authorization evidence: the buyer said what they wanted and was sent for review
+
+The gap was deferred three times and was the top-ranked candidate each time. Measured end
+to end - twelve realistic call shapes driven through the engine and the real
+`ActionPolicy`, because the failure is invisible from either side alone.
+
+- **Four of the ten calls that should have been actionable were refused every action**, all
+  failing identically. `_POSITIVE_EVIDENCE` scored budget, timeline, decision and
+  next-step; a buyer who named their vertical and listed exact features produced `ev=[]`,
+  classified `REVIEW_NEEDED`, and was blocked with `CLASSIFICATION_REVIEW`.
+- **The evidence is emitted from the recorded fact, not from a phrase list.** That is the
+  safety argument. The fact only exists after `_requesting_clauses` has discarded refusals,
+  third parties and descriptions of today, so those guards are inherited rather than
+  rewritten - a phrase list in `_extract_evidence` matches whole turns with no clause
+  scoping and would have warmed every sentence in the negative sweep.
+- **Weight 0.15, and deliberately not 0.10.** The base score is 0.35 and the WARM line is
+  0.45, and `0.35 + 0.10` is `0.44999999999999996`. A tenth would have classified COLD and
+  looked like a decision.
+- **Two false positives and one vocabulary gap fell out of the same sweep.** "A friend
+  asked me about online payments" had no third-party cue; "We stopped using WhatsApp for
+  orders" had no past-state guard at all; "stock tracking" was unreachable by inflecting
+  `stock track`, because derivational endings are dropped so `booking` cannot read as the
+  *books* business. Measured over six gerund phrasings it was the only miss.
+- **The guessed native-script cues were dead on arrival.** `पहले करते थे` and
+  `pehle use karte the` were written from intuition in the same edit and matched nothing:
+  real sentences use a different verb, or put two words in between. Replaced with the past
+  auxiliary `था`/`थे`/`थी` and `karte the`. Bare romanised `the` is excluded - Hinglish
+  turns are full of English words and it would suppress almost every clause.
+- **Result:** qualified calls refused 4/10 -> 0/10; feature phrasings 5/6 -> 6/6; sentences
+  that name a feature without asking for one 8/10 -> 12/12, and 4/4 across languages. No
+  regression on the existing matrix (20/20) or natural phrasings (10/11).
+- **One loss accepted and documented.** "We used to have a catalogue **but** now we need a
+  proper one online" drops `catalog`: `but` is a clause boundary, the feature word is in
+  the discarded half, and "a proper one" is anaphora this layer does not resolve. The safe
+  direction, and the next turn recovers it.
+
+### The mutation sweep that actually taught something
+
+Batch 1 targeted the cues and scored 23/23 - a confirming sweep, since every case had just
+been pinned by a parametrised test. Batch 2 targeted the classifier this change now
+interacts with and scored **4/12**.
+
+- **Deleting `_NEGATIVE_EVIDENCE` entirely survived the suite.** "We are not interested"
+  then yields no evidence rather than counter-evidence. Both COLD and `REVIEW_NEEDED` are
+  blocked, so the action outcome was identical and nothing noticed - but one means the
+  buyer told us and the other means nobody knows, and only one should survive a later
+  change that makes review-needed leads actionable.
+- **Lowering the HOT line, raising the base score, zeroing confidence's dependence on the
+  evidence count, and removing the fact dedup all survived.** None of the classifier's
+  thresholds were pinned by anything.
+- **My own restatement test could not have caught its mutation.** It asserted on
+  `snapshot.facts`, which is `facts_by_key.values()` - a dict keyed by fact key, incapable
+  of holding a duplicate whatever the extractor does. The rephrase is only visible in the
+  per-turn result. Same anti-pattern as asserting against the table the code reads.
+- **Two survivors are equivalent mutants and are documented as such** rather than pinned by
+  a contrived test: evidence is deduped by dimension before classification, which makes the
+  HOT dimension count unreachable under the current weights, and a raw score at or below
+  the cold floor already falls through to the same COLD. Both now carry the proof in a
+  comment so a future reader does not delete them as dead.
+- Batch 2 closed to **10/12**; tests 1,536 -> 1,568.
