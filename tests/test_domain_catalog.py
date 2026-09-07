@@ -345,3 +345,50 @@ def test_the_deck_can_render_every_deadline_the_matcher_can_emit() -> None:
     emitted = set(_TIMELINE_UNIT_STEMS.values()) | {"near-term"}
 
     assert emitted == TIMELINE_UNITS
+
+
+def test_a_stated_budget_is_evidence_however_it_is_stated() -> None:
+    """Extraction and classification must learn a new phrasing together.
+
+    They did not. The extractor learned "we can spend up to ten lakh"; the classifier's
+    own copy of the budget vocabulary did not, so the turn produced no evidence at all.
+    With no evidence the lead classifies REVIEW_NEEDED and `ActionPolicy` blocks every
+    action - measured end to end, a call that filled business type, features, budget and
+    timeline was refused its deck. A fourth copy of the same vocabulary, in a fourth
+    module, with the loudest possible symptom and no error anywhere.
+    """
+
+    from pitchbot.conversation.rules import _POSITIVE_EVIDENCE, _contains_any, normalize_text
+    from pitchbot.domain import BUDGET_CUES, BUDGET_INTENT_CUES
+
+    budget_phrases = next(
+        phrases for dimension, _, phrases in _POSITIVE_EVIDENCE if dimension == "budget"
+    )
+    for cue in (*BUDGET_CUES, *BUDGET_INTENT_CUES):
+        assert cue in budget_phrases, f"{cue} states a budget but is not evidence of one"
+
+    assert _contains_any(normalize_text("We can spend up to ten lakh."), budget_phrases)
+
+
+def test_a_stated_deadline_is_evidence_however_it_is_stated() -> None:
+    """Every unit the timeline matcher accepts must also count as timeline evidence.
+
+    The evidence list stopped at "weeks", so "in 3 months" filled the `timeline` slot and
+    contributed nothing to the classification that decides whether the buyer may be sent
+    anything.
+    """
+
+    from pitchbot.conversation.rules import (
+        _POSITIVE_EVIDENCE,
+        _TIMELINE_UNIT_STEMS,
+        _contains_any,
+        normalize_text,
+    )
+
+    timeline_phrases = next(
+        phrases for dimension, _, phrases in _POSITIVE_EVIDENCE if dimension == "timeline"
+    )
+    for stem in _TIMELINE_UNIT_STEMS:
+        assert stem in timeline_phrases, f"{stem} is a deadline the classifier cannot see"
+
+    assert _contains_any(normalize_text("we want it live in 3 months"), timeline_phrases)

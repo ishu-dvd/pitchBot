@@ -13,6 +13,8 @@ from uuid import UUID
 from pitchbot.conversation.models import SafetySignal
 from pitchbot.conversation.state import ConversationState
 from pitchbot.domain import (
+    BUDGET_CUES,
+    BUDGET_INTENT_CUES,
     BUSINESS_TYPES,
     FEATURES,
     INTENT_PHRASES,
@@ -852,12 +854,68 @@ _MERGE_STOPWORDS = frozenset(
     }
 )
 
+_TIMELINE_UNIT_STEMS: Final[Mapping[str, str]] = {
+    "day": "days",
+    "week": "weeks",
+    "month": "months",
+    "दिन": "days",
+    "हफ्त": "weeks",
+    "हफ़्त": "weeks",
+    "सप्ताह": "weeks",
+    "महीन": "months",
+    "माह": "months",
+    "రోజు": "days",
+    "వార": "weeks",
+    "నెల": "months",
+    "din": "days",
+    "haft": "weeks",
+    "mahin": "months",
+}
+"""Time units as stems, because the unit carries the case ending in these languages.
+
+Telugu writes *"మూడు నెలల్లో"* as one token - `నెలల్లో` is `నెల` plus "in" - so a pattern
+that demands a word boundary after the unit cannot match it. Hindi inflects the same way
+(महीने / महीनों).
+
+Declared here, above the evidence tables, because the lead classifier reads the same stems.
+A deadline that fills the `timeline` slot must also count as timeline evidence, or a
+qualified buyer is classified as needing review and refused every action.
+"""
+
 _POSITIVE_EVIDENCE: tuple[tuple[str, float, tuple[str, ...]], ...] = (
-    ("budget", 0.25, ("budget", "₹", "rs ", "rupees", "बजट", "బడ్జెట్", "రూపాయలు")),
+    (
+        "budget",
+        0.25,
+        (
+            *BUDGET_CUES,
+            # A budget stated without the word - "we can spend up to ten lakh" - is still
+            # a budget, and until this list knew that, such a buyer produced no evidence
+            # at all. With no evidence the lead classifies REVIEW_NEEDED, and every action
+            # is then blocked: measured end to end, a call that filled all four slots was
+            # refused a deck. The extractor learning a new way to hear a budget is only
+            # half the fix if the classifier does not learn it too.
+            *BUDGET_INTENT_CUES,
+            "₹",
+            "rs ",
+            "rupees",
+            "రూపాయలు",
+        ),
+    ),
     (
         "timeline",
         0.25,
-        ("this week", "this month", "days", "weeks", "जल्दी", "इस महीने", "ఈ వారం", "ఈ నెల"),
+        (
+            "this week",
+            "this month",
+            # The unit stems the timeline matcher already knows, so a deadline that fills
+            # the slot also counts as evidence. "in 3 months" filled `timeline` and
+            # produced none, because this list stopped at weeks.
+            *_TIMELINE_UNIT_STEMS,
+            "जल्दी",
+            "इस महीने",
+            "ఈ వారం",
+            "ఈ నెల",
+        ),
     ),
     (
         "decision",
@@ -1000,23 +1058,6 @@ _TIMELINE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_TIMELINE_UNIT_STEMS: Final[Mapping[str, str]] = {
-    "day": "days",
-    "week": "weeks",
-    "month": "months",
-    "दिन": "days",
-    "हफ्त": "weeks",
-    "हफ़्त": "weeks",
-    "सप्ताह": "weeks",
-    "महीन": "months",
-    "माह": "months",
-    "రోజు": "days",
-    "వార": "weeks",
-    "నెల": "months",
-    "din": "days",
-    "haft": "weeks",
-    "mahin": "months",
-}
 """Time units as stems, because the unit carries the case ending in these languages.
 
 Telugu writes *"మూడు నెలల్లో"* as one token - `నెలల్లో` is `నెల` plus "in" - so a pattern
