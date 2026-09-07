@@ -150,7 +150,7 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         },
         next_steps=(
             "Confirm requirements and who owns the content",
-            "Review a synthetic prototype",
+            "Review a sample prototype",
             "Approve scope before implementation",
         ),
     ),
@@ -366,7 +366,7 @@ _PHRASES: Final[Mapping[LanguageCode, DeckPhrases]] = {
         },
         next_steps=(
             "Requirements aur content ki zimmedari tay karna",
-            "Ek synthetic prototype dekhna",
+            "Ek sample prototype dekhna",
             "Kaam shuru karne se pehle scope approve karna",
         ),
     ),

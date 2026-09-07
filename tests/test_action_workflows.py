@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -24,7 +25,7 @@ from pitchbot.actions import (
     DeckService,
     build_follow_up,
 )
-from pitchbot.actions.deck_content import phrases_for
+from pitchbot.actions.deck_content import _PHRASES, phrases_for
 from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock, PermanentAdapterError
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
@@ -1804,3 +1805,34 @@ def test_a_deadline_with_no_number_is_localised_too(language: LanguageCode) -> N
     assert phrases.timeline_units["near-term"] in ActionWorkflowService._render_follow_up(  # noqa: SLF001
         follow_up
     )
+
+
+def test_buyer_facing_copy_never_names_the_product_or_the_mechanism() -> None:
+    """A buyer reads this. They do not know what PitchBot is, or what "synthetic" means.
+
+    The WhatsApp header used to read "Synthetic PitchBot follow-up" - the product name and
+    the internal word for "not really sent", at the top of the first thing the buyer
+    receives after the call. Asserting a phrase equals a literal would only re-read the
+    table the renderer reads, so this asserts the property that made the old header wrong.
+
+    The same scan found the leak was not only in the header: the English and Hinglish
+    closing slides said "Review a synthetic prototype", while Hindi and Telugu already said
+    "sample". The two languages that got it right are what "correct" looks like here.
+    """
+
+    internal = ("pitchbot", "synthetic", "mock", "simulator")
+    for language, phrases in _PHRASES.items():
+        for field in dataclasses.fields(phrases):
+            value = getattr(phrases, field.name)
+            if isinstance(value, Mapping):
+                strings: list[str] = []
+                for item in value.values():
+                    strings.extend(item) if isinstance(item, tuple) else strings.append(item)
+            elif isinstance(value, tuple):
+                strings = list(value)
+            else:
+                strings = [value]
+            for text in strings:
+                lowered = text.lower()
+                for term in internal:
+                    assert term not in lowered, (language.value, field.name, text, term)
