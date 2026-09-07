@@ -3,6 +3,8 @@ from __future__ import annotations
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from pitchbot.domain import DEFAULT_TIMEZONE
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="PITCHBOT_", extra="ignore")
@@ -46,7 +48,7 @@ class Settings(BaseSettings):
     lead_recall_deadline_ms: int = 150
     lead_recall_failure_budget: int = 3
 
-    timezone: str = "Asia/Kolkata"
+    timezone: str = DEFAULT_TIMEZONE
     # Both of these are enforced. `max_call_minutes` refuses a new turn once the call has
     # run this long (0 disables it); `max_turns` caps the conversation's turn count. Until
     # PR 54 neither reached the running service: the duration cap had no consumer at all,

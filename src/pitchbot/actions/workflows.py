@@ -20,7 +20,30 @@ from pitchbot.actions.models import (
 from pitchbot.actions.policy import ActionPolicy
 from pitchbot.actions.summary_text import localised_timeline, stated_budget
 from pitchbot.adapters import Clock, EphemeralOperationStore, WhatsAppAdapter
-from pitchbot.domain import ActionType, LanguageCode
+from pitchbot.domain import DEFAULT_TIMEZONE, ActionType, LanguageCode
+
+
+def agenda_for(follow_up: FollowUpSummary) -> CallbackAgenda:
+    """What the next call is actually about, given how far this one got.
+
+    ``preview_callback`` hardcoded :attr:`CallbackAgenda.WEBSITE_DISCOVERY`, so every
+    callback this product has ever arranged claimed to be about discovering what the buyer
+    needs - including callbacks with buyers who had already stated their vertical, their
+    feature list, their budget and their deadline. The other two members of the enum
+    appeared **nowhere** outside their own definition: two thirds of a modelled concept,
+    dead.
+
+    The agenda a buyer is told about is the promise the next call has to keep, so it is
+    read from the same minimised summary the deck and the follow-up message are built from
+    rather than guessed.
+    """
+
+    if follow_up.budget_summary or follow_up.timeline_summary:
+        # They have named money or a date. The next conversation is about a number.
+        return CallbackAgenda.PROPOSAL_REVIEW
+    if follow_up.requested_features:
+        return CallbackAgenda.REQUIREMENTS_REVIEW
+    return CallbackAgenda.WEBSITE_DISCOVERY
 
 
 class ActionWorkflowService:
@@ -32,12 +55,14 @@ class ActionWorkflowService:
         decks: DeckService,
         whatsapp: WhatsAppAdapter,
         clock: Clock,
+        callback_timezone: str = DEFAULT_TIMEZONE,
     ) -> None:
         self._policy = policy
         self._callbacks = callbacks
         self._decks = decks
         self._whatsapp = whatsapp
         self._clock = clock
+        self._callback_timezone = callback_timezone
 
     async def preview_whatsapp(
         self,
@@ -70,10 +95,20 @@ class ActionWorkflowService:
         session_id: UUID,
         lead_id: UUID,
         delay_minutes: int,
+        follow_up: FollowUpSummary,
         context: ActionAuthorizationContext,
         operation_id: UUID,
         requested_at: datetime,
     ) -> ActionPreviewResult:
+        """Arrange the next call, about what this one actually established.
+
+        Takes the same minimised summary the deck and the WhatsApp follow-up are built
+        from, for the same reason `preview_deck` does: one place decides what a
+        conversation may emit. Before this it took no conversation input at all beyond a
+        delay, so it sent the scheduler a fixed agenda and a fixed timezone for every
+        buyer.
+        """
+
         decision = self._policy.authorize(ActionType.CALLBACK_SCHEDULE, context)
         if decision.status is AuthorizationStatus.BLOCKED:
             return ActionPreviewResult(
@@ -83,8 +118,8 @@ class ActionWorkflowService:
             lead_id=lead_id,
             callback_id=f"sim-{session_id.hex}-{operation_id.hex}",
             run_at=requested_at + timedelta(minutes=delay_minutes),
-            timezone="UTC",
-            agenda=CallbackAgenda.WEBSITE_DISCOVERY,
+            timezone=self._callback_timezone,
+            agenda=agenda_for(follow_up),
             idempotency_key=f"simulator:{session_id}:callback:{operation_id}",
         )
         callback = await self._callbacks.schedule(request, context)

@@ -26,6 +26,7 @@ from pitchbot.actions import (
     build_follow_up,
 )
 from pitchbot.actions.deck_content import _PHRASES, phrases_for
+from pitchbot.actions.workflows import agenda_for
 from pitchbot.adapters import ActionResult, AdapterTimeoutError, FakeClock, PermanentAdapterError
 from pitchbot.adapters.mocks import (
     MockArtifactAdapter,
@@ -33,7 +34,15 @@ from pitchbot.adapters.mocks import (
     MockTelephonyAdapter,
     MockWhatsAppAdapter,
 )
-from pitchbot.domain import ActionType, ContactPolicy, JsonValue, LanguageCode, LeadTemperature
+from pitchbot.config import Settings
+from pitchbot.domain import (
+    DEFAULT_TIMEZONE,
+    ActionType,
+    ContactPolicy,
+    JsonValue,
+    LanguageCode,
+    LeadTemperature,
+)
 
 
 class ConcurrencyProbeScheduleAdapter(MockSchedulerAdapter):
@@ -413,6 +422,7 @@ async def test_invalid_callback_time_produces_blocked_preview_decision() -> None
         session_id=uuid4(),
         lead_id=uuid4(),
         delay_minutes=1,
+        follow_up=build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts={}),
         context=eligible_context(),
         operation_id=uuid4(),
         requested_at=clock.now() - timedelta(minutes=2),
@@ -1836,3 +1846,99 @@ def test_buyer_facing_copy_never_names_the_product_or_the_mechanism() -> None:
                 lowered = text.lower()
                 for term in internal:
                     assert term not in lowered, (language.value, field.name, text, term)
+
+
+@pytest.mark.parametrize(
+    ("facts", "expected"),
+    [
+        ({"business_type": "apparel"}, CallbackAgenda.WEBSITE_DISCOVERY),
+        (
+            {"business_type": "apparel", "requested_features": "catalog"},
+            CallbackAgenda.REQUIREMENTS_REVIEW,
+        ),
+        (
+            {"business_type": "apparel", "requested_features": "catalog", "timeline": "3 months"},
+            CallbackAgenda.PROPOSAL_REVIEW,
+        ),
+        (
+            {"business_type": "apparel", "budget_stated": "budget is 200000"},
+            CallbackAgenda.PROPOSAL_REVIEW,
+        ),
+    ],
+)
+def test_the_next_call_is_about_what_this_one_established(
+    facts: dict[str, JsonValue], expected: CallbackAgenda
+) -> None:
+    """A callback carries a promise about what the next conversation covers.
+
+    ``preview_callback`` hardcoded ``WEBSITE_DISCOVERY``, so a buyer who had already given
+    their vertical, their feature list, their budget and their deadline was told the next
+    call was to find out what they need. It reads the same minimised summary the deck and
+    the follow-up message are built from instead.
+    """
+
+    follow_up = build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts=facts)
+
+    assert agenda_for(follow_up) is expected
+
+
+def test_every_callback_agenda_is_reachable() -> None:
+    """Two of the three used to appear nowhere outside their own definition.
+
+    An enum member that no code path can produce is a modelled distinction the product does
+    not actually make. Asserting the mapping covers the enum is what stops a fourth agenda
+    being added and silently never used.
+    """
+
+    produced = {
+        agenda_for(build_follow_up(lead_id=uuid4(), language=LanguageCode.ENGLISH, facts=facts))
+        for facts in (
+            {"business_type": "apparel"},
+            {"business_type": "apparel", "requested_features": "catalog"},
+            {"business_type": "apparel", "budget_stated": "budget is 200000"},
+        )
+    }
+
+    assert produced == set(CallbackAgenda)
+
+
+@pytest.mark.asyncio
+async def test_a_callback_is_arranged_in_the_buyers_timezone() -> None:
+    """`Settings.timezone` said Asia/Kolkata and nothing read it.
+
+    The scheduler adapter receives `request.timezone` verbatim, so every callback this
+    product has ever arranged was handed to the scheduler as UTC - five and a half hours
+    from the buyer it was arranged with. The default now comes from one place that the
+    settings default is also built from, so the two cannot disagree.
+    """
+
+    clock = FakeClock(datetime(2026, 1, 1, tzinfo=UTC))
+    policy = ActionPolicy(clock=clock)
+    workflows = ActionWorkflowService(
+        policy=policy,
+        callbacks=CallbackService(
+            scheduler=MockSchedulerAdapter(),
+            telephony=MockTelephonyAdapter(),
+            policy=policy,
+            clock=clock,
+        ),
+        decks=DeckService(artifact_adapter=MockArtifactAdapter(), clock=clock),
+        whatsapp=MockWhatsAppAdapter(),
+        clock=clock,
+    )
+
+    preview = await workflows.preview_callback(
+        session_id=uuid4(),
+        lead_id=uuid4(),
+        delay_minutes=30,
+        follow_up=build_follow_up(
+            lead_id=uuid4(), language=LanguageCode.ENGLISH, facts={"business_type": "apparel"}
+        ),
+        context=eligible_context(),
+        operation_id=uuid4(),
+        requested_at=clock.now(),
+    )
+
+    assert preview.callback is not None
+    assert preview.callback.request.timezone == DEFAULT_TIMEZONE
+    assert Settings().timezone == DEFAULT_TIMEZONE

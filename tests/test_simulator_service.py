@@ -1639,3 +1639,81 @@ async def test_a_qualified_buyer_receives_a_deck_carrying_what_they_said(
     assert result.preview.deck is not None
     heard = result.preview.deck.slides[0]
     assert any(figure in bullet for bullet in heard.bullets), heard.bullets
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("turns", "expected"),
+    [
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "Can you show me a demo?",
+            ),
+            "website-discovery",
+        ),
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "We need a catalog and online payment.",
+                "Can you show me a demo?",
+            ),
+            "requirements-review",
+        ),
+        (
+            (
+                "We run a clothing store and want to sell online.",
+                "We need a catalog and online payment.",
+                "Our budget is 200000 and we want it live in 3 months.",
+            ),
+            "proposal-review",
+        ),
+    ],
+)
+async def test_a_callback_promises_the_conversation_the_buyer_is_ready_for(
+    turns: tuple[str, ...], expected: str
+) -> None:
+    """Three real calls of increasing depth, which used to produce one identical callback.
+
+    The unit test pins the mapping; this pins that the mapping is *reachable*. Two of the
+    three agendas appeared nowhere outside their own enum definition, so "the mapping is
+    correct" and "a real conversation can produce it" are separate claims and both were
+    false.
+    """
+
+    service = SimulatorService()
+    session = service.create_session(
+        CreateSessionRequest(
+            lead_ref=f"agenda-{expected}",
+            language=LanguageCode.ENGLISH,
+            preview_consent_granted=True,
+            contact_policy=ContactPolicy(
+                outreach_allowed=True,
+                allowlisted=True,
+                dnd_check_passed=True,
+                calling_hours_check_passed=True,
+            ),
+        )
+    )
+    for text in turns:
+        await service.process_turn(
+            session.session_id,
+            TurnRequest(operation_id=uuid4(), text=text, language=LanguageCode.ENGLISH),
+        )
+
+    result = await service.process_turn(
+        session.session_id,
+        TurnRequest(
+            operation_id=uuid4(),
+            text="Call me later please.",
+            language=LanguageCode.ENGLISH,
+            preview_action=PreviewAction.CALLBACK,
+            callback_delay_minutes=30,
+        ),
+    )
+
+    assert result.preview is not None
+    assert result.preview.decision.status.value == "approved", result.preview.decision.reasons
+    assert result.preview.callback is not None
+    assert result.preview.callback.request.agenda.value == expected
+    assert result.preview.callback.request.timezone == "Asia/Kolkata"

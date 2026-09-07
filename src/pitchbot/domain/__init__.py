@@ -13,6 +13,7 @@ from pitchbot.domain.catalog import (
     features,
 )
 from pitchbot.domain.models import (
+    DEFAULT_TIMEZONE,
     ActionExecution,
     ActionProposal,
     ActionStatus,
@@ -46,6 +47,7 @@ from pitchbot.domain.models import (
 )
 
 __all__ = [
+    "DEFAULT_TIMEZONE",
     "BUDGET_CUES",
     "BUDGET_INTENT_CUES",
     "BUSINESS_TYPES",
