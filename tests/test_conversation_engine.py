@@ -690,3 +690,105 @@ def test_a_closed_conversation_says_something_new_each_turn() -> None:
     ]
 
     assert len(set(spoken)) == len(spoken), spoken
+
+
+# Six ways a person asks to be left alone, in the four languages this product sells in.
+# Flattened into one parametrised list so a language that can only express some of them
+# fails loudly, by name, instead of quietly refusing to hear the others.
+_OPT_OUT_MATRIX = [
+    ("do not call", "en", "Do not call me again."),
+    ("do not call", "hi", "दोबारा कॉल मत कीजिए।"),
+    ("do not call", "te", "మళ్ళీ కాల్ చేయవద్దు."),
+    ("do not call", "mixed", "Dobara call mat kijiye."),
+    ("do not phone", "en", "Do not phone me."),
+    # `फ़ोन` with the nuqta, the spelling the list did not have.
+    ("do not phone", "hi", "मुझे फ़ोन मत कीजिए।"),
+    ("do not phone", "te", "నాకు ఫోన్ చేయవద్దు."),
+    ("do not phone", "mixed", "Mujhe phone mat kijiye."),
+    ("do not contact", "en", "Do not contact me."),
+    ("do not contact", "hi", "मुझसे संपर्क मत कीजिए।"),
+    ("do not contact", "te", "నన్ను సంప్రదించవద్దు."),
+    ("do not contact", "mixed", "Mujhse contact mat kijiye."),
+    ("stop contacting", "en", "Stop contacting me."),
+    ("stop contacting", "hi", "मुझसे संपर्क करना बंद कीजिए।"),
+    ("stop contacting", "te", "నన్ను సంప్రదించడం ఆపండి."),
+    ("stop contacting", "mixed", "Mujhse contact karna band kijiye."),
+    ("remove my number", "en", "Remove my number."),
+    ("remove my number", "hi", "मेरा नंबर हटा दीजिए।"),
+    ("remove my number", "te", "నా నంబర్ తీసివేయండి."),
+    ("remove my number", "mixed", "Mera number hata dijiye."),
+    ("remove me from your list", "en", "Remove me from your list."),
+    ("remove me from your list", "hi", "मुझे अपनी सूची से हटा दीजिए।"),
+    ("remove me from your list", "te", "నన్ను మీ జాబితా నుండి తొలగించండి."),
+    ("remove me from your list", "mixed", "Mujhe apni list se hata dijiye."),
+]
+
+
+@pytest.mark.parametrize(
+    ("concept", "language", "text"),
+    _OPT_OUT_MATRIX,
+    ids=[f"{concept}-{language}" for concept, language, _ in _OPT_OUT_MATRIX],
+)
+def test_a_refusal_is_heard_in_every_language_it_can_be_said_in(
+    concept: str, language: str, text: str
+) -> None:
+    """The language a person speaks must not decide whether their opt-out is heard.
+
+    Measured before this test existed: **12 of these 24 were unheard**. Hindi could express
+    one of the six concepts; Hinglish two; Telugu four. A Hindi speaker asking to be
+    removed from the list was answered with the next qualifying question.
+
+    Three separate causes, each invisible because the phrase list is one flat tuple with
+    nothing making the languages cover the same ground:
+
+    * ``फ़ोन`` with the nuqta was absent while ``फोन`` was present - one codepoint decided
+      whether a refusal was heard.
+    * "stop calling" and "do not contact" were both listed and "stop contacting" was not,
+      so the phrasing that crosses them was unheard in *every* language at once.
+    * The removal template required ``ordered=True``, but Hindi, Hinglish and Telugu are
+      verb-final - the reasoning the message template beside it already documented and this
+      one did not. Telugu additionally had **no token at all** in any of the three groups
+      the template matches on, so it could never fire in Telugu whatever was said.
+    """
+
+    assert SafetySignal.OPT_OUT in detect_safety_signals(text), (concept, language, text)
+
+
+# What a buyer of a catalogue-building product says about their own data. Every one of
+# these carries a removal verb, a self-reference and a record noun - the exact shape of a
+# real opt-out - and an opt-out is unrecoverable.
+_BENIGN_REMOVALS = [
+    ("en", "Remove my old product list from the homepage."),
+    ("en", "Can you delete my duplicate product records?"),
+    ("en", "Please remove the size list from my product page."),
+    ("en", "Does it let me remove contacts from the list?"),
+    ("hi", "मेरी लिस्ट से यह प्रोडक्ट हटा दीजिए।"),
+    ("hi", "मेरा पुराना कैटलॉग हटा दीजिए।"),
+    ("te", "నా పాత ప్రొడక్ట్ జాబితా తొలగించండి."),
+    ("te", "నా కేటలాగ్ నుండి ఈ వస్తువు తీసివేయండి."),
+    ("mixed", "Meri product list se yeh item hata dijiye."),
+    ("mixed", "Mera purana catalog hata dijiye."),
+]
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    _BENIGN_REMOVALS,
+    ids=[f"{language}-{index}" for index, (language, _) in enumerate(_BENIGN_REMOVALS)],
+)
+def test_managing_your_own_catalogue_is_not_asking_to_be_left_alone(
+    language: str, text: str
+) -> None:
+    """The other half of widening opt-out, and the half that cannot be got wrong.
+
+    "Remove my product list" is the single most ordinary sentence a buyer of this product
+    can say, and it has the identical token shape to "remove me from your list". What
+    separates them is *whose* list - theirs to publish, or ours to contact them from - so
+    the template refuses any window carrying a product, catalogue or page word.
+
+    Measured: two of these ended the conversation permanently **before** this change, in
+    English, with `ordered=True`. Widening the detector was only allowed to happen because
+    it also closed those.
+    """
+
+    assert detect_safety_signals(text) == (), (language, text)

@@ -34,6 +34,10 @@ _OPT_OUT_PHRASES = (
     "don't call",
     "dont call",
     "stop calling",
+    # "stop calling" and "do not contact" were both listed and "stop contacting" was not,
+    # so the one phrasing that crosses them was unheard in every language at once.
+    "stop contacting",
+    "stop messaging",
     "do not contact",
     "don't contact",
     "dont contact",
@@ -48,11 +52,22 @@ _OPT_OUT_PHRASES = (
     "call mat",
     "phone mat",
     "dobara call mat",
+    # Hinglish knew how to refuse a call and not how to refuse contact, though English and
+    # Telugu both knew both.
+    "contact mat",
+    "contact karna band",
     # A bare "बंद करो" is deliberately absent: it is the ordinary Hindi way to ask for
     # a demo, a video or a screen share to be closed, and opt-out is unrecoverable.
     "कॉल मत",
     "फोन मत",
+    # `फ़ोन` with the nuqta is the other standard spelling of the same word and was absent,
+    # so a single codepoint decided whether a person's refusal was heard.
+    "फ़ोन मत",
     "दोबारा कॉल मत",
+    # Hindi could refuse a call and could not refuse contact, though English and Telugu
+    # both could. "संपर्क" is unambiguous in a way a bare "बंद करो" is not.
+    "संपर्क मत",
+    "संपर्क करना बंद",
     # Telugu negates a verb with the `-వద్దు` suffix rather than a separate particle, so
     # the unit that carries the refusal is the whole verb. A bare "వద్దు" is deliberately
     # absent for the same reason "बंद करो" is: on its own it declines whatever was last
@@ -60,6 +75,7 @@ _OPT_OUT_PHRASES = (
     "కాల్ చేయవద్దు",
     "ఫోన్ చేయవద్దు",
     "సంప్రదించవద్దు",
+    "సంప్రదించడం ఆపండి",
     "కాల్ చేయకండి",
     "నా నంబర్ తీసివేయండి",
 )
@@ -411,10 +427,51 @@ _RECURRENCE_MARKERS = frozenset(
     }
 )
 _REMOVAL_VERBS = frozenset(
-    {"remove", "delete", "erase", "unsubscribe", "hatao", "nikalo", "हटाओ", "निकालो"}
+    {
+        "remove",
+        "delete",
+        "erase",
+        "unsubscribe",
+        # Hindi and Hinglish imperatives are formed off the bare stem as often as off the
+        # `-ओ` imperative: "हटा दीजिए" and "hata dijiye" are the polite forms an adult
+        # actually uses, and only "हटाओ"/"hatao" were listed. A person asking politely to
+        # be removed was therefore not removed.
+        "hata",
+        "hatao",
+        "nikal",
+        "nikalo",
+        "हटा",
+        "हटाओ",
+        "हटाना",
+        "निकाल",
+        "निकालो",
+        # Telugu had no removal verb at all, which made this whole template unreachable in
+        # Telugu regardless of what the buyer said.
+        "తొలగించండి",
+        "తొలగించు",
+        "తీసివేయండి",
+        "తీసివేయి",
+    }
 )
 _SELF_REFERENCE = frozenset(
-    {"my", "me", "mine", "mera", "meri", "mere", "mujhe", "मेरा", "मेरी", "मुझे"}
+    {
+        "my",
+        "me",
+        "mine",
+        "mera",
+        "meri",
+        "mere",
+        "mujhe",
+        "मेरा",
+        "मेरी",
+        "मुझे",
+        # Telugu was absent here too. Self-reference is what separates "remove me from your
+        # list" from "remove the size list", so without it the template could not be made
+        # to fire safely in Telugu at all.
+        "నన్ను",
+        "నా",
+        "నాకు",
+    }
 )
 _TIME_DEFERRALS = frozenset(
     {
@@ -436,7 +493,92 @@ _TIME_DEFERRALS = frozenset(
     }
 )
 _CONTACT_RECORDS = frozenset(
-    {"number", "numbers", "list", "lists", "database", "records", "contacts", "नंबर", "सूची"}
+    {
+        "number",
+        "numbers",
+        "list",
+        "lists",
+        "database",
+        "records",
+        "contacts",
+        "नंबर",
+        "लिस्ट",
+        "सूची",
+        "जाबिता",
+        "నంబర్",
+        "జాబితా",
+        "లిస్ట్",
+    }
+)
+_CAPABILITY_MARKERS = frozenset(
+    {
+        # "Does it let me remove contacts from the list?" is a question about what the
+        # software being sold can do, not a request to be removed from anything. Asking
+        # whether a feature exists is the opposite of asking to be left alone, and this
+        # product's buyers ask it constantly - they are buying a system that manages lists.
+        #
+        # "can" is deliberately absent: "can you remove me from your list" is a real
+        # opt-out, and the politest one.
+        "let",
+        "lets",
+        "letting",
+        "allow",
+        "allows",
+        "allowing",
+        "able",
+        "इजाज़त",
+        "अनुमति",
+        "అనుమతి",
+    }
+)
+_OWNED_CONTENT = frozenset(
+    {
+        # This product builds product catalogues, so "remove my product list" is the most
+        # ordinary sentence a buyer can say - and it used to end the relationship
+        # permanently, because it carries a removal verb, a self-reference and a record
+        # noun exactly like a real opt-out does. What separates them is *which* list:
+        # theirs to publish, or ours to contact them from.
+        "product",
+        "products",
+        "catalog",
+        "catalogue",
+        "item",
+        "items",
+        "sku",
+        "skus",
+        "size",
+        "sizes",
+        "variant",
+        "variants",
+        "category",
+        "categories",
+        "inventory",
+        "stock",
+        "page",
+        "pages",
+        "homepage",
+        "site",
+        "website",
+        "footer",
+        "header",
+        "menu",
+        "प्रोडक्ट",
+        "कैटलॉग",
+        "सामान",
+        "साइज",
+        "श्रेणी",
+        "पेज",
+        "साइट",
+        "वेबसाइट",
+        "ప్రొడక్ట్",
+        "కేటలాగ్",
+        "వస్తువు",
+        "వస్తువులు",
+        "సైజు",
+        "పేజీ",
+        "సైట్",
+        "వెబ్‌సైట్",
+    }
 )
 _OPT_OUT_TRIGGERS = _TERMINATION_VERBS | _NEGATORS
 _OPT_OUT_TEMPLATES = (
@@ -454,11 +596,19 @@ _OPT_OUT_TEMPLATES = (
         ordered=True,
         reject_preceding=_INVITATION_MARKERS,
     ),
-    # "remove my number", "delete me from your list", "unsubscribe me from this list".
+    # "remove my number", "delete me from your list", "unsubscribe me from this list",
+    # "मुझे अपनी सूची से हटा दीजिए", "నన్ను మీ జాబితా నుండి తొలగించండి".
+    #
+    # Order is deliberately NOT required, for the reason the message template below already
+    # gives: Hindi, Hinglish and Telugu are verb-final, so the removal verb trails the
+    # record instead of leading it. Requiring order made this template English-only in
+    # practice - and the self-reference is what carries the "this is about me, not about a
+    # product list" reading, not the word order.
     _IntentTemplate(
         (_REMOVAL_VERBS, _SELF_REFERENCE, _CONTACT_RECORDS),
-        max_gaps=(2, 4),
-        ordered=True,
+        max_gaps=(4, 4),
+        reject_preceding=_CAPABILITY_MARKERS,
+        reject_within=_OWNED_CONTENT | _CAPABILITY_MARKERS,
     ),
     # "stop messaging me", "mujhe WhatsApp mat bhejna", "मुझे संदेश मत भेजो". Hindi and
     # Hinglish are verb-final, so the negator trails the channel and order cannot be
