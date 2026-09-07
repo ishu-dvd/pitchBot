@@ -2938,3 +2938,68 @@ only case and number endings allowed, and "a booking form for furniture" still r
 nothing.
 
 After: **11 / 11**, and all four languages fill all four slots.
+
+## Can a budget survive the trip to the deck? (PR 55)
+
+Two questions nobody had asked. Every deck this project had ever rendered was English, and
+the budget extractor required a digit.
+
+`probe_deck_and_budget.py` runs the same apparel call in four languages and prints the
+artefact the buyer actually receives, then reads a corpus of seventeen ways a budget is
+stated on an Indian sales call through both layers that must agree: `rules._BUDGET_PATTERN`
+captures the fact, `policy._BUDGET` decides whether it may leave the conversation.
+
+### The deck a Telugu buyer received
+
+The buyer said `మా బడ్జెట్ 150000, మూడు నెలల్లో సిద్ధం కావాలి` — a budget and a deadline.
+
+| Slide line | Before | After |
+| --- | --- | --- |
+| `బడ్జెట్` | ఇంకా చర్చించలేదు *(not yet discussed)* | 150000 |
+| `సమయం` | 3 months | 3 నెలలు |
+| Hindi `समय` | 3 months | 3 महीने |
+| Hinglish `Timeline` | 3 months | 3 mahine |
+
+The budget was extracted and stored, then dropped by the minimiser, whose cue list omitted
+`బడ్జెట్`. Nothing logged it. The conversation had already been proved multilingual - the
+deck had not, because no probe had ever printed one in a language other than English.
+
+### A budget said out loud
+
+Both columns are the same seventeen utterances; the second is what survives minimisation.
+
+| | heard | reached the deck |
+| --- | --- | --- |
+| before | 5 / 17 | 5 / 17 |
+| after | 17 / 17 | 17 / 17 |
+
+Every miss was a figure written as a word - which is every figure spoken in Hindi, Telugu
+or Hinglish, and most of them spoken in Indian English. `two lakh`, `do lakh`,
+`pachas hazaar`, `दो लाख`, `రెండు లక్షలు`.
+
+Fixing the extractor exposed a second defect in the minimiser, invisible until non-English
+text carrying vowels reached it:
+
+| stated | heard | reached the deck (before) |
+| --- | --- | --- |
+| हमारा बजट दो लाख है। | बजट दो लाख | **बजट द** |
+| बजट पचास हज़ार के आसपास है। | बजट पचास हज़ार | **बजट पच** |
+| మా బడ్జెట్ రెండు లక్షలు. | బడ్జెట్ రెండు లక్షలు | **బడ్జెట్ ర** |
+
+`[\w\s₹,.-]` truncates at the first combining mark, because Python defines `\w` by
+`str.isalnum()` and that is false for category `Mn` - and in these scripts the vowels *are*
+combining marks. Hindi had escaped notice for as long as a digit came before the first
+vowel sign, which is exactly what `बजट 150000` does.
+
+### What was deliberately not widened
+
+Refutations, kept because the next person will be tempted:
+
+| phrasing | read as a budget? | why |
+| --- | --- | --- |
+| "We sold five lakh units last year." | no | no cue; a quantity in a sentence about something else |
+| "Budget is one of our concerns." | no | a word number must name its scale |
+| "We spend five lakh on ads every year." | no | bare `spend` is what they already pay someone else |
+| "We can spend up to ten lakh." | **yes** | the modal is the difference |
+
+Missing a budget costs one more question. Inventing one prices a proposal.
