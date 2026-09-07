@@ -178,6 +178,55 @@ call; that needs a payment method.
 
 ---
 
+## The recipient number: the failure that returns 200
+
+Meta does **not** validate the `to` field, and this is the most dangerous property of the
+API. A malformed number is not rejected — it is rewritten and delivered.
+
+> "Plus signs (`+`), hyphens (`-`), parenthesis (`(`,`)`), and spaces are supported in send
+> message requests."
+>
+> "We highly recommend that you include both the plus sign and country calling code when
+> sending a message to a customer. **If the plus sign is omitted, your business phone
+> number's country calling code is prepended to the customer's phone number.** This can
+> result in undelivered or misdelivered messages."
+> — [Send messages](https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/send-messages), read 2026-09-07
+
+Meta's own table, for a business whose country calling code is `91`:
+
+| Sent as | Delivered to | Outcome |
+| --- | --- | --- |
+| `+16315551234` | `+16315551234` | Correct |
+| `+1 (631) 555-1234` | `+16315551234` | Correct |
+| `(631) 555-1234` | `+916315551234` | **Potentially wrong number** |
+| `1 (631) 555-1234` | `+9116315551234` | **Potentially wrong number** |
+
+So a formatting bug does not surface as an API error. It surfaces as a successful send to a
+stranger. Three consequences for any client:
+
+1. **Validate the destination yourself.** There is no published regex, no character class
+   and no length bound — `to` is a bare `string` in the schema, and the term *E.164* does
+   not appear in the Cloud API documentation at all. This repository enforces
+   `DESTINATION_PATTERN` before building the request, and `FakeGraphApi` reproduces the
+   coercion so the hazard stays executable rather than becoming a comment.
+2. **Persist `wa_id`, not what you sent.** Meta warns in both directions that `input` "may
+   not match `wa_id`" and vice versa, and inbound webhooks key off `wa_id`. Comparing the
+   two is the only documented way to notice at send time that a number was rewritten.
+3. **Expect legitimate rewrites.** *"For Brazil and Mexico, the extra added prefix of the
+   phone number may be modified by the Cloud API. This is a standard behavior of the system
+   and is not considered a bug."* Meta does not say which digit or in which direction, so
+   this is reported rather than treated as an error.
+
+> ⚠️ **Could not verify:** a dedicated error code for a malformed number — none is
+> documented, and generic `100` / `131009` / `135000` are not phone-format specific.
+> Code `131030` ("Recipient phone number not in allowed list"), cited earlier in this
+> repository as spec, returns **zero hits** on Meta's current error-code reference under
+> both the new and legacy URLs. It was a real historical development-mode code; treat it as
+> a recollection. `131026` *is* documented for undeliverable recipients but is overloaded
+> across three distinct causes.
+
+---
+
 ## What NOT to do
 
 **Do not automate the WhatsApp Business app or WhatsApp Web.** The Business Terms are

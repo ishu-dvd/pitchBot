@@ -2676,3 +2676,54 @@ clean. 4/4 mutations caught. Live server before and after.
 - **Deferred / unverified:** the commonly-cited "5 recipients" test-number limit could not
   be confirmed in current docs; nor a test-number expiry or a fixed free-message allowance.
   Recorded as unverified in docs/WHATSAPP.md rather than stated.
+
+### Wiring the WhatsApp client into the product, and hearing what a buyer asks for
+
+The framework existed but nothing used it: `preview_whatsapp` still built a
+`MockWhatsAppAdapter`. Putting the real client where the mock had always been found five
+defects, and measuring the extraction it feeds found the largest gap in the product so far.
+
+- **The label was a claim about the adapter, not about the message.** It returned the
+  constant "Mock WhatsApp preview prepared; nothing was sent." for every outcome. Driven
+  against the fake, that was wrong in both directions: a message that reached the API and
+  came back with a provider reference was still reported unsent, and a send refused for
+  cost produced a byte-identical label - so on the one path where the difference is money,
+  "delivered" and "refused" were indistinguishable. **No test asserted the label at all**,
+  which is why changing it broke exactly one assertion in 1,489 tests.
+  `ActionPreviewResult.executed` was declared, read into the event stream, and never set.
+- **The recipient defect was worse than it looked, and only research showed why.** Meta
+  does not reject a malformed `to`; it prepends the *business's* country calling code and
+  delivers. There is no published regex, no length bound, and "E.164" appears nowhere in
+  the Cloud API docs. So a formatting bug returns 200 and reaches a stranger. The client
+  now gates the destination itself, the fake reproduces the coercion so the hazard is
+  executable, and a rewritten recipient is reported by comparing the returned `wa_id`.
+  **The test fixture itself used the dangerous form** - `919876543210`, no plus sign.
+- **A previously published claim was wrong:** error code 131030 was cited as spec and
+  returns zero hits on Meta's current error-code reference under both the new and legacy
+  URLs. Marked as a recollection, not a citation.
+- **`inventory` was undetectable in all four languages.** Measured as a concept-by-language
+  matrix rather than a phrase list: its only non-obvious phrase was `stock management`,
+  which nobody says. `multilingual` was unreachable in Telugu and Hinglish. Of eleven
+  ordinary English phrasings, **nine registered nothing** - "we want to accept UPI", "can
+  buyers pay by card", "I need a product page". A lost feature degrades three artefacts at
+  once: the deck falls back to a default scope, `agenda_for` drops to `WEBSITE_DISCOVERY`,
+  and the follow-up omits the line.
+- **The opposite direction was worse: 10 of 15 false positives.** "We do not want online
+  payments, cash only" was recorded as a request for online payments - the deck then
+  proposed the exact thing the buyer had refused. Only a present-state guard existed and
+  its native-script entries were the compounds `अभी सब` / `ఇప్పటివరకు`, so the ordinary
+  "अभी हम..." and "ఇప్పుడు..." matched nothing: unguarded in two of four languages.
+- **Result:** 20/20 matrix, 10/11 natural phrasings, 14/15 clean. Mutation 22/22.
+- **One gap left open deliberately, with the evidence.** Catching "Can it be in Telugu as
+  well?" needs `in telugu` as a feature phrase, which fires on four of five ordinary
+  language-switch turns - a buyer asking to be *spoken to* in Hindi would be recorded as
+  ordering a bilingual website. A test pins the trade so it is not silently reversed.
+- **One false positive refuted rather than fixed.** "Stop sending me WhatsApp messages"
+  registers `whatsapp` when `extract_business_signals` is called directly, but the engine
+  returns on opt-out before extraction runs - verified end to end, so it is unreachable in
+  the product. The probe was measuring the function, not the product.
+- **The most serious mutation survivor was the default nobody tests.** Every test injects
+  its own contact resolver, so mutating the *default* to produce a plausible `+9199...`
+  number survived the whole suite - a simulator wired to the live client would have started
+  messaging strangers with CI green. Now asserted through the destination gate over 25 lead
+  ids, because the property is "no real handset can be reached at this".
